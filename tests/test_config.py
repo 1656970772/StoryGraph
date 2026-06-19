@@ -1,6 +1,22 @@
 import json
+from pathlib import Path
 
 from storygraph_lib.config import load_config
+
+
+ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_CONFIG = ROOT / "skill-src" / "storygraph" / "config" / "storygraph.default.json"
+
+
+def _string_values(value):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for nested in value.values():
+            yield from _string_values(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            yield from _string_values(nested)
 
 
 def test_default_config_is_portable_and_local_override_wins(tmp_path):
@@ -37,3 +53,79 @@ def test_config_check_command_is_registered(capsys):
 
     assert main(["config-check"]) == 0
     assert "graph_dir_suffix" in capsys.readouterr().out
+
+
+def test_real_default_config_does_not_contain_local_paths_or_test_inputs():
+    config = json.loads(DEFAULT_CONFIG.read_text(encoding="utf-8"))
+    banned_fragments = [
+        "E:/AI_Projects",
+        "E:\\AI_Projects",
+        "E:/Github_Projects",
+        "E:\\Github_Projects",
+        "C:/Users",
+        "C:\\Users",
+        "凡人修仙传.txt",
+        ".codex\\skills\\storygraph",
+        ".codex/skills/storygraph",
+    ]
+
+    offenders = [
+        (text, fragment)
+        for text in _string_values(config)
+        for fragment in banned_fragments
+        if fragment in text
+    ]
+
+    assert offenders == []
+
+
+def test_cli_overrides_win_after_local_override_and_keep_uncovered_defaults(tmp_path):
+    default = tmp_path / "storygraph.default.json"
+    local = tmp_path / "storygraph.local.json"
+    default.write_text(
+        json.dumps(
+            {
+                "paths": {"template_dir": None, "graphify_repo": None},
+                "agent_policy": {
+                    "max_parallel": 6,
+                    "enabled": True,
+                    "write_conflict_policy": "single-writer",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    local.write_text(
+        json.dumps(
+            {
+                "paths": {"template_dir": "local-templates"},
+                "agent_policy": {"max_parallel": 2},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(
+        default,
+        local_override=local,
+        cli_overrides={
+            "paths": {"template_dir": "cli-templates"},
+            "agent_policy": {"max_parallel": 1},
+        },
+    )
+
+    assert config["paths"]["template_dir"] == "cli-templates"
+    assert config["agent_policy"]["max_parallel"] == 1
+    assert config["paths"]["graphify_repo"] is None
+    assert config["agent_policy"]["enabled"] is True
+    assert config["agent_policy"]["write_conflict_policy"] == "single-writer"
+
+
+def test_config_check_uses_local_override(capsys, tmp_path):
+    from storygraph_lib.cli import main
+
+    local = tmp_path / "storygraph.local.json"
+    local.write_text(json.dumps({"graph_dir_suffix": ".local-storygraph"}), encoding="utf-8")
+
+    assert main(["config-check", "--local-override", str(local)]) == 0
+    assert ".local-storygraph" in capsys.readouterr().out
