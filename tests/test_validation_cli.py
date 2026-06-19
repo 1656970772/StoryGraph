@@ -1,3 +1,5 @@
+import ast
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -267,3 +269,138 @@ def test_storygraph_script_version_flag_remains_supported():
     )
     assert result.returncode == 0
     assert result.stdout.strip() == "storygraph 0.1.0"
+
+
+def test_config_check_accepts_config_and_preserves_explicit_missing_override_guard(capsys, tmp_path):
+    from storygraph_lib.cli import main
+
+    default = tmp_path / "storygraph.default.json"
+    default.write_text(json.dumps({"graph_dir_suffix": ".from-config"}), encoding="utf-8")
+    missing = tmp_path / "missing.local.json"
+
+    assert main(["config-check", "--config", str(default), "--local-override", str(missing)]) == 2
+    payload = ast.literal_eval(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["error"] == "local_override_missing"
+    assert payload["path"] == str(missing)
+
+
+def test_config_check_config_and_local_override_merge(capsys, tmp_path):
+    from storygraph_lib.cli import main
+
+    default = tmp_path / "storygraph.default.json"
+    default.write_text(json.dumps({"graph_dir_suffix": ".from-config"}), encoding="utf-8")
+    local = tmp_path / "storygraph.local.json"
+    local.write_text(json.dumps({"graph_dir_suffix": ".from-local"}), encoding="utf-8")
+
+    assert main(["config-check", "--config", str(default), "--local-override", str(local)]) == 0
+    payload = ast.literal_eval(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["graph_dir_suffix"] == ".from-local"
+
+
+def test_inspect_templates_accepts_config_without_losing_count_default_mapping_guard(
+    capsys, tmp_path
+):
+    from storygraph_lib.cli import main
+
+    template_dir = tmp_path / "templates"
+    template_dir.mkdir()
+    (template_dir / "可配置模板.md").write_text("# 可配置模板\n", encoding="utf-8")
+    config = tmp_path / "storygraph.default.json"
+    config.write_text(
+        json.dumps(
+            {
+                "graph_dir_suffix": ".storygraph",
+                "output_language": "zh-CN",
+                "template_discovery": {
+                    "glob": "*模板.md",
+                    "readme_index_file": "README.md",
+                    "exclude_files": ["README.md"],
+                    "readme_missing_policy": "warn",
+                },
+                "template_parser_rules": None,
+                "template_graph_mappings": {
+                    "default_mapping": {
+                        "graph_node_mapping": ["generic_node"],
+                        "graph_event_mapping": ["generic_event"],
+                        "graph_relation_mapping": ["generic_relation"],
+                    }
+                },
+                "status_enums": {
+                    "requirement_statuses": [
+                        "covered",
+                        "needs_review",
+                        "not_found_in_source",
+                    ]
+                },
+                "template_count_policy": {
+                    "expected_existing_templates": 1,
+                    "enforce_integration_count": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert main(["inspect-templates", "--config", str(config), "--template-dir", str(template_dir)]) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["template_count"] == 1
+    assert payload["count_matches_expected"] is True
+    assert payload["has_default_mapping"] is True
+    assert payload["error"] == "default_mapping_used"
+
+
+def test_validate_graph_cli_reports_missing_outputs_and_blocking_ledger(capsys, tmp_path):
+    from storygraph_lib.cli import main
+
+    graph_dir = tmp_path / "mini.storygraph"
+    (graph_dir / "coverage").mkdir(parents=True)
+    (graph_dir / "coverage" / "agent-run-ledger.json").write_text(
+        json.dumps(
+            [
+                {
+                    "run_id": "stage1-graph-extraction",
+                    "status": "failed",
+                    "errors": [{"code": "graphify_artifact_missing"}],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert main(["validate-graph", "--graph-dir", str(graph_dir)]) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert "missing:manifest.json" in payload["errors"]
+    assert "blocking_ledger:graphify_artifact_missing" in payload["errors"]
+
+
+def test_build_stage1_cli_rejects_missing_explicit_local_override_before_running_build(
+    capsys, tmp_path
+):
+    from storygraph_lib.cli import main
+
+    source = tmp_path / "mini.txt"
+    source.write_text("法宝", encoding="utf-8")
+    template_dir = tmp_path / "templates"
+    template_dir.mkdir()
+    missing = tmp_path / "storygraph.local.json"
+
+    assert (
+        main(
+            [
+                "build-stage1",
+                "--source",
+                str(source),
+                "--template-dir",
+                str(template_dir),
+                "--local-override",
+                str(missing),
+            ]
+        )
+        == 2
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["error"] == "local_override_missing"

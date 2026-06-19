@@ -1,12 +1,33 @@
 from pathlib import Path
 
 from .config import load_config
+from .stage1 import build_stage1_graph
 from .templates import TemplateDiscoveryError, build_requirement_matrix, discover_templates
-from .validation import validate_skill_tree
+from .validation import validate_graph_dir, validate_skill_tree
 
 
 def _default_config_path() -> Path:
     return Path(__file__).resolve().parents[2] / "config" / "storygraph.default.json"
+
+
+def _print_json(data: dict) -> None:
+    import json
+
+    print(json.dumps(data, ensure_ascii=False, indent=2))
+
+
+def _local_override_arg(args):
+    value = getattr(args, "local_override", None)
+    return Path(value) if value else None
+
+
+def _config_arg(args) -> Path:
+    value = getattr(args, "config", None)
+    return Path(value) if value else _default_config_path()
+
+
+def _missing_local_override_payload(local: Path) -> dict:
+    return {"ok": False, "error": "local_override_missing", "path": str(local)}
 
 
 def main(argv=None):
@@ -19,10 +40,20 @@ def main(argv=None):
     validate = sub.add_parser("validate-skill")
     validate.add_argument("--skill-root", default=str(Path(__file__).resolve().parents[2]))
     config_check = sub.add_parser("config-check")
+    config_check.add_argument("--config")
     config_check.add_argument("--local-override")
     inspect_templates = sub.add_parser("inspect-templates")
+    inspect_templates.add_argument("--config")
     inspect_templates.add_argument("--template-dir", required=True)
     inspect_templates.add_argument("--local-override")
+    build = sub.add_parser("build-stage1")
+    build.add_argument("--config")
+    build.add_argument("--local-override")
+    build.add_argument("--source", required=True)
+    build.add_argument("--template-dir", required=True)
+    build.add_argument("--graphify-repo")
+    validate_graph = sub.add_parser("validate-graph")
+    validate_graph.add_argument("--graph-dir", required=True)
     args = parser.parse_args(argv)
     if args.version:
         print("storygraph 0.1.0")
@@ -32,19 +63,19 @@ def main(argv=None):
         print({"ok": result.ok, "missing": result.missing})
         return 0 if result.ok else 2
     if args.command == "config-check":
-        local = Path(args.local_override) if args.local_override else None
+        local = _local_override_arg(args)
         if local and not local.exists():
-            print({"ok": False, "error": "local_override_missing", "path": str(local)})
+            print(_missing_local_override_payload(local))
             return 2
-        config = load_config(_default_config_path(), local_override=local)
+        config = load_config(_config_arg(args), local_override=local)
         print({"ok": True, "graph_dir_suffix": config["graph_dir_suffix"]})
         return 0
     if args.command == "inspect-templates":
-        local = Path(args.local_override) if args.local_override else None
+        local = _local_override_arg(args)
         if local and not local.exists():
             print(
                 json.dumps(
-                    {"ok": False, "error": "local_override_missing", "path": str(local)},
+                    _missing_local_override_payload(local),
                     ensure_ascii=False,
                 )
             )
@@ -58,7 +89,7 @@ def main(argv=None):
                 )
             )
             return 2
-        config = load_config(_default_config_path(), local_override=local)
+        config = load_config(_config_arg(args), local_override=local)
         discovery_config = config.get("template_discovery", {})
         try:
             discovery = discover_templates(
@@ -108,5 +139,22 @@ def main(argv=None):
         ):
             return 2
         return 0
+    if args.command == "build-stage1":
+        local = _local_override_arg(args)
+        if local and not local.exists():
+            _print_json(_missing_local_override_payload(local))
+            return 2
+        config = load_config(_config_arg(args), local_override=local)
+        config.setdefault("paths", {})
+        config["paths"]["template_dir"] = args.template_dir
+        if args.graphify_repo is not None:
+            config["paths"]["graphify_repo"] = args.graphify_repo
+        result = build_stage1_graph(Path(args.source), config)
+        _print_json(result)
+        return 0 if result.get("status") in {"success", "warning", "reused"} else 2
+    if args.command == "validate-graph":
+        result = validate_graph_dir(Path(args.graph_dir))
+        _print_json({"ok": result.ok, "errors": result.errors})
+        return 0 if result.ok else 2
     parser.print_usage()
     return 2
