@@ -1,5 +1,6 @@
 import json
 import sys
+from pathlib import Path
 
 from storygraph_lib.graphify_adapter import GraphifyAdapter
 
@@ -65,6 +66,48 @@ def test_adapter_invokes_configured_external_command_and_requires_artifacts(tmp_
     assert json.loads(result.graph_path.read_text(encoding="utf-8"))["metadata"]["fake"] is True
     assert (tmp_path / "out" / "GRAPH_REPORT.md").exists()
     assert (tmp_path / "out" / "graph.html").exists()
+
+
+def test_adapter_local_repo_mode_resolves_relative_output_dir_from_caller_cwd(
+    monkeypatch, tmp_path
+):
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    repo = tmp_path / "graphify"
+    repo.mkdir()
+    script = repo / "fake_graphify.py"
+    script.write_text(
+        "\n".join(
+            [
+                "import json, pathlib, sys",
+                "source = pathlib.Path(sys.argv[1])",
+                "out = pathlib.Path(sys.argv[2])",
+                "assert source.is_absolute()",
+                "assert out.is_absolute()",
+                "out.mkdir(parents=True, exist_ok=True)",
+                "(out / 'graph.json').write_text(json.dumps({'metadata': {'absolute_out': True}}), encoding='utf-8')",
+                "(out / 'GRAPH_REPORT.md').write_text('# Graph Report\\n', encoding='utf-8')",
+                "(out / 'graph.html').write_text('<!doctype html><title>graph</title>', encoding='utf-8')",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    source = caller / "novel.txt"
+    source.write_text("正文", encoding="utf-8")
+    monkeypatch.chdir(caller)
+    adapter = GraphifyAdapter(
+        graphify_repo=repo,
+        command=[sys.executable, "fake_graphify.py", "{source}", "{output_dir}"],
+        timeout_seconds=5,
+        mode="local-repo",
+    )
+
+    result = adapter.build_graph(Path("novel.txt"), Path("relative-out"))
+
+    assert result.ok is True
+    assert result.graph_path == caller / "relative-out" / "graph.json"
+    assert (caller / "relative-out" / "GRAPH_REPORT.md").exists()
+    assert not (repo / "relative-out").exists()
 
 
 def test_adapter_cli_mode_does_not_require_local_repo(tmp_path):

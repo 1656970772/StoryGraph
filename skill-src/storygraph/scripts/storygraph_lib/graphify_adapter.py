@@ -29,6 +29,9 @@ class GraphifyAdapter:
         self.mode = mode
 
     def build_graph(self, source_path: Path, output_dir: Path) -> GraphifyResult:
+        source_path = Path(source_path).resolve()
+        output_dir = Path(output_dir).resolve()
+
         if self.mode not in VALID_MODES:
             return GraphifyResult(
                 False,
@@ -41,9 +44,8 @@ class GraphifyAdapter:
         if isinstance(cwd, dict):
             return GraphifyResult(False, None, cwd, list(self.command))
 
-        output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        command = self._format_command(Path(source_path), output_dir)
+        command = self._format_command(source_path, output_dir)
 
         try:
             completed = subprocess.run(

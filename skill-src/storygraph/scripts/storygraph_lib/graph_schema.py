@@ -146,6 +146,7 @@ def _validate_node(
     for key in ["node_type", "evidence_ids", "supports_templates", "confidence", "verification_status"]:
         if key not in node:
             errors.append(f"node_missing:{node_id}:{key}")
+    _validate_source_locator("node", node_id, node, errors)
     _validate_evidence_refs("node", node_id, node.get("evidence_ids"), evidence_ids, errors)
     _validate_status_fields(node, enums, errors)
     _validate_supports("node", node_id, node.get("supports_templates"), enums, errors)
@@ -175,6 +176,7 @@ def _validate_edge(
             errors.append(f"edge_missing:{edge_id}:{key}")
     if edge.get("source") not in node_ids or edge.get("target") not in node_ids:
         errors.append(f"edge_unknown_node:{edge_id}")
+    _validate_source_locator("edge", edge_id, edge, errors)
     _validate_evidence_refs("edge", edge_id, edge.get("evidence_ids"), evidence_ids, errors)
     _validate_status_fields(edge, enums, errors)
     _validate_supports("edge", edge_id, edge.get("supports_templates"), enums, errors)
@@ -204,6 +206,7 @@ def _validate_event(
     participants = event.get("participants", [])
     if not isinstance(participants, list) or any(pid not in node_ids for pid in participants):
         errors.append(f"event_unknown_node:{event_id}")
+    _validate_source_locator("event", event_id, event, errors)
     _validate_evidence_refs("event", event_id, event.get("evidence_ids"), evidence_ids, errors)
     _validate_status_fields(event, enums, errors)
     _validate_supports("event", event_id, event.get("supports_templates"), enums, errors)
@@ -240,6 +243,17 @@ def _validate_evidence_refs(
         return
     if any(ref not in known_evidence_ids for ref in refs):
         errors.append(f"{owner}_unknown_evidence:{owner_id}")
+
+
+def _validate_source_locator(
+    owner: str, owner_id: object, item: dict[str, Any], errors: list[str]
+) -> None:
+    if not (_has_locator_value(item.get("source_location")) or _has_locator_value(item.get("source_range"))):
+        errors.append(f"{owner}_without_source_location:{owner_id}")
+
+
+def _has_locator_value(value: object) -> bool:
+    return value not in (None, "", [], {})
 
 
 def _validate_status_fields(

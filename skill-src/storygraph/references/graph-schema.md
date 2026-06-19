@@ -23,4 +23,4 @@ StoryGraph extension nodes, edges, events, and evidence records require:
 
 Graphify-native nodes, edges, and events may remain in the graph without StoryGraph-only fields before merge. Any node, edge, event, or evidence item created or modified by StoryGraph must pass the full StoryGraph validation contract.
 
-Deep validation requires StoryGraph-marked items to use stable ID prefixes, known node and evidence references, non-empty `supports_templates`, configured requirement statuses, configured confidence levels, and configured verification statuses.
+Deep validation requires StoryGraph-marked items to use stable ID prefixes, known node and evidence references, non-empty `supports_templates`, configured requirement statuses, configured confidence levels, and configured verification statuses. StoryGraph nodes, edges, and events must also carry `source_location` or `source_range`; missing source locators are reported as `<item>_without_source_location:<id>`.
