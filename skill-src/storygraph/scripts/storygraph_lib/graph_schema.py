@@ -21,6 +21,8 @@ REQUIRED_TOP_LEVEL_FIELDS = [
     "metadata",
 ]
 
+GRAPH_COLLECTION_FIELDS = ["nodes", "edges", "hyperedges", "events", "evidence_index"]
+
 STORYGRAPH_MARKERS = {
     "node_type",
     "edge_type",
@@ -40,16 +42,15 @@ class SchemaValidation:
 
 def merge_template_supplements(base: dict[str, Any], supplement: dict[str, Any]) -> dict[str, Any]:
     graph = deepcopy(base)
-    graph.setdefault("nodes", [])
-    graph.setdefault("edges", [])
-    graph.setdefault("hyperedges", [])
-    graph.setdefault("events", [])
-    graph.setdefault("evidence_index", [])
-    graph.setdefault("metadata", {})
+    for key in GRAPH_COLLECTION_FIELDS:
+        if not isinstance(graph.get(key), list):
+            graph[key] = []
+    if not isinstance(graph.get("metadata"), dict):
+        graph["metadata"] = {}
     graph.setdefault("schema_version", "1.0")
     graph.setdefault(
         "graphify_schema_version",
-        graph.get("metadata", {}).get("graphify_schema_version", "unknown"),
+        graph["metadata"].get("graphify_schema_version", "unknown"),
     )
     graph.setdefault("storygraph_schema_version", "1.0")
 
@@ -58,6 +59,8 @@ def merge_template_supplements(base: dict[str, Any], supplement: dict[str, Any])
     anonymous_nodes: list[dict[str, Any]] = []
     for node in graph["nodes"]:
         copied = deepcopy(node)
+        if not isinstance(copied, dict):
+            continue
         node_id = copied.get("id")
         if not node_id:
             anonymous_nodes.append(copied)
@@ -65,8 +68,10 @@ def merge_template_supplements(base: dict[str, Any], supplement: dict[str, Any])
         merged_nodes[node_id] = copied
         node_order.append(node_id)
 
-    for node in supplement.get("nodes", []):
+    for node in _safe_collection(supplement.get("nodes")):
         copied = deepcopy(node)
+        if not isinstance(copied, dict):
+            continue
         node_id = copied.get("id")
         if not node_id:
             anonymous_nodes.append(copied)
@@ -76,22 +81,22 @@ def merge_template_supplements(base: dict[str, Any], supplement: dict[str, Any])
         merged_nodes[node_id] = {**merged_nodes.get(node_id, {}), **copied}
 
     graph["nodes"] = anonymous_nodes + [merged_nodes[node_id] for node_id in node_order]
-    graph["edges"].extend(deepcopy(supplement.get("edges", [])))
-    graph["events"].extend(deepcopy(supplement.get("events", [])))
-    graph["evidence_index"].extend(deepcopy(supplement.get("evidence_index", [])))
+    graph["edges"].extend(deepcopy(_safe_collection(supplement.get("edges"))))
+    graph["events"].extend(deepcopy(_safe_collection(supplement.get("events"))))
+    graph["evidence_index"].extend(deepcopy(_safe_collection(supplement.get("evidence_index"))))
     if "hyperedges" in supplement:
-        graph["hyperedges"].extend(deepcopy(supplement.get("hyperedges", [])))
+        graph["hyperedges"].extend(deepcopy(_safe_collection(supplement.get("hyperedges"))))
     return graph
 
 
 def validate_canonical_graph(
     graph: dict[str, Any], status_enums: dict[str, list[str]] | None = None
 ) -> SchemaValidation:
-    enums = _status_enums(status_enums)
     errors = [f"missing:{key}" for key in REQUIRED_TOP_LEVEL_FIELDS if key not in graph]
+    enums = _status_enums(status_enums, errors)
     collections = {
         key: _graph_collection(graph, key, errors)
-        for key in ["nodes", "edges", "hyperedges", "events", "evidence_index"]
+        for key in GRAPH_COLLECTION_FIELDS
     }
     evidence_ids = {
         evidence.get("evidence_id")
@@ -134,11 +139,22 @@ def _graph_collection(graph: dict[str, Any], key: str, errors: list[str]) -> lis
     return values
 
 
-def _status_enums(status_enums: dict[str, list[str]] | None) -> dict[str, set[str]]:
+def _safe_collection(values: object) -> list:
+    return values if isinstance(values, list) else []
+
+
+def _status_enums(status_enums: dict[str, list[str]] | None, errors: list[str]) -> dict[str, set[str]]:
     merged = {key: list(value) for key, value in DEFAULT_STATUS_ENUMS.items()}
-    if status_enums:
-        for key, value in status_enums.items():
-            merged[key] = list(value)
+    if status_enums is None:
+        return {key: set(value) for key, value in merged.items()}
+    if not isinstance(status_enums, dict):
+        errors.append("bad_status_enums")
+        return {key: set(value) for key, value in merged.items()}
+    for key, value in status_enums.items():
+        if not isinstance(value, list):
+            errors.append(f"bad_status_enum:{key}")
+            continue
+        merged[key] = list(value)
     return {key: set(value) for key, value in merged.items()}
 
 

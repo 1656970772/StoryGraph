@@ -678,6 +678,47 @@ def test_validate_graph_dir_malformed_agent_ledger_records_return_errors_without
     assert "invalid_path_list:stage1-graph-extraction:write_scope" in result.errors
 
 
+def test_validate_graph_dir_failed_ledger_bad_errors_shape_returns_errors_without_throwing(
+    tmp_path,
+):
+    from storygraph_lib.validation import validate_graph_dir
+
+    graph_dir = tmp_path / "mini.storygraph"
+    _write_minimal_valid_graph_dir(
+        graph_dir,
+        agent_ledger=[
+            {
+                "run_id": "stage1-graph-extraction",
+                "agent_role": "图抽取",
+                "status": "failed",
+                "errors": 1,
+                "output_paths": [],
+                "write_scope": [],
+            }
+        ],
+    )
+
+    result = validate_graph_dir(graph_dir)
+
+    assert result.ok is False
+    assert "bad_agent_ledger_errors:stage1-graph-extraction" in result.errors
+    assert "blocking_ledger:unknown" in result.errors
+
+
+def test_validate_graph_dir_manifest_stage_status_bad_shape_returns_errors_without_throwing(
+    tmp_path,
+):
+    from storygraph_lib.validation import validate_graph_dir
+
+    graph_dir = tmp_path / "mini.storygraph"
+    _write_minimal_valid_graph_dir(graph_dir, manifest={"stage_status": "success"})
+
+    result = validate_graph_dir(graph_dir)
+
+    assert result.ok is False
+    assert "bad_manifest_stage_status" in result.errors
+
+
 def test_validate_graph_dir_malformed_requirement_shapes_return_errors_without_throwing(
     tmp_path,
 ):

@@ -51,7 +51,7 @@ def validate_graph_dir(graph_dir: Path) -> GraphDirValidation:
     for record in agent_ledger:
         if not isinstance(record, dict) or record.get("status") != "failed":
             continue
-        record_errors = record.get("errors") or [{"code": "unknown"}]
+        record_errors = _safe_agent_ledger_errors(record, errors)
         for error in record_errors:
             code = error.get("code", "unknown") if isinstance(error, dict) else "unknown"
             errors.append(f"blocking_ledger:{code}")
@@ -102,7 +102,7 @@ def validate_graph_dir(graph_dir: Path) -> GraphDirValidation:
     errors.extend(_validate_chunks(manifest, chunks))
     errors.extend(_validate_evidence_links(graph, coverage_evidence))
 
-    stage1_status = manifest.get("stage_status", {}).get("stage1")
+    stage1_status = _stage1_status(manifest, errors)
     if stage1_status != "success":
         errors.append(f"stage1_not_success:{stage1_status}")
     if stage1_status == "success":
@@ -114,6 +114,28 @@ def validate_graph_dir(graph_dir: Path) -> GraphDirValidation:
         errors.append("agent_run_not_completed")
 
     return GraphDirValidation(ok=not errors, errors=_dedupe(errors))
+
+
+def _safe_agent_ledger_errors(record: dict, errors: list[str]) -> list:
+    record_errors = record.get("errors")
+    if record_errors in (None, []):
+        return [{"code": "unknown"}]
+    if not isinstance(record_errors, list):
+        errors.append(f"bad_agent_ledger_errors:{_agent_record_owner(record)}")
+        return [{"code": "unknown"}]
+    return record_errors
+
+
+def _agent_record_owner(record: dict) -> str:
+    return str(record.get("run_id") or record.get("agent_role") or "unknown")
+
+
+def _stage1_status(manifest: dict, errors: list[str]):
+    stage_status = manifest.get("stage_status", {})
+    if not isinstance(stage_status, dict):
+        errors.append("bad_manifest_stage_status")
+        return None
+    return stage_status.get("stage1")
 
 
 def _validate_requirements_readiness(

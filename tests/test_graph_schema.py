@@ -102,6 +102,25 @@ def test_deep_validation_reports_malformed_collections_without_throwing():
     assert "bad_graph_collection:evidence_index" in result.errors
 
 
+def test_deep_validation_reports_malformed_status_enums_without_throwing():
+    graph = {
+        "schema_version": "1.0",
+        "graphify_schema_version": "x",
+        "storygraph_schema_version": "1.0",
+        "nodes": [],
+        "edges": [],
+        "hyperedges": [],
+        "events": [],
+        "evidence_index": [],
+        "metadata": {},
+    }
+
+    result = validate_canonical_graph(graph, {"verification_statuses": 1})
+
+    assert result.ok is False
+    assert "bad_status_enum:verification_statuses" in result.errors
+
+
 def test_merge_template_supplements_preserves_graphify_fields_and_requires_non_empty_supports():
     base = {
         "nodes": [{"id": "node:person:abc", "label": "韩立"}],
@@ -156,6 +175,27 @@ def test_merge_template_supplements_preserves_graphify_fields_and_requires_non_e
     assert graph["graphify_schema_version"] == "x"
     assert graph["storygraph_schema_version"] == "1.0"
     assert validate_canonical_graph(graph).ok is True
+
+
+def test_merge_template_supplements_tolerates_malformed_optional_collections():
+    base = {
+        "nodes": [],
+        "edges": None,
+        "events": None,
+        "evidence_index": None,
+        "metadata": "bad",
+    }
+    supplement = {"nodes": None, "edges": None, "events": None, "evidence_index": None}
+
+    graph = merge_template_supplements(base, supplement)
+
+    assert graph["metadata"] == {}
+    assert graph["graphify_schema_version"] == "unknown"
+    assert graph["nodes"] == []
+    assert graph["edges"] == []
+    assert graph["events"] == []
+    assert graph["evidence_index"] == []
+    assert graph["hyperedges"] == []
 
 
 def test_deep_validation_rejects_bad_edges_events_evidence_and_unknown_evidence():
