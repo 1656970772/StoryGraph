@@ -5,9 +5,29 @@ from pathlib import Path
 from .paths import NovelContext
 
 
+DEFAULT_STAGE_STATUS = {"stage1": "initialized", "stage2": "not_requested"}
+
+
+def _load_existing_manifest(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(existing, dict):
+        return {}
+    return existing
+
+
 def write_manifest(ctx: NovelContext, config_hash: str, graphify_source: str) -> Path:
+    ctx.graph_dir.mkdir(parents=True, exist_ok=True)
     path = ctx.graph_dir / "manifest.json"
+    existing = _load_existing_manifest(path)
     now = datetime.now(timezone.utc).isoformat()
+    stage_status = existing.get("stage_status", DEFAULT_STAGE_STATUS)
+    if not isinstance(stage_status, dict):
+        stage_status = DEFAULT_STAGE_STATUS
     data = {
         "source_path": str(ctx.source_path),
         "source_hash": ctx.source_hash,
@@ -17,9 +37,9 @@ def write_manifest(ctx: NovelContext, config_hash: str, graphify_source: str) ->
         "config_hash": config_hash,
         "graphify_repo": graphify_source,
         "graphify_version_or_commit": None,
-        "created_at": now,
+        "created_at": existing.get("created_at") or now,
         "updated_at": now,
-        "stage_status": {"stage1": "initialized", "stage2": "not_requested"},
+        "stage_status": stage_status,
     }
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
