@@ -219,15 +219,26 @@ def _validate_chunks(manifest: dict, chunks: list[dict]) -> list[str]:
 
 def _validate_evidence_links(graph: dict, coverage_evidence: list[dict]) -> list[str]:
     errors: list[str] = []
+    graph_evidence = graph.get("evidence_index", [])
+    if not isinstance(graph_evidence, list):
+        errors.append("bad_graph_collection:evidence_index")
+        graph_evidence = []
     graph_evidence_ids = {
-        item.get("evidence_id") for item in graph.get("evidence_index", []) if isinstance(item, dict)
+        item.get("evidence_id") for item in graph_evidence if isinstance(item, dict)
     }
     coverage_evidence_ids = {
         item.get("evidence_id") for item in coverage_evidence if isinstance(item, dict)
     }
     if graph_evidence_ids != coverage_evidence_ids:
         errors.append("graph_coverage_evidence_mismatch")
-    for item in graph.get("nodes", []) + graph.get("edges", []) + graph.get("events", []):
+    graph_items = []
+    for key in ["nodes", "edges", "events"]:
+        values = graph.get(key, [])
+        if not isinstance(values, list):
+            errors.append(f"bad_graph_collection:{key}")
+            continue
+        graph_items.extend(values)
+    for item in graph_items:
         if not isinstance(item, dict):
             continue
         for evidence_id in item.get("evidence_ids", []):

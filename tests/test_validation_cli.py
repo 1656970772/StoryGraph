@@ -492,6 +492,75 @@ def test_validate_graph_dir_malformed_ledgers_return_errors_without_throwing(tmp
     assert "bad_readiness_status_record:坏记录" in result.errors
 
 
+def test_validate_graph_dir_malformed_graph_collections_return_errors_without_throwing(
+    tmp_path,
+):
+    from storygraph_lib.validation import validate_graph_dir
+
+    graph_dir = tmp_path / "mini.storygraph"
+    (graph_dir / "graphify-out").mkdir(parents=True)
+    (graph_dir / "requirements").mkdir()
+    (graph_dir / "coverage").mkdir()
+    source = tmp_path / "mini.txt"
+    source.write_text("法宝", encoding="utf-8")
+    (graph_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "source_path": str(source),
+                "source_size": len("法宝"),
+                "stage_status": {"stage1": "success"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (graph_dir / "graphify-out" / "graph.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "graphify_schema_version": "test",
+                "storygraph_schema_version": "1.0",
+                "nodes": {},
+                "edges": [],
+                "hyperedges": [],
+                "events": [],
+                "evidence_index": {},
+                "metadata": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (graph_dir / "graphify-out" / "GRAPH_REPORT.md").write_text("# report\n", encoding="utf-8")
+    (graph_dir / "graphify-out" / "graph.html").write_text("<!doctype html>", encoding="utf-8")
+    (graph_dir / "requirements" / "template-requirements.json").write_text(
+        json.dumps({"template_count": 0, "templates": []}), encoding="utf-8"
+    )
+    (graph_dir / "coverage" / "chunk-ledger.json").write_text(
+        json.dumps(
+            [
+                {
+                    "chunk_id": "chunk-0001",
+                    "source_range": [0, len("法宝")],
+                    "extraction_status": "completed",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (graph_dir / "coverage" / "evidence-index.json").write_text("[]", encoding="utf-8")
+    (graph_dir / "coverage" / "template-readiness.json").write_text("[]", encoding="utf-8")
+    (graph_dir / "coverage" / "agent-run-ledger.json").write_text(
+        json.dumps([{"run_id": "run-1", "status": "completed", "output_paths": [], "write_scope": []}]),
+        encoding="utf-8",
+    )
+    (graph_dir / "coverage" / "gap-report.md").write_text("", encoding="utf-8")
+
+    result = validate_graph_dir(graph_dir)
+
+    assert result.ok is False
+    assert "bad_graph_collection:nodes" in result.errors
+    assert "bad_graph_collection:evidence_index" in result.errors
+
+
 def test_build_stage1_cli_rejects_missing_explicit_local_override_before_running_build(
     capsys, tmp_path
 ):
