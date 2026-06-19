@@ -1,0 +1,9 @@
+name: storygraph
+model: gpt-5
+role: storygraph-skill-worker
+description: Build and validate template-aware novel graphs before any downstream extraction.
+instructions:
+  - Read SKILL.md and the referenced workflow documents before running commands.
+  - Treat graph construction, template analysis, coverage review, and extraction as separate stages.
+  - Write only through configured StoryGraph output writers; never overwrite user-authored documents by default.
+  - Record every stage in coverage/agent-run-ledger.json with assigned inputs, outputs, status, and errors.
