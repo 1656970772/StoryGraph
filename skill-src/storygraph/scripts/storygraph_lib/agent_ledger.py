@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from hashlib import sha256
-import json
 from pathlib import Path
 from typing import Iterable
 
@@ -14,59 +12,79 @@ class LedgerValidation:
 
 
 def make_agent_run_record(
-    role: str,
-    input: Iterable[str | Path] | str | Path,
-    output: Iterable[str | Path] | str | Path,
+    run_id: str,
+    agent_role: str,
+    stage: str,
+    chunk_ids: Iterable[str],
+    template_names: Iterable[str],
+    input_paths: Iterable[str | Path] | str | Path,
+    output_paths: Iterable[str | Path] | str | Path,
     write_scope: Iterable[str | Path] | str | Path,
-    status: str = "pending",
-    merge_owner: str = "single-writer",
 ) -> dict:
-    record = {
-        "role": role,
-        "input": _path_list(input),
-        "output": _path_list(output),
+    return {
+        "run_id": run_id,
+        "agent_role": agent_role,
+        "stage": stage,
+        "assigned_chunk_ids": list(chunk_ids),
+        "assigned_template_names": list(template_names),
+        "input_paths": _path_list(input_paths),
+        "output_paths": _path_list(output_paths),
         "write_scope": _path_list(write_scope),
-        "status": status,
-        "merge_owner": merge_owner,
+        "status": "pending",
+        "errors": [],
+        "merge_owner": "single-writer",
+        "reviewer_status": "pending",
+        "started_at": None,
+        "finished_at": None,
     }
-    record["run_id"] = _run_id(record)
-    return record
 
 
-def make_stage_agent_records(source_path: str | Path, graph_dir: str | Path) -> list[dict]:
-    source = _path_text(source_path)
-    graph = _path_text(graph_dir)
+def make_stage_agent_records(chunk_ids: Iterable[str], template_names: Iterable[str]) -> list[dict]:
+    chunks = list(chunk_ids)
+    templates = list(template_names)
     return [
         make_agent_run_record(
-            role="模板需求分析",
-            input=[source],
-            output=["requirements/template-requirements.json"],
-            write_scope=["requirements/template-requirements.json"],
+            "stage-1-template-requirements",
+            "模板需求分析",
+            "stage-1",
+            chunks,
+            templates,
+            ["templates"],
+            ["requirements/template-requirements.json"],
+            ["requirements/template-requirements.json"],
         ),
         make_agent_run_record(
-            role="图抽取",
-            input=[source, "requirements/template-requirements.json"],
-            output=[
+            "stage-1-graph-extraction",
+            "图抽取",
+            "stage-1",
+            chunks,
+            templates,
+            ["source", "requirements/template-requirements.json"],
+            [
                 "graphify-out/graph.json",
                 "graphify-out/GRAPH_REPORT.md",
                 "graphify-out/graph.html",
             ],
-            write_scope=[
+            [
                 "graphify-out/graph.json",
                 "graphify-out/GRAPH_REPORT.md",
                 "graphify-out/graph.html",
             ],
         ),
         make_agent_run_record(
-            role="覆盖审查",
-            input=[source, "requirements/template-requirements.json", "graphify-out/graph.json"],
-            output=[
+            "stage-1-coverage-review",
+            "覆盖审查",
+            "stage-1",
+            chunks,
+            templates,
+            ["source", "requirements/template-requirements.json", "graphify-out/graph.json"],
+            [
                 "coverage/chunk-ledger.json",
                 "coverage/evidence-index.json",
                 "coverage/template-readiness.json",
                 "coverage/gap-report.md",
             ],
-            write_scope=[
+            [
                 "coverage/chunk-ledger.json",
                 "coverage/evidence-index.json",
                 "coverage/template-readiness.json",
@@ -74,14 +92,19 @@ def make_stage_agent_records(source_path: str | Path, graph_dir: str | Path) -> 
             ],
         ),
         make_agent_run_record(
-            role="质量审查",
-            input=[
-                graph,
-                "requirements/template-requirements.json",
+            "stage-1-quality-review",
+            "质量审查",
+            "stage-1",
+            chunks,
+            templates,
+            [
+                "graphify-out/graph.json",
+                "coverage/evidence-index.json",
                 "coverage/template-readiness.json",
+                "coverage/gap-report.md",
             ],
-            output=["coverage/agent-run-ledger.json"],
-            write_scope=["coverage/agent-run-ledger.json"],
+            ["coverage/agent-run-ledger.json"],
+            ["coverage/agent-run-ledger.json"],
         ),
     ]
 
@@ -90,20 +113,35 @@ def validate_single_writer(records: Iterable[dict]) -> LedgerValidation:
     output_owners: dict[str, str] = {}
     scope_owners: dict[str, str] = {}
     errors: list[str] = []
+    normalized_records = []
     for record in records:
-        role = str(record.get("role", "unknown"))
-        for output_path in _path_list(record.get("output", [])):
+        owner = str(record.get("run_id") or record.get("agent_role") or "unknown")
+        outputs = _path_list(record.get("output_paths", []))
+        scopes = _path_list(record.get("write_scope", []))
+        normalized_records.append((owner, outputs, scopes))
+        for output_path in outputs:
             if output_path in output_owners:
                 errors.append(f"duplicate_output:{output_path}")
-            output_owners[output_path] = role
-        for scope in _path_list(record.get("write_scope", [])):
+            output_owners[output_path] = owner
+        for scope in scopes:
             if scope in scope_owners:
                 errors.append(f"write_conflict:{scope}")
-            scope_owners[scope] = role
+            scope_owners[scope] = owner
+
+    for output_owner, outputs, _ in normalized_records:
+        for output_path in outputs:
+            for scope_owner, _, scopes in normalized_records:
+                if output_owner != scope_owner and output_path in scopes:
+                    conflict = f"write_conflict:{output_path}"
+                    if conflict not in errors:
+                        errors.append(conflict)
+
     return LedgerValidation(ok=not errors, errors=errors)
 
 
 def _path_list(values: Iterable[str | Path] | str | Path) -> list[str]:
+    if values is None:
+        return []
     if isinstance(values, (str, Path)):
         return [_path_text(values)]
     return [_path_text(value) for value in values]
@@ -111,8 +149,3 @@ def _path_list(values: Iterable[str | Path] | str | Path) -> list[str]:
 
 def _path_text(value: str | Path) -> str:
     return Path(value).as_posix() if isinstance(value, Path) else str(value).replace("\\", "/")
-
-
-def _run_id(record: dict) -> str:
-    payload = json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return f"agent-run:{sha256(payload.encode('utf-8')).hexdigest()[:16]}"
