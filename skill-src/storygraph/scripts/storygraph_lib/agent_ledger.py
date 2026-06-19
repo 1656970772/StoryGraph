@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+from .output_writer import OutputWriteError, normalize_relative_output_path
+
 
 @dataclass(frozen=True)
 class LedgerValidation:
@@ -116,8 +118,10 @@ def validate_single_writer(records: Iterable[dict]) -> LedgerValidation:
     normalized_records = []
     for record in records:
         owner = str(record.get("run_id") or record.get("agent_role") or "unknown")
-        outputs = _path_list(record.get("output_paths", []))
-        scopes = _path_list(record.get("write_scope", []))
+        outputs, output_errors = _safe_path_list(record.get("output_paths", []))
+        scopes, scope_errors = _safe_path_list(record.get("write_scope", []))
+        errors.extend(output_errors)
+        errors.extend(scope_errors)
         normalized_records.append((owner, outputs, scopes))
         for output_path in outputs:
             if output_path in output_owners:
@@ -149,3 +153,14 @@ def _path_list(values: Iterable[str | Path] | str | Path) -> list[str]:
 
 def _path_text(value: str | Path) -> str:
     return Path(value).as_posix() if isinstance(value, Path) else str(value).replace("\\", "/")
+
+
+def _safe_path_list(values: Iterable[str | Path] | str | Path) -> tuple[list[str], list[str]]:
+    normalized = []
+    errors = []
+    for value in _path_list(values):
+        try:
+            normalized.append(normalize_relative_output_path(value))
+        except OutputWriteError:
+            errors.append(f"invalid_path:{value}")
+    return normalized, errors

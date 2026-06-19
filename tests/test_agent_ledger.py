@@ -82,6 +82,59 @@ def test_validate_single_writer_detects_duplicate_outputs_write_scopes_and_cross
     assert "write_conflict:coverage/gap-report.md" in result.errors
 
 
+def test_validate_single_writer_normalizes_relative_paths_before_conflict_checks():
+    records = [
+        make_agent_run_record(
+            "run-a",
+            "覆盖审查",
+            "stage-1",
+            ["chunk-0001"],
+            ["法宝分析"],
+            ["requirements/template-requirements.json"],
+            ["coverage/./x.json"],
+            ["coverage\\x.json"],
+        ),
+        make_agent_run_record(
+            "run-b",
+            "质量审查",
+            "stage-1",
+            ["chunk-0002"],
+            ["人物分析"],
+            ["graphify-out/graph.json"],
+            ["coverage/x.json"],
+            ["coverage/./x.json"],
+        ),
+    ]
+
+    result = validate_single_writer(records)
+
+    assert result.ok is False
+    assert "duplicate_output:coverage/x.json" in result.errors
+    assert "write_conflict:coverage/x.json" in result.errors
+
+
+def test_validate_single_writer_reports_absolute_and_out_of_bounds_paths():
+    records = [
+        make_agent_run_record(
+            "run-bad",
+            "覆盖审查",
+            "stage-1",
+            ["chunk-0001"],
+            ["法宝分析"],
+            ["requirements/template-requirements.json"],
+            ["C:/tmp/x.json", "../x.json"],
+            ["/coverage/x.json"],
+        )
+    ]
+
+    result = validate_single_writer(records)
+
+    assert result.ok is False
+    assert "invalid_path:C:/tmp/x.json" in result.errors
+    assert "invalid_path:../x.json" in result.errors
+    assert "invalid_path:/coverage/x.json" in result.errors
+
+
 def test_make_stage_agent_records_returns_required_roles_and_io_scope():
     records = make_stage_agent_records(
         chunk_ids=["chunk-0001", "chunk-0002"],
@@ -129,3 +182,19 @@ def test_output_writer_allows_managed_outputs_and_rejects_unmanaged_outputs(tmp_
         writer.write_json("coverage/unmanaged.json", {})
     with pytest.raises(OutputWriteError, match="duplicate_write"):
         writer.write_json("coverage/chunk-ledger.json", {"again": True})
+
+
+def test_output_writer_rejects_unsafe_managed_and_write_paths(tmp_path):
+    unsafe_paths = ["/coverage/x.json", "C:/tmp/x.json", "../x.json"]
+    for unsafe_path in unsafe_paths:
+        with pytest.raises(OutputWriteError, match="unmanaged_output"):
+            OutputWriter(tmp_path, [unsafe_path])
+
+    writer = OutputWriter(tmp_path, ["coverage/x.json"])
+    legal_path = writer.write_json("coverage/x.json", {"ok": True})
+
+    assert legal_path == tmp_path / "coverage" / "x.json"
+    for unsafe_path in unsafe_paths:
+        unsafe_writer = OutputWriter(tmp_path, ["coverage/x.json"])
+        with pytest.raises(OutputWriteError, match="unmanaged_output"):
+            unsafe_writer.write_json(unsafe_path, {"ok": False})

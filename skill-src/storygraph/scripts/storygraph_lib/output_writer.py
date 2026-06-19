@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 
@@ -15,7 +15,8 @@ class OutputWriteError(ValueError):
 class OutputWriter:
     def __init__(self, graph_dir: str | Path, managed_outputs: list[str | Path]):
         self.graph_dir = Path(graph_dir)
-        self.managed_outputs = {_normalize_output_path(path) for path in managed_outputs}
+        self._resolved_graph_dir = self.graph_dir.resolve()
+        self.managed_outputs = {normalize_relative_output_path(path) for path in managed_outputs}
         self._written: set[str] = set()
 
     def write_json(self, relative_path: str | Path, data: Any) -> Path:
@@ -34,18 +35,44 @@ class OutputWriter:
         return path
 
     def _managed_path(self, relative_path: str | Path) -> Path:
-        normalized = _normalize_output_path(relative_path)
+        normalized = normalize_relative_output_path(relative_path)
         if normalized not in self.managed_outputs:
             raise OutputWriteError("unmanaged_output", normalized)
         if normalized in self._written:
             raise OutputWriteError("duplicate_write", normalized)
+        target = (self.graph_dir / Path(*normalized.split("/"))).resolve()
+        if not _is_within(target, self._resolved_graph_dir):
+            raise OutputWriteError("unmanaged_output", str(relative_path))
         self._written.add(normalized)
-        return self.graph_dir / Path(*normalized.split("/"))
+        return target
 
 
-def _normalize_output_path(path: str | Path) -> str:
-    candidate = Path(path)
-    parts = candidate.parts
-    if candidate.is_absolute() or ".." in parts or not parts:
+def normalize_relative_output_path(path: str | Path) -> str:
+    raw = str(path)
+    if not raw:
+        raise OutputWriteError("unmanaged_output", raw)
+    windows_path = PureWindowsPath(raw)
+    posix_path = PurePosixPath(raw.replace("\\", "/"))
+    if (
+        windows_path.drive
+        or windows_path.root
+        or windows_path.anchor
+        or posix_path.root
+        or posix_path.anchor
+    ):
+        raise OutputWriteError("unmanaged_output", raw)
+
+    normalized_parts = []
+    for part in raw.replace("\\", "/").split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            raise OutputWriteError("unmanaged_output", raw)
+        normalized_parts.append(part)
+    if not normalized_parts:
         raise OutputWriteError("unmanaged_output", str(path))
-    return "/".join(parts)
+    return "/".join(normalized_parts)
+
+
+def _is_within(target: Path, root: Path) -> bool:
+    return target == root or target.is_relative_to(root)
