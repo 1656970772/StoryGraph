@@ -561,6 +561,197 @@ def test_validate_graph_dir_malformed_graph_collections_return_errors_without_th
     assert "bad_graph_collection:evidence_index" in result.errors
 
 
+def test_validate_graph_dir_malformed_requirement_shapes_return_errors_without_throwing(
+    tmp_path,
+):
+    from storygraph_lib.validation import validate_graph_dir
+
+    graph_dir = tmp_path / "mini.storygraph"
+    _write_minimal_valid_graph_dir(
+        graph_dir,
+        manifest={
+            "source_size": {"bad": True},
+            "stage_status": {"stage1": "success"},
+        },
+        requirements={
+            "template_count": 1,
+            "status_enums": ["not-a-dict"],
+            "templates": [{"template_name": "法宝分析", "required_fields": None}],
+        },
+        readiness=[{"template_name": "法宝分析", "requirement_statuses": []}],
+    )
+
+    result = validate_graph_dir(graph_dir)
+
+    assert result.ok is False
+    assert "bad_requirement_list:法宝分析:required_fields" in result.errors
+    assert "bad_status_enums" in result.errors
+    assert "bad_manifest_source_size" in result.errors
+
+
+def test_validate_graph_dir_rejects_float_source_ranges(tmp_path):
+    from storygraph_lib.validation import validate_graph_dir
+
+    graph_dir = tmp_path / "mini.storygraph"
+    evidence = [
+        {
+            "evidence_id": "evidence:float",
+            "source_range": [0.0, 1.0],
+            "fact_summary": "float range",
+            "confidence": "EXTRACTED",
+            "verification_status": "verified",
+            "supports_templates": [
+                {
+                    "template_name": "法宝分析",
+                    "requirement_id": "法宝分析.required_fields.法宝",
+                    "status": "covered",
+                }
+            ],
+        }
+    ]
+    _write_minimal_valid_graph_dir(
+        graph_dir,
+        chunks=[
+            {
+                "chunk_id": "chunk-float",
+                "source_range": [0.0, 2.0],
+                "extraction_status": "completed",
+            }
+        ],
+        coverage_evidence=evidence,
+        graph={"evidence_index": evidence},
+    )
+
+    result = validate_graph_dir(graph_dir)
+
+    assert result.ok is False
+    assert "bad_chunk_source_range:chunk-float" in result.errors
+    assert "bad_evidence_source_range:evidence:float" in result.errors
+
+
+def test_validate_graph_dir_requires_success_stage1_agent_roles(tmp_path):
+    from storygraph_lib.validation import validate_graph_dir
+
+    graph_dir = tmp_path / "mini.storygraph"
+    _write_minimal_valid_graph_dir(
+        graph_dir,
+        requirements={"template_count": 0, "templates": []},
+        readiness=[],
+        agent_ledger=[
+            {
+                "run_id": "stage1-quality-review",
+                "agent_role": "质量审查",
+                "status": "completed",
+                "output_paths": [],
+                "write_scope": [],
+            }
+        ],
+    )
+
+    result = validate_graph_dir(graph_dir)
+
+    assert result.ok is False
+    assert "missing_agent_role:模板需求分析" in result.errors
+    assert "missing_agent_role:图抽取" in result.errors
+    assert "missing_agent_role:覆盖审查" in result.errors
+
+
+def _write_minimal_valid_graph_dir(
+    graph_dir,
+    *,
+    manifest=None,
+    graph=None,
+    requirements=None,
+    chunks=None,
+    coverage_evidence=None,
+    readiness=None,
+    agent_ledger=None,
+):
+    (graph_dir / "graphify-out").mkdir(parents=True)
+    (graph_dir / "requirements").mkdir()
+    (graph_dir / "coverage").mkdir()
+    default_manifest = {
+        "source_size": len("法宝"),
+        "stage_status": {"stage1": "success"},
+    }
+    if manifest is not None:
+        default_manifest.update(manifest)
+    base_graph = {
+        "schema_version": "1.0",
+        "graphify_schema_version": "test",
+        "storygraph_schema_version": "1.0",
+        "nodes": [],
+        "edges": [],
+        "hyperedges": [],
+        "events": [],
+        "evidence_index": [],
+        "metadata": {},
+    }
+    if graph is not None:
+        base_graph.update(graph)
+    default_requirements = {
+        "template_count": 1,
+        "templates": [{"template_name": "法宝分析", "required_fields": ["法宝"]}],
+    }
+    if requirements is not None:
+        default_requirements = requirements
+    default_readiness = [
+        {
+            "template_name": "法宝分析",
+            "requirement_statuses": [
+                {"requirement_id": "法宝分析.required_fields.法宝", "status": "covered"}
+            ],
+        }
+    ]
+    if readiness is not None:
+        default_readiness = readiness
+    default_chunks = [
+        {
+            "chunk_id": "chunk-0001",
+            "source_range": [0, len("法宝")],
+            "extraction_status": "completed",
+        }
+    ]
+    if chunks is not None:
+        default_chunks = chunks
+    default_agent_ledger = [
+        {
+            "run_id": f"stage1-{index}",
+            "agent_role": role,
+            "status": "completed",
+            "output_paths": [],
+            "write_scope": [],
+        }
+        for index, role in enumerate(["模板需求分析", "图抽取", "覆盖审查", "质量审查"], start=1)
+    ]
+    if agent_ledger is not None:
+        default_agent_ledger = agent_ledger
+    (graph_dir / "manifest.json").write_text(json.dumps(default_manifest), encoding="utf-8")
+    (graph_dir / "graphify-out" / "graph.json").write_text(
+        json.dumps(base_graph), encoding="utf-8"
+    )
+    (graph_dir / "graphify-out" / "GRAPH_REPORT.md").write_text("# report\n", encoding="utf-8")
+    (graph_dir / "graphify-out" / "graph.html").write_text(
+        "<!doctype html>", encoding="utf-8"
+    )
+    (graph_dir / "requirements" / "template-requirements.json").write_text(
+        json.dumps(default_requirements), encoding="utf-8"
+    )
+    (graph_dir / "coverage" / "chunk-ledger.json").write_text(
+        json.dumps(default_chunks), encoding="utf-8"
+    )
+    (graph_dir / "coverage" / "evidence-index.json").write_text(
+        json.dumps(coverage_evidence or []), encoding="utf-8"
+    )
+    (graph_dir / "coverage" / "template-readiness.json").write_text(
+        json.dumps(default_readiness), encoding="utf-8"
+    )
+    (graph_dir / "coverage" / "agent-run-ledger.json").write_text(
+        json.dumps(default_agent_ledger), encoding="utf-8"
+    )
+    (graph_dir / "coverage" / "gap-report.md").write_text("", encoding="utf-8")
+
+
 def test_build_stage1_cli_rejects_missing_explicit_local_override_before_running_build(
     capsys, tmp_path
 ):

@@ -19,6 +19,10 @@ class GraphDirValidation:
     errors: list[str]
 
 
+DEFAULT_REQUIREMENT_STATUSES = ["covered", "needs_review", "not_found_in_source"]
+REQUIRED_STAGE1_AGENT_ROLES = ["模板需求分析", "图抽取", "覆盖审查", "质量审查"]
+
+
 def validate_skill_tree(root: Path) -> ValidationResult:
     required = [
         "SKILL.md",
@@ -91,22 +95,27 @@ def validate_graph_dir(graph_dir: Path) -> GraphDirValidation:
     if not single_writer.ok:
         errors.extend(single_writer.errors)
 
-    schema = validate_canonical_graph(graph, requirements.get("status_enums"))
+    status_enums = _normalized_status_enums(requirements, errors)
+    schema = validate_canonical_graph(graph, status_enums)
     errors.extend(schema.errors)
-    errors.extend(_validate_requirements_readiness(requirements, readiness))
+    errors.extend(_validate_requirements_readiness(requirements, readiness, status_enums))
     errors.extend(_validate_chunks(manifest, chunks))
     errors.extend(_validate_evidence_links(graph, coverage_evidence))
 
     stage1_status = manifest.get("stage_status", {}).get("stage1")
     if stage1_status != "success":
         errors.append(f"stage1_not_success:{stage1_status}")
+    if stage1_status == "success":
+        errors.extend(_validate_required_agent_roles(agent_ledger))
     if stage1_status == "success" and any(record.get("status") != "completed" for record in agent_ledger):
         errors.append("agent_run_not_completed")
 
     return GraphDirValidation(ok=not errors, errors=_dedupe(errors))
 
 
-def _validate_requirements_readiness(requirements: dict, readiness: list[dict]) -> list[str]:
+def _validate_requirements_readiness(
+    requirements: dict, readiness: list[dict], status_enums: dict | None
+) -> list[str]:
     errors: list[str] = []
     requirement_records = requirements.get("templates", [])
     if not isinstance(requirement_records, list):
@@ -143,7 +152,11 @@ def _validate_requirements_readiness(requirements: dict, readiness: list[dict]) 
             ("cards", "required_card_fields"),
             ("cases", "required_case_patterns"),
         ]:
-            for item in record.get(key, []):
+            items = record.get(key, [])
+            if not isinstance(items, list):
+                errors.append(f"bad_requirement_list:{template_name}:{key}")
+                continue
+            for item in items:
                 marker = (kind, item)
                 if marker in seen:
                     continue
@@ -160,11 +173,15 @@ def _validate_requirements_readiness(requirements: dict, readiness: list[dict]) 
     if expected_ids != actual_ids:
         errors.append("requirements_readiness_id_mismatch")
 
-    allowed_statuses = set(
-        requirements.get("status_enums", {}).get(
-            "requirement_statuses", ["covered", "needs_review", "not_found_in_source"]
-        )
+    configured_statuses = (
+        status_enums.get("requirement_statuses", DEFAULT_REQUIREMENT_STATUSES)
+        if status_enums
+        else DEFAULT_REQUIREMENT_STATUSES
     )
+    if not isinstance(configured_statuses, list):
+        errors.append("bad_status_enum:requirement_statuses")
+        configured_statuses = DEFAULT_REQUIREMENT_STATUSES
+    allowed_statuses = set(configured_statuses)
     for record in readiness:
         if not isinstance(record, dict):
             errors.append("bad_readiness_record")
@@ -184,6 +201,22 @@ def _validate_requirements_readiness(requirements: dict, readiness: list[dict]) 
     return errors
 
 
+def _normalized_status_enums(requirements: dict, errors: list[str]) -> dict | None:
+    status_enums = requirements.get("status_enums")
+    if status_enums is None:
+        return None
+    if not isinstance(status_enums, dict):
+        errors.append("bad_status_enums")
+        return None
+    normalized = {}
+    for key, value in status_enums.items():
+        if not isinstance(value, list):
+            errors.append(f"bad_status_enum:{key}")
+            continue
+        normalized[key] = value
+    return normalized
+
+
 def _validate_chunks(manifest: dict, chunks: list[dict]) -> list[str]:
     if not chunks:
         return ["chunk_ledger_empty"]
@@ -201,7 +234,7 @@ def _validate_chunks(manifest: dict, chunks: list[dict]) -> list[str]:
     if not valid_chunks:
         return errors
     ordered = sorted(valid_chunks, key=lambda item: item[1][0])
-    expected_length = _expected_source_length(manifest)
+    expected_length = _expected_source_length(manifest, errors)
     first_range = ordered[0][1]
     last_range = ordered[-1][1]
     if first_range[0] != 0 or last_range[1] != expected_length:
@@ -229,6 +262,18 @@ def _validate_evidence_links(graph: dict, coverage_evidence: list[dict]) -> list
     coverage_evidence_ids = {
         item.get("evidence_id") for item in coverage_evidence if isinstance(item, dict)
     }
+    for evidence in graph_evidence:
+        if not isinstance(evidence, dict):
+            continue
+        source_range = evidence.get("source_range")
+        if source_range is not None and _valid_source_range(source_range) is None:
+            errors.append(f"bad_evidence_source_range:{evidence.get('evidence_id')}")
+    for evidence in coverage_evidence:
+        if not isinstance(evidence, dict):
+            continue
+        source_range = evidence.get("source_range")
+        if source_range is not None and _valid_source_range(source_range) is None:
+            errors.append(f"bad_evidence_source_range:{evidence.get('evidence_id')}")
     if graph_evidence_ids != coverage_evidence_ids:
         errors.append("graph_coverage_evidence_mismatch")
     graph_items = []
@@ -247,14 +292,35 @@ def _validate_evidence_links(graph: dict, coverage_evidence: list[dict]) -> list
     return errors
 
 
-def _expected_source_length(manifest: dict) -> int:
+def _validate_required_agent_roles(agent_ledger: list[dict]) -> list[str]:
+    seen_roles = {
+        record.get("agent_role") for record in agent_ledger if isinstance(record, dict)
+    }
+    return [
+        f"missing_agent_role:{role}"
+        for role in REQUIRED_STAGE1_AGENT_ROLES
+        if role not in seen_roles
+    ]
+
+
+def _expected_source_length(manifest: dict, errors: list[str]) -> int:
     source_path = manifest.get("source_path")
     if source_path:
         try:
             return len(Path(source_path).read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError):
             pass
-    return int(manifest.get("source_size") or 0)
+    source_size = manifest.get("source_size")
+    if source_size is None:
+        return 0
+    if isinstance(source_size, bool):
+        errors.append("bad_manifest_source_size")
+        return 0
+    try:
+        return int(source_size)
+    except (TypeError, ValueError):
+        errors.append("bad_manifest_source_size")
+        return 0
 
 
 def _safe_statuses(value: object) -> list:
@@ -264,10 +330,10 @@ def _safe_statuses(value: object) -> list:
 def _valid_source_range(value: object) -> list[int] | None:
     if not isinstance(value, list) or len(value) != 2:
         return None
-    if not all(isinstance(item, (int, float)) and not isinstance(item, bool) for item in value):
+    if not all(isinstance(item, int) and not isinstance(item, bool) for item in value):
         return None
-    start = int(value[0])
-    end = int(value[1])
+    start = value[0]
+    end = value[1]
     if start < 0 or end < start:
         return None
     return [start, end]
