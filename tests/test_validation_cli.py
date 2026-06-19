@@ -376,6 +376,122 @@ def test_validate_graph_cli_reports_missing_outputs_and_blocking_ledger(capsys, 
     assert "blocking_ledger:graphify_artifact_missing" in payload["errors"]
 
 
+def test_validate_graph_dir_reports_bad_json_without_throwing(tmp_path):
+    from storygraph_lib.validation import validate_graph_dir
+
+    graph_dir = tmp_path / "mini.storygraph"
+    (graph_dir / "graphify-out").mkdir(parents=True)
+    (graph_dir / "requirements").mkdir()
+    (graph_dir / "coverage").mkdir()
+    (graph_dir / "manifest.json").write_text("{bad json", encoding="utf-8")
+    (graph_dir / "graphify-out" / "graph.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "graphify_schema_version": "test",
+                "storygraph_schema_version": "1.0",
+                "nodes": [],
+                "edges": [],
+                "hyperedges": [],
+                "events": [],
+                "evidence_index": [],
+                "metadata": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (graph_dir / "graphify-out" / "GRAPH_REPORT.md").write_text("# report\n", encoding="utf-8")
+    (graph_dir / "graphify-out" / "graph.html").write_text("<!doctype html>", encoding="utf-8")
+    (graph_dir / "requirements" / "template-requirements.json").write_text(
+        json.dumps({"template_count": 0, "templates": []}), encoding="utf-8"
+    )
+    (graph_dir / "coverage" / "chunk-ledger.json").write_text("[]", encoding="utf-8")
+    (graph_dir / "coverage" / "evidence-index.json").write_text("[]", encoding="utf-8")
+    (graph_dir / "coverage" / "template-readiness.json").write_text("[]", encoding="utf-8")
+    (graph_dir / "coverage" / "agent-run-ledger.json").write_text("[]", encoding="utf-8")
+    (graph_dir / "coverage" / "gap-report.md").write_text("", encoding="utf-8")
+
+    result = validate_graph_dir(graph_dir)
+
+    assert result.ok is False
+    assert "bad_json:manifest.json" in result.errors
+
+
+def test_validate_graph_dir_malformed_ledgers_return_errors_without_throwing(tmp_path):
+    from storygraph_lib.validation import validate_graph_dir
+
+    graph_dir = tmp_path / "mini.storygraph"
+    (graph_dir / "graphify-out").mkdir(parents=True)
+    (graph_dir / "requirements").mkdir()
+    (graph_dir / "coverage").mkdir()
+    source = tmp_path / "mini.txt"
+    source.write_text("法宝", encoding="utf-8")
+    (graph_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "source_path": str(source),
+                "source_size": len("法宝".encode("utf-8")),
+                "stage_status": {"stage1": "success"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (graph_dir / "graphify-out" / "graph.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "graphify_schema_version": "test",
+                "storygraph_schema_version": "1.0",
+                "nodes": [],
+                "edges": [],
+                "hyperedges": [],
+                "events": [],
+                "evidence_index": [],
+                "metadata": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (graph_dir / "graphify-out" / "GRAPH_REPORT.md").write_text("# report\n", encoding="utf-8")
+    (graph_dir / "graphify-out" / "graph.html").write_text("<!doctype html>", encoding="utf-8")
+    (graph_dir / "requirements" / "template-requirements.json").write_text(
+        json.dumps(
+            {
+                "template_count": 1,
+                "templates": [{"template_name": "法宝分析", "required_fields": ["法宝"]}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (graph_dir / "coverage" / "chunk-ledger.json").write_text(
+        json.dumps(["not-a-chunk", {"chunk_id": "chunk-bad", "source_range": ["bad"]}]),
+        encoding="utf-8",
+    )
+    (graph_dir / "coverage" / "evidence-index.json").write_text("[]", encoding="utf-8")
+    (graph_dir / "coverage" / "template-readiness.json").write_text(
+        json.dumps(
+            [
+                {"template_name": "法宝分析", "requirement_statuses": "not-a-list"},
+                {"template_name": "坏记录", "requirement_statuses": ["not-a-dict"]},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (graph_dir / "coverage" / "agent-run-ledger.json").write_text(
+        json.dumps([{"run_id": "run-1", "status": "completed", "output_paths": [], "write_scope": []}]),
+        encoding="utf-8",
+    )
+    (graph_dir / "coverage" / "gap-report.md").write_text("", encoding="utf-8")
+
+    result = validate_graph_dir(graph_dir)
+
+    assert result.ok is False
+    assert "bad_chunk_record" in result.errors
+    assert "bad_chunk_source_range:chunk-bad" in result.errors
+    assert "bad_readiness_requirement_statuses:法宝分析" in result.errors
+    assert "bad_readiness_status_record:坏记录" in result.errors
+
+
 def test_build_stage1_cli_rejects_missing_explicit_local_override_before_running_build(
     capsys, tmp_path
 ):

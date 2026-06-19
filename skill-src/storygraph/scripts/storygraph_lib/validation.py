@@ -37,9 +37,11 @@ def validate_skill_tree(root: Path) -> ValidationResult:
 def validate_graph_dir(graph_dir: Path) -> GraphDirValidation:
     graph_dir = Path(graph_dir)
     errors = [f"missing:{item}" for item in REQUIRED_STAGE1_FILES if not (graph_dir / item).exists()]
-    agent_ledger = _read_json(graph_dir / "coverage" / "agent-run-ledger.json", default=[])
+    agent_ledger = _read_json(
+        graph_dir, "coverage/agent-run-ledger.json", default=[], errors=errors
+    )
     if not isinstance(agent_ledger, list):
-        errors.append("bad_json:coverage/agent-run-ledger.json")
+        errors.append("bad_shape:coverage/agent-run-ledger.json")
         agent_ledger = []
 
     for record in agent_ledger:
@@ -53,30 +55,36 @@ def validate_graph_dir(graph_dir: Path) -> GraphDirValidation:
     if errors:
         return GraphDirValidation(False, _dedupe(errors))
 
-    manifest = _read_json(graph_dir / "manifest.json", default={})
-    graph = _read_json(graph_dir / "graphify-out" / "graph.json", default={})
-    requirements = _read_json(graph_dir / "requirements" / "template-requirements.json", default={})
-    chunks = _read_json(graph_dir / "coverage" / "chunk-ledger.json", default=[])
-    coverage_evidence = _read_json(graph_dir / "coverage" / "evidence-index.json", default=[])
-    readiness = _read_json(graph_dir / "coverage" / "template-readiness.json", default=[])
+    manifest = _read_json(graph_dir, "manifest.json", default={}, errors=errors)
+    graph = _read_json(graph_dir, "graphify-out/graph.json", default={}, errors=errors)
+    requirements = _read_json(
+        graph_dir, "requirements/template-requirements.json", default={}, errors=errors
+    )
+    chunks = _read_json(graph_dir, "coverage/chunk-ledger.json", default=[], errors=errors)
+    coverage_evidence = _read_json(
+        graph_dir, "coverage/evidence-index.json", default=[], errors=errors
+    )
+    readiness = _read_json(
+        graph_dir, "coverage/template-readiness.json", default=[], errors=errors
+    )
 
     if not isinstance(manifest, dict):
-        errors.append("bad_json:manifest.json")
+        errors.append("bad_shape:manifest.json")
         manifest = {}
     if not isinstance(graph, dict):
-        errors.append("bad_json:graphify-out/graph.json")
+        errors.append("bad_shape:graphify-out/graph.json")
         graph = {}
     if not isinstance(requirements, dict):
-        errors.append("bad_json:requirements/template-requirements.json")
+        errors.append("bad_shape:requirements/template-requirements.json")
         requirements = {}
     if not isinstance(chunks, list):
-        errors.append("bad_json:coverage/chunk-ledger.json")
+        errors.append("bad_shape:coverage/chunk-ledger.json")
         chunks = []
     if not isinstance(coverage_evidence, list):
-        errors.append("bad_json:coverage/evidence-index.json")
+        errors.append("bad_shape:coverage/evidence-index.json")
         coverage_evidence = []
     if not isinstance(readiness, list):
-        errors.append("bad_json:coverage/template-readiness.json")
+        errors.append("bad_shape:coverage/template-readiness.json")
         readiness = []
 
     single_writer = validate_single_writer(agent_ledger)
@@ -146,7 +154,7 @@ def _validate_requirements_readiness(requirements: dict, readiness: list[dict]) 
         status.get("requirement_id")
         for record in readiness
         if isinstance(record, dict)
-        for status in record.get("requirement_statuses", [])
+        for status in _safe_statuses(record.get("requirement_statuses"))
         if isinstance(status, dict)
     }
     if expected_ids != actual_ids:
@@ -161,9 +169,16 @@ def _validate_requirements_readiness(requirements: dict, readiness: list[dict]) 
         if not isinstance(record, dict):
             errors.append("bad_readiness_record")
             continue
-        if not record.get("requirement_statuses"):
+        statuses = record.get("requirement_statuses")
+        if not isinstance(statuses, list):
+            errors.append(f"bad_readiness_requirement_statuses:{record.get('template_name')}")
+            continue
+        if not statuses:
             errors.append("readiness_without_requirement_statuses")
-        for status in record.get("requirement_statuses", []):
+        for status in statuses:
+            if not isinstance(status, dict):
+                errors.append(f"bad_readiness_status_record:{record.get('template_name')}")
+                continue
             if status.get("status") not in allowed_statuses:
                 errors.append(f"bad_readiness_status:{status.get('status')}")
     return errors
@@ -173,18 +188,30 @@ def _validate_chunks(manifest: dict, chunks: list[dict]) -> list[str]:
     if not chunks:
         return ["chunk_ledger_empty"]
     errors: list[str] = []
-    ordered = sorted(chunks, key=lambda chunk: chunk.get("source_range", [0, 0])[0])
+    valid_chunks = []
+    for chunk in chunks:
+        if not isinstance(chunk, dict):
+            errors.append("bad_chunk_record")
+            continue
+        source_range = _valid_source_range(chunk.get("source_range"))
+        if source_range is None:
+            errors.append(f"bad_chunk_source_range:{chunk.get('chunk_id')}")
+            continue
+        valid_chunks.append((chunk, source_range))
+    if not valid_chunks:
+        return errors
+    ordered = sorted(valid_chunks, key=lambda item: item[1][0])
     expected_length = _expected_source_length(manifest)
-    first_range = ordered[0].get("source_range", [])
-    last_range = ordered[-1].get("source_range", [])
-    if first_range[:1] != [0] or not last_range or last_range[-1] != expected_length:
+    first_range = ordered[0][1]
+    last_range = ordered[-1][1]
+    if first_range[0] != 0 or last_range[1] != expected_length:
         errors.append("chunk_ledger_does_not_cover_full_source")
     for previous, current in zip(ordered, ordered[1:]):
-        previous_end = previous.get("source_range", [0, 0])[1]
-        current_start = current.get("source_range", [0, 0])[0]
+        previous_end = previous[1][1]
+        current_start = current[1][0]
         if current_start > previous_end:
             errors.append("chunk_ledger_has_gap")
-    for chunk in ordered:
+    for chunk, _ in ordered:
         if chunk.get("extraction_status") != "completed":
             errors.append(f"chunk_not_completed:{chunk.get('chunk_id')}:{chunk.get('extraction_status')}")
     return errors
@@ -219,13 +246,31 @@ def _expected_source_length(manifest: dict) -> int:
     return int(manifest.get("source_size") or 0)
 
 
-def _read_json(path: Path, default):
+def _safe_statuses(value: object) -> list:
+    return value if isinstance(value, list) else []
+
+
+def _valid_source_range(value: object) -> list[int] | None:
+    if not isinstance(value, list) or len(value) != 2:
+        return None
+    if not all(isinstance(item, (int, float)) and not isinstance(item, bool) for item in value):
+        return None
+    start = int(value[0])
+    end = int(value[1])
+    if start < 0 or end < start:
+        return None
+    return [start, end]
+
+
+def _read_json(graph_dir: Path, relative_path: str, default, errors: list[str]):
+    path = graph_dir / Path(*relative_path.split("/"))
     if not path.exists():
         return default
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return {"__bad_json__": str(path)}
+        errors.append(f"bad_json:{relative_path}")
+        return default
 
 
 def _dedupe(values: list[str]) -> list[str]:

@@ -1,4 +1,5 @@
 import sys
+import subprocess
 from pathlib import Path
 
 from storygraph_lib.stage1 import build_stage1_graph
@@ -171,6 +172,68 @@ def test_stage1_marks_changed_when_graphify_source_changes(tmp_path):
     build_stage1_graph(novel, config)
 
     config["paths"]["graphify_repo"] = str(graphify_b)
+    result = build_stage1_graph(novel, config)
+
+    assert result["status"] == "success"
+    assert result["source_state"] == "changed"
+
+
+def test_stage1_marks_changed_when_graphify_git_repo_dirty_state_changes(tmp_path):
+    novel = tmp_path / "mini.txt"
+    novel.write_text("法宝", encoding="utf-8")
+    template_dir = tmp_path / "templates"
+    template_dir.mkdir()
+    _write_37_templates(template_dir)
+    graphify_repo = tmp_path / "graphify"
+    graphify_repo.mkdir()
+    subprocess.run(["git", "init"], cwd=graphify_repo, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "config", "user.email", "storygraph@example.invalid"],
+        cwd=graphify_repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "StoryGraph Test"],
+        cwd=graphify_repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    tracked = graphify_repo / "tool.py"
+    tracked.write_text("VERSION = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tool.py"], cwd=graphify_repo, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=graphify_repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    config = _config(template_dir, graphify_repo)
+    build_stage1_graph(novel, config)
+
+    tracked.write_text("VERSION = 2\n", encoding="utf-8")
+    result = build_stage1_graph(novel, config)
+
+    assert result["status"] == "success"
+    assert result["source_state"] == "changed"
+
+
+def test_stage1_marks_changed_when_graphify_non_git_repo_content_changes(tmp_path):
+    novel = tmp_path / "mini.txt"
+    novel.write_text("法宝", encoding="utf-8")
+    template_dir = tmp_path / "templates"
+    template_dir.mkdir()
+    _write_37_templates(template_dir)
+    graphify_repo = tmp_path / "graphify"
+    graphify_repo.mkdir()
+    (graphify_repo / "tool.py").write_text("VERSION = 1\n", encoding="utf-8")
+    config = _config(template_dir, graphify_repo)
+    build_stage1_graph(novel, config)
+
+    (graphify_repo / "tool.py").write_text("VERSION = 2\n", encoding="utf-8")
     result = build_stage1_graph(novel, config)
 
     assert result["status"] == "success"

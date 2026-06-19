@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
-from typing import Any
 
 from .agent_ledger import make_stage_agent_records, validate_single_writer
 from .coverage import make_chunk_ledger, write_coverage_outputs
@@ -187,19 +187,32 @@ def build_stage1_graph(source_path: str | Path, config: dict) -> dict:
         gap_lines.append(f"- {adapter_error['code']}: graphify")
         _remove_graphify_artifacts(ctx.graph_dir)
     else:
-        base_graph = json.loads(adapter_result.graph_path.read_text(encoding="utf-8"))
-        graph = merge_template_supplements(base_graph, supplement)
-        validation = validate_canonical_graph(graph, config.get("status_enums"))
-        graph_validation_errors = validation.errors
-        writer.write_json("graphify-out/graph.json", graph)
-        writer.write_text(
-            "graphify-out/GRAPH_REPORT.md",
-            (ctx.graph_dir / "graphify-out" / "GRAPH_REPORT.md").read_text(encoding="utf-8"),
+        artifacts, artifact_error = _read_graphify_artifacts(
+            adapter_result.graph_path,
+            ctx.graph_dir / "graphify-out",
         )
-        writer.write_text(
-            "graphify-out/graph.html",
-            (ctx.graph_dir / "graphify-out" / "graph.html").read_text(encoding="utf-8"),
-        )
+        if artifact_error:
+            adapter_error = artifact_error
+            _append_error(agent_runs, "图抽取", adapter_error)
+            gap_lines.append(f"- {adapter_error['code']}: {adapter_error.get('message', '')}")
+            _remove_graphify_artifacts(ctx.graph_dir)
+        else:
+            graph = merge_template_supplements(artifacts["graph"], supplement)
+            validation = validate_canonical_graph(graph, config.get("status_enums"))
+            graph_validation_errors = validation.errors
+            if graph_validation_errors:
+                adapter_error = {
+                    "code": "graphify_failed",
+                    "message": "merged graph failed canonical validation",
+                    "validation_errors": graph_validation_errors,
+                }
+                _append_error(agent_runs, "图抽取", adapter_error)
+                gap_lines.append("- graphify_failed: merged graph failed canonical validation")
+                _remove_graphify_artifacts(ctx.graph_dir)
+            else:
+                writer.write_json("graphify-out/graph.json", graph)
+                writer.write_text("graphify-out/GRAPH_REPORT.md", artifacts["report"])
+                writer.write_text("graphify-out/graph.html", artifacts["html"])
 
     validation_errors = [
         *(error["code"] for error in contract_errors),
@@ -246,6 +259,10 @@ def graphify_source_fingerprint(config: dict) -> dict:
     repo_value = config.get("paths", {}).get("graphify_repo")
     repo = Path(repo_value) if repo_value else None
     commit = None
+    tree_hash = None
+    dirty_status = None
+    dirty_diff_hash = None
+    repo_content_hash = None
     if repo and (repo / ".git").exists():
         completed = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -255,13 +272,44 @@ def graphify_source_fingerprint(config: dict) -> dict:
         )
         if completed.returncode == 0:
             commit = completed.stdout.strip()
+        tree = subprocess.run(
+            ["git", "rev-parse", "HEAD^{tree}"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+        )
+        if tree.returncode == 0:
+            tree_hash = tree.stdout.strip()
+        status = subprocess.run(
+            ["git", "status", "--porcelain=v1", "-z"],
+            cwd=repo,
+            capture_output=True,
+        )
+        if status.returncode == 0:
+            dirty_status = sha256(status.stdout).hexdigest()
+        diff = subprocess.run(
+            ["git", "diff", "--binary", "HEAD"],
+            cwd=repo,
+            capture_output=True,
+        )
+        if diff.returncode == 0:
+            dirty_diff_hash = sha256(diff.stdout).hexdigest()
+        repo_content_hash = _directory_content_hash(repo)
+    elif repo and repo.exists():
+        repo_content_hash = _directory_content_hash(repo)
     adapter_config = config.get("graphify_adapter", {})
+    command = adapter_config.get("command", [])
     return {
         "graphify_repo": str(repo) if repo else None,
         "graphify_commit": commit,
+        "graphify_tree_hash": tree_hash,
+        "graphify_dirty_status": dirty_status,
+        "graphify_dirty_diff_hash": dirty_diff_hash,
+        "graphify_content_hash": repo_content_hash,
         "adapter_mode": adapter_config.get("mode"),
-        "adapter_command": adapter_config.get("command", []),
+        "adapter_command": command,
         "adapter_timeout_seconds": adapter_config.get("timeout_seconds"),
+        "adapter_executable": _executable_fingerprint(command),
     }
 
 
@@ -323,6 +371,94 @@ def _graphify_adapter(config: dict) -> GraphifyAdapter:
         int(adapter_config.get("timeout_seconds", 1800)),
         adapter_config.get("mode", "local-repo-or-cli"),
     )
+
+
+def _read_graphify_artifacts(graph_path: Path, output_dir: Path) -> tuple[dict | None, dict | None]:
+    try:
+        base_graph = json.loads(graph_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, _artifact_error("graphify_failed", "graph.json", exc)
+    if not isinstance(base_graph, dict):
+        return None, {
+            "code": "graphify_failed",
+            "artifact": "graph.json",
+            "message": "graph.json must contain a JSON object",
+        }
+    if "metadata" in base_graph and not isinstance(base_graph["metadata"], dict):
+        return None, {
+            "code": "graphify_failed",
+            "artifact": "graph.json",
+            "message": "graph.json field metadata must be an object",
+        }
+    for key in ["nodes", "edges", "hyperedges", "events", "evidence_index"]:
+        if key in base_graph and not isinstance(base_graph[key], list):
+            return None, {
+                "code": "graphify_failed",
+                "artifact": "graph.json",
+                "message": f"graph.json field {key} must be a list",
+            }
+        if key in base_graph and any(not isinstance(item, dict) for item in base_graph[key]):
+            return None, {
+                "code": "graphify_failed",
+                "artifact": "graph.json",
+                "message": f"graph.json field {key} must contain objects",
+            }
+    try:
+        report = (output_dir / "GRAPH_REPORT.md").read_text(encoding="utf-8")
+        html = (output_dir / "graph.html").read_text(encoding="utf-8")
+    except OSError as exc:
+        artifact = "GRAPH_REPORT.md" if "GRAPH_REPORT.md" in str(exc) else "graph.html"
+        return None, _artifact_error("graphify_failed", artifact, exc)
+    return {"graph": base_graph, "report": report, "html": html}, None
+
+
+def _artifact_error(code: str, artifact: str, exc: Exception) -> dict:
+    return {"code": code, "artifact": artifact, "message": str(exc)}
+
+
+def _directory_content_hash(root: Path) -> str | None:
+    if not root.exists() or not root.is_dir():
+        return None
+    excluded_dirs = {".git", "__pycache__", ".pytest_cache", "node_modules", "graphify-out"}
+    h = sha256()
+    file_count = 0
+    for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
+        relative_parts = path.relative_to(root).parts
+        if any(part in excluded_dirs or part.endswith(".storygraph") for part in relative_parts):
+            continue
+        if not path.is_file():
+            continue
+        try:
+            relative = path.relative_to(root).as_posix()
+            data = path.read_bytes()
+        except OSError:
+            continue
+        h.update(relative.encode("utf-8"))
+        h.update(b"\0")
+        h.update(sha256(data).digest())
+        file_count += 1
+    h.update(f"files:{file_count}".encode("utf-8"))
+    return h.hexdigest()
+
+
+def _executable_fingerprint(command: list[str]) -> dict:
+    if not command:
+        return {}
+    executable = command[0]
+    resolved = shutil.which(executable) or executable
+    version = None
+    try:
+        completed = subprocess.run(
+            [resolved, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        completed = None
+    if completed is not None and completed.returncode == 0:
+        version = (completed.stdout or completed.stderr).strip().splitlines()[:1]
+    return {"executable": executable, "resolved": resolved, "version": version}
 
 
 def _managed_outputs(config: dict) -> list[str]:
@@ -591,3 +727,5 @@ def _remove_graphify_artifacts(graph_dir: Path) -> None:
         path = graph_dir / Path(*relative.split("/"))
         if path.exists() and path.is_file():
             path.unlink()
+        elif path.exists() and path.is_dir():
+            shutil.rmtree(path)
