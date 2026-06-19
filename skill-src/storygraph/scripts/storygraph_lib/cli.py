@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from .config import load_config
-from .templates import build_requirement_matrix, discover_templates
+from .templates import TemplateDiscoveryError, build_requirement_matrix, discover_templates
 from .validation import validate_skill_tree
 
 
@@ -22,6 +22,7 @@ def main(argv=None):
     config_check.add_argument("--local-override")
     inspect_templates = sub.add_parser("inspect-templates")
     inspect_templates.add_argument("--template-dir", required=True)
+    inspect_templates.add_argument("--local-override")
     args = parser.parse_args(argv)
     if args.version:
         print("storygraph 0.1.0")
@@ -39,13 +40,37 @@ def main(argv=None):
         print({"ok": True, "graph_dir_suffix": config["graph_dir_suffix"]})
         return 0
     if args.command == "inspect-templates":
-        config = load_config(_default_config_path())
+        local = Path(args.local_override) if args.local_override else None
+        if local and not local.exists():
+            print(
+                json.dumps(
+                    {"ok": False, "error": "local_override_missing", "path": str(local)},
+                    ensure_ascii=False,
+                )
+            )
+            return 2
+        template_dir = Path(args.template_dir)
+        if not template_dir.is_dir():
+            print(
+                json.dumps(
+                    {"ok": False, "error": "template_dir_missing", "path": str(template_dir)},
+                    ensure_ascii=False,
+                )
+            )
+            return 2
+        config = load_config(_default_config_path(), local_override=local)
         discovery_config = config.get("template_discovery", {})
-        discovery = discover_templates(
-            Path(args.template_dir),
-            glob=discovery_config.get("glob", "*模板.md"),
-            readme_index_file=discovery_config.get("readme_index_file", "README.md"),
-        )
+        try:
+            discovery = discover_templates(
+                template_dir,
+                glob=discovery_config.get("glob", "*模板.md"),
+                readme_index_file=discovery_config.get("readme_index_file", "README.md"),
+                exclude_files=discovery_config.get("exclude_files", []),
+                readme_missing_policy=discovery_config.get("readme_missing_policy", "warn"),
+            )
+        except TemplateDiscoveryError as error:
+            print(json.dumps(error.to_dict(), ensure_ascii=False))
+            return 2
         matrix = build_requirement_matrix(
             discovery.templates,
             rules=config.get("template_parser_rules"),
@@ -56,14 +81,23 @@ def main(argv=None):
         has_default_mapping = any(
             record["mapping_source"] == "default_mapping" for record in matrix["templates"]
         )
+        count_policy = config.get("template_count_policy", {})
+        expected_template_count = count_policy.get("expected_existing_templates")
+        enforce_count = bool(count_policy.get("enforce_integration_count", False))
         payload = {
             "template_count": matrix["template_count"],
+            "expected_template_count": expected_template_count,
+            "enforce_integration_count": enforce_count,
             "warnings": discovery.warnings,
             "has_default_mapping": has_default_mapping,
             "templates": matrix["templates"],
         }
         print(json.dumps(payload, ensure_ascii=False, indent=2))
-        if matrix["template_count"] == 37 and has_default_mapping:
+        if (
+            enforce_count
+            and matrix["template_count"] == expected_template_count
+            and has_default_mapping
+        ):
             return 2
         return 0
     parser.print_usage()

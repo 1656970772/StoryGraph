@@ -22,18 +22,46 @@ class TemplateDiscovery:
     warnings: list[dict]
 
 
+class TemplateDiscoveryError(ValueError):
+    def __init__(self, code: str, path: Path | None = None, file: str | None = None):
+        self.code = code
+        self.path = path
+        self.file = file
+        super().__init__(code)
+
+    def to_dict(self) -> dict:
+        payload = {"ok": False, "error": self.code}
+        if self.path is not None:
+            payload["path"] = str(self.path)
+        if self.file is not None:
+            payload["file"] = self.file
+        return payload
+
+
 def discover_templates(
     template_dir: Path,
     glob: str = "*模板.md",
     readme_index_file: str = "README.md",
+    exclude_files: list[str] | None = None,
+    readme_missing_policy: str = "warn",
 ) -> TemplateDiscovery:
     template_dir = Path(template_dir)
+    if not template_dir.is_dir():
+        raise TemplateDiscoveryError("template_dir_missing", path=template_dir)
+    excluded = set(exclude_files or [])
+    if readme_index_file:
+        excluded.add(readme_index_file)
     files = sorted(
-        [path for path in template_dir.glob(glob) if path.is_file() and path.name != readme_index_file],
+        [path for path in template_dir.glob(glob) if path.is_file() and path.name not in excluded],
         key=lambda path: path.name,
     )
     templates = [_template_file(path) for path in files]
-    warnings = _readme_missing_warnings(template_dir, readme_index_file, {path.name for path in files})
+    warnings = _readme_missing_warnings(
+        template_dir,
+        readme_index_file,
+        {path.name for path in files},
+        readme_missing_policy,
+    )
     return TemplateDiscovery(templates=templates, warnings=warnings)
 
 
@@ -55,9 +83,18 @@ def build_requirement_matrix(
             {
                 "name": template.name,
                 "template_name": template.name,
+                "template_file": template.path.name,
+                "template_file_hash": template.file_hash,
+                "template_status": "parsed",
                 "path": str(template.path),
                 "file_hash": template.file_hash,
                 "output_language": output_language,
+                "required_sections": _required_sections(parsed),
+                "required_entity_types": mapping["graph_node_mapping"],
+                "required_event_types": mapping["graph_event_mapping"],
+                "required_relation_types": mapping["graph_relation_mapping"],
+                "output_sections": _output_sections(parsed),
+                "coverage_rules": _coverage_rules(parsed),
                 "required_fields": parsed["required_fields"],
                 "required_tables": parsed["required_tables"],
                 "required_cards": parsed["required_cards"],
@@ -89,8 +126,15 @@ def _strip_template_suffix(stem: str) -> str:
     return stem[:-2] if stem.endswith("模板") else stem
 
 
-def _readme_missing_warnings(template_dir: Path, readme_index_file: str, actual_files: set[str]) -> list[dict]:
+def _readme_missing_warnings(
+    template_dir: Path,
+    readme_index_file: str,
+    actual_files: set[str],
+    readme_missing_policy: str,
+) -> list[dict]:
     if not readme_index_file:
+        return []
+    if readme_missing_policy == "ignore":
         return []
     readme = template_dir / readme_index_file
     if not readme.exists():
@@ -98,6 +142,8 @@ def _readme_missing_warnings(template_dir: Path, readme_index_file: str, actual_
     warnings = []
     for file_name in _readme_template_items(readme.read_text(encoding="utf-8")):
         if file_name not in actual_files:
+            if readme_missing_policy == "error":
+                raise TemplateDiscoveryError("missing_template_file", file=file_name)
             warnings.append({"code": "missing_template_file", "file": file_name})
     return warnings
 
@@ -143,6 +189,40 @@ def _validate_mapping(template_name: str, mapping: dict) -> None:
     for key in ("graph_node_mapping", "graph_event_mapping", "graph_relation_mapping"):
         if not mapping.get(key):
             raise ValueError(f"{template_name} requires non-empty {key}")
+
+
+def _required_sections(parsed: dict) -> list[str]:
+    sections = []
+    if parsed["required_fields"]:
+        sections.append("fields")
+    if parsed["required_tables"]:
+        sections.append("tables")
+    if parsed["required_cards"] or parsed["required_card_fields"]:
+        sections.append("cards")
+    if parsed["required_case_patterns"]:
+        sections.append("case_patterns")
+    if parsed["required_evidence_fields"]:
+        sections.append("evidence")
+    if parsed["gap_rules"]:
+        sections.append("gap_rules")
+    return sections
+
+
+def _output_sections(parsed: dict) -> list[str]:
+    sections = ["requirement_matrix", "evidence_requirements", "gap_report"]
+    if parsed["required_cards"] or parsed["required_card_fields"]:
+        sections.append("card_outputs")
+    if parsed["required_tables"]:
+        sections.append("table_outputs")
+    return sections
+
+
+def _coverage_rules(parsed: dict) -> dict:
+    return {
+        "required_evidence_fields": parsed["required_evidence_fields"],
+        "gap_rules": parsed["gap_rules"],
+        "requirement_statuses": parsed["gap_rules"]["status_enum"],
+    }
 
 
 def _requirement_statuses(status_enums: dict | list | None) -> list[str]:

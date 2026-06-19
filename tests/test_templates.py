@@ -43,6 +43,28 @@ def test_build_requirement_matrix_uses_configured_non_generic_mappings(tmp_path)
     }
     matrix = build_requirement_matrix(discovery.templates, rules=None, mappings=mappings)
     record = matrix["templates"][0]
+    expected_contract_fields = {
+        "template_file",
+        "template_file_hash",
+        "template_status",
+        "required_sections",
+        "required_entity_types",
+        "required_event_types",
+        "required_relation_types",
+        "output_sections",
+        "coverage_rules",
+    }
+    assert expected_contract_fields <= set(record)
+    assert record["template_file"] == "法宝分析模板.md"
+    assert record["template_file_hash"] == record["file_hash"]
+    assert record["template_status"] == "parsed"
+    assert record["required_entity_types"] == ["artifact"]
+    assert record["required_event_types"] == ["artifact_transfer"]
+    assert record["required_relation_types"] == ["owner_artifact"]
+    assert "fields" in record["required_sections"]
+    assert "evidence" in record["required_sections"]
+    assert "requirement_matrix" in record["output_sections"]
+    assert record["coverage_rules"]["required_evidence_fields"] == ["原文位置"]
     assert record["graph_node_mapping"] == ["artifact"]
     assert record["mapping_source"] == "configured"
     assert record["required_card_headings"] == []
@@ -101,6 +123,128 @@ def test_inspect_templates_cli_returns_2_when_37_templates_use_default_mapping(c
     payload = json.loads(capsys.readouterr().out)
     assert payload["template_count"] == 37
     assert payload["has_default_mapping"] is True
+
+
+def test_inspect_templates_cli_rejects_missing_template_dir(capsys, tmp_path):
+    from storygraph_lib.cli import main
+
+    missing = tmp_path / "missing-templates"
+
+    assert main(["inspect-templates", "--template-dir", str(missing)]) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["error"] == "template_dir_missing"
+    assert payload["path"] == str(missing)
+
+
+def test_inspect_templates_cli_rejects_missing_local_override(capsys, tmp_path):
+    from storygraph_lib.cli import main
+
+    template_dir = tmp_path / "templates"
+    template_dir.mkdir()
+    missing = tmp_path / "storygraph.local.json"
+
+    assert main(
+        ["inspect-templates", "--template-dir", str(template_dir), "--local-override", str(missing)]
+    ) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["error"] == "local_override_missing"
+    assert payload["path"] == str(missing)
+
+
+def test_inspect_templates_cli_uses_configured_expected_count_instead_of_hardcoded_37(capsys, tmp_path):
+    from storygraph_lib.cli import main
+
+    template_dir = tmp_path / "templates"
+    template_dir.mkdir()
+    for index in range(2):
+        (template_dir / f"空白{index:02d}模板.md").write_text("# 空白模板\n", encoding="utf-8")
+    local = tmp_path / "storygraph.local.json"
+    local.write_text(
+        json.dumps(
+            {
+                "template_count_policy": {
+                    "expected_existing_templates": 2,
+                    "enforce_integration_count": True,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert main(["inspect-templates", "--template-dir", str(template_dir), "--local-override", str(local)]) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["template_count"] == 2
+    assert payload["expected_template_count"] == 2
+    assert payload["has_default_mapping"] is True
+
+
+def test_inspect_templates_cli_local_override_mapping_can_satisfy_expected_count_guard(capsys, tmp_path):
+    from storygraph_lib.cli import main
+
+    template_dir = tmp_path / "templates"
+    template_dir.mkdir()
+    for index in range(2):
+        (template_dir / f"空白{index:02d}模板.md").write_text("# 空白模板\n", encoding="utf-8")
+    local = tmp_path / "storygraph.local.json"
+    local.write_text(
+        json.dumps(
+            {
+                "template_count_policy": {
+                    "expected_existing_templates": 2,
+                    "enforce_integration_count": True,
+                },
+                "template_graph_mappings": {
+                    "空白00": {
+                        "graph_node_mapping": ["blank_node"],
+                        "graph_event_mapping": ["blank_event"],
+                        "graph_relation_mapping": ["blank_relation"],
+                    },
+                    "空白01": {
+                        "graph_node_mapping": ["blank_node"],
+                        "graph_event_mapping": ["blank_event"],
+                        "graph_relation_mapping": ["blank_relation"],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert main(["inspect-templates", "--template-dir", str(template_dir), "--local-override", str(local)]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["template_count"] == 2
+    assert payload["expected_template_count"] == 2
+    assert payload["has_default_mapping"] is False
+
+
+def test_inspect_templates_cli_applies_discovery_exclude_files_and_readme_policy(capsys, tmp_path):
+    from storygraph_lib.cli import main
+
+    template_dir = tmp_path / "templates"
+    template_dir.mkdir()
+    (template_dir / "保留模板.md").write_text("# 保留模板\n## 字段\n- 条目", encoding="utf-8")
+    (template_dir / "忽略模板.md").write_text("# 忽略模板\n", encoding="utf-8")
+    (template_dir / "README.md").write_text("- 保留模板.md\n- 缺失模板.md\n", encoding="utf-8")
+    local = tmp_path / "storygraph.local.json"
+    local.write_text(
+        json.dumps(
+            {
+                "template_discovery": {
+                    "exclude_files": ["忽略模板.md"],
+                    "readme_missing_policy": "ignore",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert main(["inspect-templates", "--template-dir", str(template_dir), "--local-override", str(local)]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["template_count"] == 1
+    assert payload["warnings"] == []
+    assert [record["template_file"] for record in payload["templates"]] == ["保留模板.md"]
 
 
 def test_real_37_templates_matrix_is_optional_integration_not_hermetic_pytest():
