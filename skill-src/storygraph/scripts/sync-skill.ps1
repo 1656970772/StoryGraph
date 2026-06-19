@@ -4,7 +4,7 @@ param(
   [switch]$Clean
 )
 $ErrorActionPreference = "Stop"
-$copyItems = @("SKILL.md", "agents", "references", "scripts", "config")
+$copyItems = @("SKILL.md", "agents", "references", "scripts", "config\storygraph.default.json")
 $cleanItems = @("SKILL.md", "agents", "references", "scripts", "config\storygraph.default.json")
 $sourceRoot = (Resolve-Path -LiteralPath $Source).Path
 $destinationRoot = [IO.Path]::GetFullPath($Destination).TrimEnd('\')
@@ -28,7 +28,15 @@ if ($Clean) {
 foreach ($item in $copyItems) {
   $from = Join-Path $sourceRoot $item
   if (Test-Path -LiteralPath $from) {
-    Copy-Item -LiteralPath $from -Destination $destinationRoot -Recurse -Force
+    $sourceItem = Get-Item -LiteralPath $from
+    if ($sourceItem.PSIsContainer) {
+      Copy-Item -LiteralPath $from -Destination $destinationRoot -Recurse -Force
+    } else {
+      $to = Join-Path $destinationRoot $item
+      $toParent = Split-Path -Parent $to
+      New-Item -ItemType Directory -Path $toParent -Force | Out-Null
+      Copy-Item -LiteralPath $from -Destination $to -Force
+    }
   }
 }
 Write-Output "Synced StoryGraph skill to $destinationRoot"

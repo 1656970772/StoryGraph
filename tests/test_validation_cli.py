@@ -24,6 +24,53 @@ def test_validate_skill_tree_requires_core_directories(tmp_path):
     assert result.missing == []
 
 
+def test_storygraph_script_validate_skill_success(tmp_path):
+    root = tmp_path / "storygraph"
+    (root / "references").mkdir(parents=True)
+    (root / "scripts").mkdir()
+    (root / "config").mkdir()
+    (root / "agents").mkdir()
+    (root / "SKILL.md").write_text("# StoryGraph\n", encoding="utf-8")
+    (root / "agents" / "openai.yaml").write_text("name: storygraph\n", encoding="utf-8")
+    (root / "config" / "storygraph.default.json").write_text("{}", encoding="utf-8")
+    (root / "references" / "workflow.md").write_text("# Workflow\n", encoding="utf-8")
+    (root / "references" / "graph-schema.md").write_text("# Graph Schema\n", encoding="utf-8")
+    (root / "references" / "extraction-workflow.md").write_text("# Extraction Workflow\n", encoding="utf-8")
+    (root / "scripts" / "storygraph.py").write_text("print('ok')\n", encoding="utf-8")
+    (root / "scripts" / "sync-skill.ps1").write_text("Write-Output 'ok'\n", encoding="utf-8")
+    result = subprocess.run(
+        [
+            "python",
+            "skill-src/storygraph/scripts/storygraph.py",
+            "validate-skill",
+            "--skill-root",
+            str(root),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert result.stdout.strip() == "{'ok': True, 'missing': []}"
+
+
+def test_storygraph_script_validate_skill_missing_file_returns_nonzero(tmp_path):
+    root = tmp_path / "storygraph"
+    root.mkdir()
+    result = subprocess.run(
+        [
+            "python",
+            "skill-src/storygraph/scripts/storygraph.py",
+            "validate-skill",
+            "--skill-root",
+            str(root),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2
+    assert "'SKILL.md'" in result.stdout
+
+
 def test_sync_clean_script_contains_destination_boundary_guard():
     script = Path("skill-src/storygraph/scripts/sync-skill.ps1").read_text(encoding="utf-8")
     assert "[IO.Path]::GetFullPath($Destination).TrimEnd('\\')" in script
@@ -173,6 +220,40 @@ def test_sync_clean_preserves_local_config_in_default_install(tmp_path):
     )
     assert result.returncode == 0
     assert local_config.read_text(encoding="utf-8") == '{"local": true}\n'
+    assert (destination / "config" / "storygraph.default.json").read_text(encoding="utf-8") == (
+        '{"managed": true}\n'
+    )
+
+
+def test_sync_preserves_destination_local_config_when_source_has_local_config(tmp_path):
+    source = tmp_path / "source"
+    destination = tmp_path / "custom-storygraph"
+    (source / "config").mkdir(parents=True)
+    (destination / "config").mkdir(parents=True)
+    (source / "config" / "storygraph.default.json").write_text('{"managed": true}\n', encoding="utf-8")
+    (source / "config" / "storygraph.local.json").write_text('{"source": true}\n', encoding="utf-8")
+    (destination / "config" / "storygraph.default.json").write_text('{"old": true}\n', encoding="utf-8")
+    local_config = destination / "config" / "storygraph.local.json"
+    local_config.write_text('{"destination": true}\n', encoding="utf-8")
+    script = Path("skill-src/storygraph/scripts/sync-skill.ps1")
+    result = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(script),
+            "-Source",
+            str(source),
+            "-Destination",
+            str(destination),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert local_config.read_text(encoding="utf-8") == '{"destination": true}\n'
     assert (destination / "config" / "storygraph.default.json").read_text(encoding="utf-8") == (
         '{"managed": true}\n'
     )
