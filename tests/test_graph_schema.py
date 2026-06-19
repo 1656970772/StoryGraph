@@ -1,0 +1,273 @@
+from storygraph_lib.graph_schema import merge_template_supplements, validate_canonical_graph
+from storygraph_lib.ids import (
+    stable_edge_id,
+    stable_event_id,
+    stable_evidence_id,
+    stable_node_id,
+)
+
+
+def test_stable_ids_are_repeatable_and_type_scoped():
+    assert stable_node_id("凡人修仙传", "韩立", "person") == stable_node_id(
+        "凡人修仙传", "韩立", "person"
+    )
+    assert stable_node_id("凡人修仙传", "韩立", "person") != stable_node_id(
+        "凡人修仙传", "韩立", "faction"
+    )
+    assert stable_edge_id("凡人修仙传", "node:a", "node:b", "owns").startswith(
+        "edge:owns:"
+    )
+    assert stable_event_id("凡人修仙传", "resource_gain", "韩立", [0, 12]).startswith(
+        "event:resource_gain:"
+    )
+    assert stable_evidence_id("凡人修仙传", "chunk-0001", [0, 12]).startswith(
+        "evidence:"
+    )
+
+
+def test_deep_validation_rejects_missing_evidence_and_bad_status():
+    graph = {
+        "nodes": [
+            {
+                "id": "node:person:abc",
+                "label": "韩立",
+                "node_type": "person",
+                "evidence_ids": [],
+                "supports_templates": [
+                    {
+                        "template_name": "法宝分析",
+                        "requirement_id": "法宝分析.required_fields.法宝",
+                        "status": "maybe",
+                    }
+                ],
+                "confidence": "EXTRACTED",
+                "verification_status": "verified",
+            }
+        ],
+        "edges": [],
+        "hyperedges": [],
+        "events": [],
+        "evidence_index": [],
+        "metadata": {},
+    }
+
+    result = validate_canonical_graph(graph)
+
+    assert result.ok is False
+    assert "missing:schema_version" in result.errors
+    assert "missing:graphify_schema_version" in result.errors
+    assert "missing:storygraph_schema_version" in result.errors
+    assert "bad_requirement_status:maybe" in result.errors
+    assert "node_without_evidence:node:person:abc" in result.errors
+
+
+def test_deep_validation_requires_top_level_schema_versions():
+    graph = {
+        "nodes": [],
+        "edges": [],
+        "hyperedges": [],
+        "events": [],
+        "evidence_index": [],
+        "metadata": {"graphify_schema_version": "x"},
+    }
+
+    errors = validate_canonical_graph(graph).errors
+
+    assert "missing:schema_version" in errors
+    assert "missing:graphify_schema_version" in errors
+    assert "missing:storygraph_schema_version" in errors
+
+
+def test_merge_template_supplements_preserves_graphify_fields_and_requires_non_empty_supports():
+    base = {
+        "nodes": [{"id": "node:person:abc", "label": "韩立"}],
+        "edges": [{"id": "graphify-edge-1", "source": "a", "target": "b"}],
+        "hyperedges": [],
+        "metadata": {"graphify_schema_version": "x"},
+        "graphify_extra": {"kept": True},
+    }
+    supplement = {
+        "nodes": [
+            {
+                "id": "node:person:abc",
+                "node_type": "person",
+                "evidence_ids": ["evidence:1"],
+                "supports_templates": [
+                    {
+                        "template_name": "法宝分析",
+                        "requirement_id": "法宝分析.required_fields.法宝",
+                        "status": "covered",
+                    }
+                ],
+                "confidence": "EXTRACTED",
+                "verification_status": "verified",
+            }
+        ],
+        "edges": [],
+        "events": [],
+        "evidence_index": [
+            {
+                "evidence_id": "evidence:1",
+                "source_range": [0, 8],
+                "fact_summary": "韩立获得小瓶",
+                "confidence": "EXTRACTED",
+                "verification_status": "verified",
+                "supports_templates": [
+                    {
+                        "template_name": "法宝分析",
+                        "requirement_id": "法宝分析.required_fields.法宝",
+                        "status": "covered",
+                    }
+                ],
+            }
+        ],
+    }
+
+    graph = merge_template_supplements(base, supplement)
+
+    assert graph["nodes"][0]["label"] == "韩立"
+    assert graph["metadata"]["graphify_schema_version"] == "x"
+    assert graph["graphify_extra"] == {"kept": True}
+    assert graph["graphify_schema_version"] == "x"
+    assert graph["storygraph_schema_version"] == "1.0"
+    assert validate_canonical_graph(graph).ok is True
+
+
+def test_deep_validation_rejects_bad_edges_events_evidence_and_unknown_evidence():
+    graph = {
+        "schema_version": "1.0",
+        "graphify_schema_version": "x",
+        "storygraph_schema_version": "1.0",
+        "nodes": [
+            {
+                "id": "node:item:1",
+                "label": "小瓶",
+                "node_type": "artifact",
+                "evidence_ids": ["evidence:missing"],
+                "supports_templates": [
+                    {
+                        "template_name": "法宝分析",
+                        "requirement_id": "r1",
+                        "status": "covered",
+                    }
+                ],
+                "confidence": "EXTRACTED",
+                "verification_status": "verified",
+            }
+        ],
+        "edges": [
+            {
+                "id": "edge:owns:1",
+                "source": "node:item:1",
+                "target": "node:missing",
+                "edge_type": "owns",
+                "evidence_ids": ["evidence:missing"],
+                "supports_templates": [
+                    {
+                        "template_name": "法宝分析",
+                        "requirement_id": "r2",
+                        "status": "covered",
+                    }
+                ],
+                "confidence": "CERTAIN",
+                "verification_status": "verified",
+            }
+        ],
+        "hyperedges": [],
+        "events": [
+            {
+                "id": "event:gain:1",
+                "event_type": "gain",
+                "participants": ["node:missing"],
+                "evidence_ids": [],
+                "supports_templates": [
+                    {
+                        "template_name": "法宝分析",
+                        "requirement_id": "r3",
+                        "status": "unknown",
+                    }
+                ],
+                "confidence": "EXTRACTED",
+                "verification_status": "bad",
+            }
+        ],
+        "evidence_index": [
+            {
+                "evidence_id": "bad",
+                "source_range": [],
+                "fact_summary": "",
+                "confidence": "EXTRACTED",
+                "verification_status": "verified",
+                "supports_templates": [],
+            }
+        ],
+        "metadata": {},
+    }
+
+    errors = validate_canonical_graph(graph).errors
+
+    assert "node_unknown_evidence:node:item:1" in errors
+    assert "edge_unknown_node:edge:owns:1" in errors
+    assert "bad_confidence:CERTAIN" in errors
+    assert "event_without_evidence:event:gain:1" in errors
+    assert "bad_requirement_status:unknown" in errors
+    assert "bad_evidence_id:bad" in errors
+
+
+def test_graphify_native_items_without_storygraph_markers_are_allowed():
+    graph = {
+        "schema_version": "1.0",
+        "graphify_schema_version": "x",
+        "storygraph_schema_version": "1.0",
+        "nodes": [{"id": "person-1", "label": "韩立"}],
+        "edges": [{"id": "rel-1", "source": "person-1", "target": "person-2"}],
+        "hyperedges": [],
+        "events": [],
+        "evidence_index": [],
+        "metadata": {},
+    }
+
+    assert validate_canonical_graph(graph).ok is True
+
+
+def test_validate_canonical_graph_accepts_configured_status_enums():
+    graph = merge_template_supplements(
+        {"nodes": [{"id": "node:person:abc", "label": "韩立"}]},
+        {
+            "nodes": [
+                {
+                    "id": "node:person:abc",
+                    "node_type": "person",
+                    "evidence_ids": ["evidence:1"],
+                    "supports_templates": [
+                        {"template_name": "人物分析", "requirement_id": "r1", "status": "done"}
+                    ],
+                    "confidence": "HIGH",
+                    "verification_status": "checked",
+                }
+            ],
+            "evidence_index": [
+                {
+                    "evidence_id": "evidence:1",
+                    "source_range": [0, 8],
+                    "fact_summary": "韩立出场",
+                    "confidence": "HIGH",
+                    "verification_status": "checked",
+                    "supports_templates": [
+                        {"template_name": "人物分析", "requirement_id": "r1", "status": "done"}
+                    ],
+                }
+            ],
+        },
+    )
+
+    result = validate_canonical_graph(
+        graph,
+        status_enums={
+            "requirement_statuses": ["done"],
+            "verification_statuses": ["checked"],
+            "confidence_levels": ["HIGH"],
+        },
+    )
+
+    assert result.ok is True
