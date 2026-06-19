@@ -117,9 +117,16 @@ def validate_single_writer(records: Iterable[dict]) -> LedgerValidation:
     errors: list[str] = []
     normalized_records = []
     for record in records:
+        if not isinstance(record, dict):
+            errors.append("bad_agent_ledger_record")
+            continue
         owner = str(record.get("run_id") or record.get("agent_role") or "unknown")
-        outputs, output_errors = _safe_path_list(record.get("output_paths", []))
-        scopes, scope_errors = _safe_path_list(record.get("write_scope", []))
+        outputs, output_errors = _safe_path_list(
+            record.get("output_paths", []), f"{owner}:output_paths"
+        )
+        scopes, scope_errors = _safe_path_list(
+            record.get("write_scope", []), f"{owner}:write_scope"
+        )
         errors.extend(output_errors)
         errors.extend(scope_errors)
         normalized_records.append((owner, outputs, scopes))
@@ -155,10 +162,16 @@ def _path_text(value: str | Path) -> str:
     return Path(value).as_posix() if isinstance(value, Path) else str(value).replace("\\", "/")
 
 
-def _safe_path_list(values: Iterable[str | Path] | str | Path) -> tuple[list[str], list[str]]:
+def _safe_path_list(
+    values: Iterable[str | Path] | str | Path, label: str = "paths"
+) -> tuple[list[str], list[str]]:
     normalized = []
     errors = []
-    for value in _path_list(values):
+    try:
+        values = _path_list(values)
+    except TypeError:
+        return [], [f"invalid_path_list:{label}"]
+    for value in values:
         try:
             normalized.append(normalize_relative_output_path(value))
         except OutputWriteError:

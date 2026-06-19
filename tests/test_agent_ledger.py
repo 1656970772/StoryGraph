@@ -135,6 +135,31 @@ def test_validate_single_writer_reports_absolute_and_out_of_bounds_paths():
     assert "invalid_path:/coverage/x.json" in result.errors
 
 
+def test_validate_single_writer_reports_malformed_records_and_path_lists():
+    records = [
+        "not-a-record",
+        {
+            "run_id": "run-bad-output",
+            "agent_role": "图抽取",
+            "output_paths": 1,
+            "write_scope": [],
+        },
+        {
+            "run_id": "run-bad-scope",
+            "agent_role": "覆盖审查",
+            "output_paths": [],
+            "write_scope": 1,
+        },
+    ]
+
+    result = validate_single_writer(records)
+
+    assert result.ok is False
+    assert "bad_agent_ledger_record" in result.errors
+    assert "invalid_path_list:run-bad-output:output_paths" in result.errors
+    assert "invalid_path_list:run-bad-scope:write_scope" in result.errors
+
+
 def test_make_stage_agent_records_returns_required_roles_and_io_scope():
     records = make_stage_agent_records(
         chunk_ids=["chunk-0001", "chunk-0002"],

@@ -107,7 +107,10 @@ def validate_graph_dir(graph_dir: Path) -> GraphDirValidation:
         errors.append(f"stage1_not_success:{stage1_status}")
     if stage1_status == "success":
         errors.extend(_validate_required_agent_roles(agent_ledger))
-    if stage1_status == "success" and any(record.get("status") != "completed" for record in agent_ledger):
+    if stage1_status == "success" and any(
+        not isinstance(record, dict) or record.get("status") != "completed"
+        for record in agent_ledger
+    ):
         errors.append("agent_run_not_completed")
 
     return GraphDirValidation(ok=not errors, errors=_dedupe(errors))
@@ -277,7 +280,7 @@ def _validate_evidence_links(graph: dict, coverage_evidence: list[dict]) -> list
     if graph_evidence_ids != coverage_evidence_ids:
         errors.append("graph_coverage_evidence_mismatch")
     graph_items = []
-    for key in ["nodes", "edges", "events"]:
+    for key in ["nodes", "edges", "events", "hyperedges"]:
         values = graph.get(key, [])
         if not isinstance(values, list):
             errors.append(f"bad_graph_collection:{key}")
@@ -286,7 +289,11 @@ def _validate_evidence_links(graph: dict, coverage_evidence: list[dict]) -> list
     for item in graph_items:
         if not isinstance(item, dict):
             continue
-        for evidence_id in item.get("evidence_ids", []):
+        refs = item.get("evidence_ids", [])
+        if not isinstance(refs, list):
+            errors.append(f"bad_graph_evidence_refs:{item.get('id')}")
+            continue
+        for evidence_id in refs:
             if evidence_id not in graph_evidence_ids:
                 errors.append(f"unknown_evidence_reference:{item.get('id')}")
     return errors

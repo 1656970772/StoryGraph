@@ -89,37 +89,49 @@ def validate_canonical_graph(
 ) -> SchemaValidation:
     enums = _status_enums(status_enums)
     errors = [f"missing:{key}" for key in REQUIRED_TOP_LEVEL_FIELDS if key not in graph]
+    collections = {
+        key: _graph_collection(graph, key, errors)
+        for key in ["nodes", "edges", "hyperedges", "events", "evidence_index"]
+    }
     evidence_ids = {
         evidence.get("evidence_id")
-        for evidence in graph.get("evidence_index", [])
+        for evidence in collections["evidence_index"]
         if isinstance(evidence, dict)
     }
     node_ids = {
-        node.get("id") for node in graph.get("nodes", []) if isinstance(node, dict)
+        node.get("id") for node in collections["nodes"] if isinstance(node, dict)
     }
 
-    for node in graph.get("nodes", []):
+    for node in collections["nodes"]:
         if not isinstance(node, dict) or not _is_storygraph_item(node):
             continue
         _validate_node(node, evidence_ids, enums, errors)
 
-    for edge in graph.get("edges", []):
+    for edge in collections["edges"]:
         if not isinstance(edge, dict) or not _is_storygraph_item(edge):
             continue
         _validate_edge(edge, node_ids, evidence_ids, enums, errors)
 
-    for event in graph.get("events", []):
+    for event in collections["events"]:
         if not isinstance(event, dict) or not _is_storygraph_item(event):
             continue
         _validate_event(event, node_ids, evidence_ids, enums, errors)
 
-    for evidence in graph.get("evidence_index", []):
+    for evidence in collections["evidence_index"]:
         if not isinstance(evidence, dict):
             errors.append("bad_evidence_record")
             continue
         _validate_evidence(evidence, enums, errors)
 
     return SchemaValidation(ok=not errors, errors=errors)
+
+
+def _graph_collection(graph: dict[str, Any], key: str, errors: list[str]) -> list:
+    values = graph.get(key, [])
+    if not isinstance(values, list):
+        errors.append(f"bad_graph_collection:{key}")
+        return []
+    return values
 
 
 def _status_enums(status_enums: dict[str, list[str]] | None) -> dict[str, set[str]]:

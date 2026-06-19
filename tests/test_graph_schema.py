@@ -79,6 +79,29 @@ def test_deep_validation_requires_top_level_schema_versions():
     assert "missing:storygraph_schema_version" in errors
 
 
+def test_deep_validation_reports_malformed_collections_without_throwing():
+    graph = {
+        "schema_version": "1.0",
+        "graphify_schema_version": "x",
+        "storygraph_schema_version": "1.0",
+        "nodes": {},
+        "edges": None,
+        "hyperedges": "bad",
+        "events": 1,
+        "evidence_index": None,
+        "metadata": {},
+    }
+
+    result = validate_canonical_graph(graph)
+
+    assert result.ok is False
+    assert "bad_graph_collection:nodes" in result.errors
+    assert "bad_graph_collection:edges" in result.errors
+    assert "bad_graph_collection:hyperedges" in result.errors
+    assert "bad_graph_collection:events" in result.errors
+    assert "bad_graph_collection:evidence_index" in result.errors
+
+
 def test_merge_template_supplements_preserves_graphify_fields_and_requires_non_empty_supports():
     base = {
         "nodes": [{"id": "node:person:abc", "label": "韩立"}],
