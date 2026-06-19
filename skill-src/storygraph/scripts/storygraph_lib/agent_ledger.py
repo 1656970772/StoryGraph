@@ -46,9 +46,9 @@ def make_stage_agent_records(chunk_ids: Iterable[str], template_names: Iterable[
     templates = list(template_names)
     return [
         make_agent_run_record(
-            "stage-1-template-requirements",
+            "stage1-template-requirements",
             "模板需求分析",
-            "stage-1",
+            "stage1",
             chunks,
             templates,
             ["templates"],
@@ -56,9 +56,9 @@ def make_stage_agent_records(chunk_ids: Iterable[str], template_names: Iterable[
             ["requirements/template-requirements.json"],
         ),
         make_agent_run_record(
-            "stage-1-graph-extraction",
+            "stage1-graph-extraction",
             "图抽取",
-            "stage-1",
+            "stage1",
             chunks,
             templates,
             ["source", "requirements/template-requirements.json"],
@@ -74,9 +74,9 @@ def make_stage_agent_records(chunk_ids: Iterable[str], template_names: Iterable[
             ],
         ),
         make_agent_run_record(
-            "stage-1-coverage-review",
+            "stage1-coverage-review",
             "覆盖审查",
-            "stage-1",
+            "stage1",
             chunks,
             templates,
             ["source", "requirements/template-requirements.json", "graphify-out/graph.json"],
@@ -94,9 +94,9 @@ def make_stage_agent_records(chunk_ids: Iterable[str], template_names: Iterable[
             ],
         ),
         make_agent_run_record(
-            "stage-1-quality-review",
+            "stage1-quality-review",
             "质量审查",
-            "stage-1",
+            "stage1",
             chunks,
             templates,
             [

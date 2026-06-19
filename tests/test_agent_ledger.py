@@ -14,7 +14,7 @@ def test_make_agent_run_record_uses_plan_contract_defaults():
     record = make_agent_run_record(
         "run-001",
         "图抽取",
-        "stage-1",
+        "stage1",
         ["chunk-0001"],
         ["法宝分析"],
         ["coverage/chunk-ledger.json"],
@@ -25,7 +25,7 @@ def test_make_agent_run_record_uses_plan_contract_defaults():
     assert record == {
         "run_id": "run-001",
         "agent_role": "图抽取",
-        "stage": "stage-1",
+        "stage": "stage1",
         "assigned_chunk_ids": ["chunk-0001"],
         "assigned_template_names": ["法宝分析"],
         "input_paths": ["coverage/chunk-ledger.json"],
@@ -45,7 +45,7 @@ def test_validate_single_writer_detects_duplicate_outputs_write_scopes_and_cross
         make_agent_run_record(
             "run-coverage-a",
             "覆盖审查",
-            "stage-1",
+            "stage1",
             ["chunk-0001"],
             ["法宝分析"],
             ["requirements/template-requirements.json"],
@@ -55,7 +55,7 @@ def test_validate_single_writer_detects_duplicate_outputs_write_scopes_and_cross
         make_agent_run_record(
             "run-coverage-b",
             "质量审查",
-            "stage-1",
+            "stage1",
             ["chunk-0002"],
             ["人物分析"],
             ["graphify-out/graph.json"],
@@ -65,7 +65,7 @@ def test_validate_single_writer_detects_duplicate_outputs_write_scopes_and_cross
         make_agent_run_record(
             "run-cross",
             "图抽取",
-            "stage-1",
+            "stage1",
             ["chunk-0003"],
             ["事件分析"],
             ["novel.txt"],
@@ -87,7 +87,7 @@ def test_validate_single_writer_normalizes_relative_paths_before_conflict_checks
         make_agent_run_record(
             "run-a",
             "覆盖审查",
-            "stage-1",
+            "stage1",
             ["chunk-0001"],
             ["法宝分析"],
             ["requirements/template-requirements.json"],
@@ -97,7 +97,7 @@ def test_validate_single_writer_normalizes_relative_paths_before_conflict_checks
         make_agent_run_record(
             "run-b",
             "质量审查",
-            "stage-1",
+            "stage1",
             ["chunk-0002"],
             ["人物分析"],
             ["graphify-out/graph.json"],
@@ -118,7 +118,7 @@ def test_validate_single_writer_reports_absolute_and_out_of_bounds_paths():
         make_agent_run_record(
             "run-bad",
             "覆盖审查",
-            "stage-1",
+            "stage1",
             ["chunk-0001"],
             ["法宝分析"],
             ["requirements/template-requirements.json"],
@@ -148,13 +148,13 @@ def test_make_stage_agent_records_returns_required_roles_and_io_scope():
         "质量审查",
     ]
     assert [record["run_id"] for record in records] == [
-        "stage-1-template-requirements",
-        "stage-1-graph-extraction",
-        "stage-1-coverage-review",
-        "stage-1-quality-review",
+        "stage1-template-requirements",
+        "stage1-graph-extraction",
+        "stage1-coverage-review",
+        "stage1-quality-review",
     ]
     for record in records:
-        assert record["stage"] == "stage-1"
+        assert record["stage"] == "stage1"
         assert record["assigned_chunk_ids"] == ["chunk-0001", "chunk-0002"]
         assert record["assigned_template_names"] == ["法宝分析", "人物分析"]
         assert record["input_paths"]
