@@ -28,6 +28,9 @@ def main(argv=None):
         return 0 if result.ok else 2
     if args.command == "config-check":
         local = Path(args.local_override) if args.local_override else None
+        if local and not local.exists():
+            print({"ok": False, "error": "local_override_missing", "path": str(local)})
+            return 2
         config = load_config(_default_config_path(), local_override=local)
         print({"ok": True, "graph_dir_suffix": config["graph_dir_suffix"]})
         return 0

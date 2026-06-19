@@ -8,15 +8,16 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = ROOT / "skill-src" / "storygraph" / "config" / "storygraph.default.json"
 
 
-def _string_values(value):
+def _json_key_and_string_values(value, path="$"):
     if isinstance(value, str):
-        yield value
+        yield (path, value)
     elif isinstance(value, dict):
-        for nested in value.values():
-            yield from _string_values(nested)
+        for key, nested in value.items():
+            yield (f"{path}.{key}", key)
+            yield from _json_key_and_string_values(nested, f"{path}.{key}")
     elif isinstance(value, list):
-        for nested in value:
-            yield from _string_values(nested)
+        for index, nested in enumerate(value):
+            yield from _json_key_and_string_values(nested, f"{path}[{index}]")
 
 
 def test_default_config_is_portable_and_local_override_wins(tmp_path):
@@ -56,22 +57,28 @@ def test_config_check_command_is_registered(capsys):
 
 
 def test_real_default_config_does_not_contain_local_paths_or_test_inputs():
-    config = json.loads(DEFAULT_CONFIG.read_text(encoding="utf-8"))
+    raw_config = DEFAULT_CONFIG.read_text(encoding="utf-8")
+    config = json.loads(raw_config)
     banned_fragments = [
         "E:/AI_Projects",
         "E:\\AI_Projects",
+        "E:\\\\AI_Projects",
         "E:/Github_Projects",
         "E:\\Github_Projects",
+        "E:\\\\Github_Projects",
         "C:/Users",
         "C:\\Users",
+        "C:\\\\Users",
         "凡人修仙传.txt",
         ".codex\\skills\\storygraph",
+        ".codex\\\\skills\\\\storygraph",
         ".codex/skills/storygraph",
     ]
+    subjects = [("raw json", raw_config), *_json_key_and_string_values(config)]
 
     offenders = [
-        (text, fragment)
-        for text in _string_values(config)
+        (location, fragment)
+        for location, text in subjects
         for fragment in banned_fragments
         if fragment in text
     ]
@@ -129,3 +136,13 @@ def test_config_check_uses_local_override(capsys, tmp_path):
 
     assert main(["config-check", "--local-override", str(local)]) == 0
     assert ".local-storygraph" in capsys.readouterr().out
+
+
+def test_config_check_rejects_missing_explicit_local_override(capsys, tmp_path):
+    from storygraph_lib.cli import main
+
+    missing = tmp_path / "storygraph.local.json"
+
+    assert main(["config-check", "--local-override", str(missing)]) == 2
+    captured = capsys.readouterr()
+    assert "local_override_missing" in captured.out
