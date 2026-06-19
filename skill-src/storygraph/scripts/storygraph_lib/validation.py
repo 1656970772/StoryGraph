@@ -145,12 +145,8 @@ def _validate_requirements_readiness(
     requirement_records = requirements.get("templates", [])
     if not isinstance(requirement_records, list):
         return ["requirements_templates_not_list"]
-    requirement_templates = {
-        record.get("template_name") for record in requirement_records if isinstance(record, dict)
-    }
-    readiness_templates = {
-        record.get("template_name") for record in readiness if isinstance(record, dict)
-    }
+    requirement_templates = _template_name_set(requirement_records, errors, "bad_requirement_template_name")
+    readiness_templates = _template_name_set(readiness, errors, "bad_readiness_template_name")
     if requirement_templates != readiness_templates:
         errors.append("requirements_readiness_template_mismatch")
 
@@ -182,19 +178,27 @@ def _validate_requirements_readiness(
                 errors.append(f"bad_requirement_list:{template_name}:{key}")
                 continue
             for item in items:
+                if not isinstance(item, str):
+                    errors.append(f"bad_requirement_item:{template_name}:{key}")
+                    continue
                 marker = (kind, item)
                 if marker in seen:
                     continue
                 seen.add(marker)
                 expected_ids.add(f"{template_name}.{key}.{item}")
 
-    actual_ids = {
-        status.get("requirement_id")
-        for record in readiness
-        if isinstance(record, dict)
-        for status in _safe_statuses(record.get("requirement_statuses"))
-        if isinstance(status, dict)
-    }
+    actual_ids = set()
+    for record in readiness:
+        if not isinstance(record, dict):
+            continue
+        for status in _safe_statuses(record.get("requirement_statuses")):
+            if not isinstance(status, dict):
+                continue
+            requirement_id = status.get("requirement_id")
+            if not isinstance(requirement_id, str):
+                errors.append(f"bad_readiness_requirement_id:{record.get('template_name')}")
+                continue
+            actual_ids.add(requirement_id)
     if expected_ids != actual_ids:
         errors.append("requirements_readiness_id_mismatch")
 
@@ -206,7 +210,9 @@ def _validate_requirements_readiness(
     if not isinstance(configured_statuses, list):
         errors.append("bad_status_enum:requirement_statuses")
         configured_statuses = DEFAULT_REQUIREMENT_STATUSES
-    allowed_statuses = set(configured_statuses)
+    allowed_statuses = _safe_string_set(
+        configured_statuses, errors, "bad_status_enum_item:requirement_statuses"
+    )
     for record in readiness:
         if not isinstance(record, dict):
             errors.append("bad_readiness_record")
@@ -221,9 +227,33 @@ def _validate_requirements_readiness(
             if not isinstance(status, dict):
                 errors.append(f"bad_readiness_status_record:{record.get('template_name')}")
                 continue
-            if status.get("status") not in allowed_statuses:
-                errors.append(f"bad_readiness_status:{status.get('status')}")
+            status_value = status.get("status")
+            if not isinstance(status_value, str) or status_value not in allowed_statuses:
+                errors.append(f"bad_readiness_status:{status_value}")
     return errors
+
+
+def _template_name_set(records: list, errors: list[str], error_code: str) -> set[str]:
+    names = set()
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        template_name = record.get("template_name")
+        if not isinstance(template_name, str):
+            errors.append(error_code)
+            continue
+        names.add(template_name)
+    return names
+
+
+def _safe_string_set(values: list, errors: list[str], error_code: str) -> set[str]:
+    strings = set()
+    for value in values:
+        if not isinstance(value, str):
+            errors.append(error_code)
+            continue
+        strings.add(value)
+    return strings
 
 
 def _normalized_status_enums(requirements: dict, errors: list[str]) -> dict | None:
@@ -281,12 +311,8 @@ def _validate_evidence_links(graph: dict, coverage_evidence: list[dict]) -> list
     if not isinstance(graph_evidence, list):
         errors.append("bad_graph_collection:evidence_index")
         graph_evidence = []
-    graph_evidence_ids = {
-        item.get("evidence_id") for item in graph_evidence if isinstance(item, dict)
-    }
-    coverage_evidence_ids = {
-        item.get("evidence_id") for item in coverage_evidence if isinstance(item, dict)
-    }
+    graph_evidence_ids = _evidence_id_set(graph_evidence)
+    coverage_evidence_ids = _evidence_id_set(coverage_evidence)
     for evidence in graph_evidence:
         if not isinstance(evidence, dict):
             continue
@@ -316,14 +342,27 @@ def _validate_evidence_links(graph: dict, coverage_evidence: list[dict]) -> list
             errors.append(f"bad_graph_evidence_refs:{item.get('id')}")
             continue
         for evidence_id in refs:
-            if evidence_id not in graph_evidence_ids:
+            if not isinstance(evidence_id, str) or evidence_id not in graph_evidence_ids:
                 errors.append(f"unknown_evidence_reference:{item.get('id')}")
     return errors
 
 
+def _evidence_id_set(records: list) -> set[str]:
+    ids = set()
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        evidence_id = record.get("evidence_id")
+        if isinstance(evidence_id, str):
+            ids.add(evidence_id)
+    return ids
+
+
 def _validate_required_agent_roles(agent_ledger: list[dict]) -> list[str]:
     seen_roles = {
-        record.get("agent_role") for record in agent_ledger if isinstance(record, dict)
+        record.get("agent_role")
+        for record in agent_ledger
+        if isinstance(record, dict) and isinstance(record.get("agent_role"), str)
     }
     return [
         f"missing_agent_role:{role}"

@@ -62,7 +62,7 @@ def merge_template_supplements(base: dict[str, Any], supplement: dict[str, Any])
         if not isinstance(copied, dict):
             continue
         node_id = copied.get("id")
-        if not node_id:
+        if not isinstance(node_id, str) or not node_id:
             anonymous_nodes.append(copied)
             continue
         merged_nodes[node_id] = copied
@@ -73,7 +73,7 @@ def merge_template_supplements(base: dict[str, Any], supplement: dict[str, Any])
         if not isinstance(copied, dict):
             continue
         node_id = copied.get("id")
-        if not node_id:
+        if not isinstance(node_id, str) or not node_id:
             anonymous_nodes.append(copied)
             continue
         if node_id not in merged_nodes:
@@ -98,14 +98,8 @@ def validate_canonical_graph(
         key: _graph_collection(graph, key, errors)
         for key in GRAPH_COLLECTION_FIELDS
     }
-    evidence_ids = {
-        evidence.get("evidence_id")
-        for evidence in collections["evidence_index"]
-        if isinstance(evidence, dict)
-    }
-    node_ids = {
-        node.get("id") for node in collections["nodes"] if isinstance(node, dict)
-    }
+    evidence_ids = _string_field_set(collections["evidence_index"], "evidence_id")
+    node_ids = _string_field_set(collections["nodes"], "id")
 
     for node in collections["nodes"]:
         if not isinstance(node, dict) or not _is_storygraph_item(node):
@@ -154,8 +148,29 @@ def _status_enums(status_enums: dict[str, list[str]] | None, errors: list[str]) 
         if not isinstance(value, list):
             errors.append(f"bad_status_enum:{key}")
             continue
-        merged[key] = list(value)
+        merged[key] = _string_enum_values(key, value, errors)
     return {key: set(value) for key, value in merged.items()}
+
+
+def _string_field_set(records: list, key: str) -> set[str]:
+    values = set()
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        value = record.get(key)
+        if isinstance(value, str):
+            values.add(value)
+    return values
+
+
+def _string_enum_values(key: str, values: list, errors: list[str]) -> list[str]:
+    strings = []
+    for value in values:
+        if not isinstance(value, str):
+            errors.append(f"bad_status_enum_item:{key}")
+            continue
+        strings.append(value)
+    return strings
 
 
 def _is_storygraph_item(item: dict[str, Any]) -> bool:
@@ -202,7 +217,9 @@ def _validate_edge(
     ]:
         if key not in edge:
             errors.append(f"edge_missing:{edge_id}:{key}")
-    if edge.get("source") not in node_ids or edge.get("target") not in node_ids:
+    if not _known_string_ref(edge.get("source"), node_ids) or not _known_string_ref(
+        edge.get("target"), node_ids
+    ):
         errors.append(f"edge_unknown_node:{edge_id}")
     _validate_source_locator("edge", edge_id, edge, errors)
     _validate_evidence_refs("edge", edge_id, edge.get("evidence_ids"), evidence_ids, errors)
@@ -232,7 +249,9 @@ def _validate_event(
         if key not in event:
             errors.append(f"event_missing:{event_id}:{key}")
     participants = event.get("participants", [])
-    if not isinstance(participants, list) or any(pid not in node_ids for pid in participants):
+    if not isinstance(participants, list) or any(
+        not _known_string_ref(pid, node_ids) for pid in participants
+    ):
         errors.append(f"event_unknown_node:{event_id}")
     _validate_source_locator("event", event_id, event, errors)
     _validate_evidence_refs("event", event_id, event.get("evidence_ids"), evidence_ids, errors)
@@ -269,8 +288,12 @@ def _validate_evidence_refs(
     if not isinstance(refs, list) or not refs:
         errors.append(f"{owner}_without_evidence:{owner_id}")
         return
-    if any(ref not in known_evidence_ids for ref in refs):
+    if any(not _known_string_ref(ref, known_evidence_ids) for ref in refs):
         errors.append(f"{owner}_unknown_evidence:{owner_id}")
+
+
+def _known_string_ref(value: object, known_ids: set[str]) -> bool:
+    return isinstance(value, str) and value in known_ids
 
 
 def _validate_source_locator(
@@ -288,10 +311,13 @@ def _validate_status_fields(
     item: dict[str, Any], enums: dict[str, set[str]], errors: list[str]
 ) -> None:
     confidence = item.get("confidence")
-    if confidence not in enums["confidence_levels"]:
+    if not isinstance(confidence, str) or confidence not in enums["confidence_levels"]:
         errors.append(f"bad_confidence:{confidence}")
     verification_status = item.get("verification_status")
-    if verification_status not in enums["verification_statuses"]:
+    if (
+        not isinstance(verification_status, str)
+        or verification_status not in enums["verification_statuses"]
+    ):
         errors.append(f"bad_verification_status:{verification_status}")
 
 
@@ -313,5 +339,5 @@ def _validate_supports(
             if key not in support:
                 errors.append(f"{owner}_support_missing:{owner_id}:{key}")
         status = support.get("status")
-        if status not in enums["requirement_statuses"]:
+        if not isinstance(status, str) or status not in enums["requirement_statuses"]:
             errors.append(f"bad_requirement_status:{status}")

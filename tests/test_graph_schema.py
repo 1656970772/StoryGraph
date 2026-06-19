@@ -121,6 +121,76 @@ def test_deep_validation_reports_malformed_status_enums_without_throwing():
     assert "bad_status_enum:verification_statuses" in result.errors
 
 
+def test_deep_validation_handles_unhashable_nested_refs_and_statuses_without_throwing():
+    graph = {
+        "schema_version": "1.0",
+        "graphify_schema_version": "x",
+        "storygraph_schema_version": "1.0",
+        "nodes": [
+            {
+                "id": "node:item:bad",
+                "label": "坏引用",
+                "node_type": "artifact",
+                "source_range": [0, 1],
+                "evidence_ids": [["nested"]],
+                "supports_templates": [
+                    {
+                        "template_name": "法宝分析",
+                        "requirement_id": "r1",
+                        "status": ["covered"],
+                    }
+                ],
+                "confidence": "EXTRACTED",
+                "verification_status": "verified",
+            }
+        ],
+        "edges": [],
+        "hyperedges": [],
+        "events": [
+            {
+                "id": "event:bad",
+                "event_type": "gain",
+                "source_range": [0, 1],
+                "participants": [["nested"]],
+                "evidence_ids": ["evidence:valid"],
+                "supports_templates": [
+                    {
+                        "template_name": "事件分析",
+                        "requirement_id": "r2",
+                        "status": ["covered"],
+                    }
+                ],
+                "confidence": "EXTRACTED",
+                "verification_status": "verified",
+            }
+        ],
+        "evidence_index": [
+            {
+                "evidence_id": "evidence:valid",
+                "source_range": [0, 1],
+                "fact_summary": "valid",
+                "confidence": "EXTRACTED",
+                "verification_status": "verified",
+                "supports_templates": [
+                    {
+                        "template_name": "法宝分析",
+                        "requirement_id": "r3",
+                        "status": ["covered"],
+                    }
+                ],
+            }
+        ],
+        "metadata": {},
+    }
+
+    result = validate_canonical_graph(graph)
+
+    assert result.ok is False
+    assert "node_unknown_evidence:node:item:bad" in result.errors
+    assert "event_unknown_node:event:bad" in result.errors
+    assert "bad_requirement_status:['covered']" in result.errors
+
+
 def test_merge_template_supplements_preserves_graphify_fields_and_requires_non_empty_supports():
     base = {
         "nodes": [{"id": "node:person:abc", "label": "韩立"}],
@@ -179,19 +249,27 @@ def test_merge_template_supplements_preserves_graphify_fields_and_requires_non_e
 
 def test_merge_template_supplements_tolerates_malformed_optional_collections():
     base = {
-        "nodes": [],
+        "nodes": [{"id": ["bad-base"], "label": "bad"}],
         "edges": None,
         "events": None,
         "evidence_index": None,
         "metadata": "bad",
     }
-    supplement = {"nodes": None, "edges": None, "events": None, "evidence_index": None}
+    supplement = {
+        "nodes": [{"id": ["bad-supplement"], "label": "bad"}],
+        "edges": None,
+        "events": None,
+        "evidence_index": None,
+    }
 
     graph = merge_template_supplements(base, supplement)
 
     assert graph["metadata"] == {}
     assert graph["graphify_schema_version"] == "unknown"
-    assert graph["nodes"] == []
+    assert graph["nodes"] == [
+        {"id": ["bad-base"], "label": "bad"},
+        {"id": ["bad-supplement"], "label": "bad"},
+    ]
     assert graph["edges"] == []
     assert graph["events"] == []
     assert graph["evidence_index"] == []

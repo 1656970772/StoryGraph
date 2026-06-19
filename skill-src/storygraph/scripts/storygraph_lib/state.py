@@ -32,10 +32,20 @@ def _has_blocking_failure(graph_dir: Path) -> bool:
     for record in ledger:
         if not isinstance(record, dict) or record.get("status") != "failed":
             continue
-        for error in record.get("errors", []):
+        record_errors = record.get("errors", [])
+        if not isinstance(record_errors, list):
+            continue
+        for error in record_errors:
             if isinstance(error, dict) and str(error.get("code", "")).startswith("graphify_"):
                 return True
     return False
+
+
+def _stage1_status(manifest: dict):
+    stage_status = manifest.get("stage_status", {})
+    if not isinstance(stage_status, dict):
+        return None
+    return stage_status.get("stage1")
 
 
 def stage1_state(ctx, config_hash: str, graph_validator: Callable[[Path], object]) -> dict:
@@ -48,11 +58,13 @@ def stage1_state(ctx, config_hash: str, graph_validator: Callable[[Path], object
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {"action": "rebuild", "source_state": "changed", "missing": missing}
+    if not isinstance(manifest, dict):
+        return {"action": "rebuild", "source_state": "changed", "missing": missing}
 
     if missing:
         return {"action": "rebuild", "source_state": "changed", "missing": missing}
 
-    stage_success = manifest.get("stage_status", {}).get("stage1") == "success"
+    stage_success = _stage1_status(manifest) == "success"
     same_source = manifest.get("source_hash") == ctx.source_hash
     same_config = manifest.get("config_hash") == config_hash
     graph_ok = bool(getattr(graph_validator(ctx.graph_dir), "ok", False))

@@ -2,6 +2,8 @@ import sys
 import subprocess
 from pathlib import Path
 
+from storygraph_lib.paths import NovelContext
+from storygraph_lib.state import REQUIRED_STAGE1_FILES, stage1_state
 from storygraph_lib.stage1 import build_stage1_graph
 
 
@@ -17,6 +19,19 @@ MANAGED_OUTPUTS = [
     "coverage/agent-run-ledger.json",
     "coverage/gap-report.md",
 ]
+
+
+class _ValidationOk:
+    ok = True
+
+
+def _write_required_stage1_files(graph_dir: Path) -> None:
+    for relative in REQUIRED_STAGE1_FILES:
+        path = graph_dir / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if relative == "manifest.json":
+            continue
+        path.write_text("{}", encoding="utf-8")
 
 
 def _write_37_templates(template_dir: Path) -> None:
@@ -98,6 +113,31 @@ def _config(template_dir: Path, graphify_repo: Path) -> dict:
         "agent_policy": {"sub_agent_json_payloads": []},
         "writer_policy": {"managed_outputs": MANAGED_OUTPUTS},
     }
+
+
+def test_stage1_state_rebuilds_when_manifest_stage_status_shape_is_malformed(tmp_path):
+    source = tmp_path / "mini.txt"
+    source.write_text("法宝", encoding="utf-8")
+    graph_dir = tmp_path / "mini.storygraph"
+    graph_dir.mkdir()
+    _write_required_stage1_files(graph_dir)
+    (graph_dir / "manifest.json").write_text(
+        '{"source_hash":"source-hash","config_hash":"config-hash","stage_status":[]}',
+        encoding="utf-8",
+    )
+    ctx = NovelContext(
+        source_path=source,
+        source_hash="source-hash",
+        source_size=source.stat().st_size,
+        novel_name="mini",
+        novel_dir=tmp_path,
+        graph_dir=graph_dir,
+    )
+
+    result = stage1_state(ctx, "config-hash", lambda _: _ValidationOk())
+
+    assert result["action"] == "rebuild"
+    assert result["source_state"] == "changed"
 
 
 def test_stage1_reuses_graph_when_source_hash_is_unchanged(tmp_path):
