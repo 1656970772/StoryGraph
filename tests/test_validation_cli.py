@@ -828,6 +828,21 @@ def test_validate_graph_dir_manifest_source_path_bad_shape_returns_errors_withou
     assert "bad_manifest_source_path" in result.errors
 
 
+def test_validate_graph_dir_manifest_source_path_embedded_nul_is_reported(tmp_path):
+    from storygraph_lib.validation import validate_graph_dir
+
+    graph_dir = tmp_path / "mini.storygraph"
+    _write_minimal_valid_graph_dir(
+        graph_dir,
+        manifest={"source_path": "bad\0path", "source_size": None},
+    )
+
+    result = validate_graph_dir(graph_dir)
+
+    assert result.ok is False
+    assert "bad_manifest_source_path" in result.errors
+
+
 def test_validate_graph_dir_requirement_nested_items_return_errors_without_throwing(
     tmp_path,
 ):

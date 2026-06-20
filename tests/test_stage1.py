@@ -347,6 +347,25 @@ def test_stage1_unparsable_subagent_json_fails_and_records_ledger(tmp_path):
     assert "unparsable_subagent_json" in gap
 
 
+def test_stage1_deep_subagent_payload_is_structured_failure(tmp_path):
+    novel = tmp_path / "mini_novel.txt"
+    novel.write_text("法宝", encoding="utf-8")
+    template_dir = tmp_path / "templates"
+    _write_template(template_dir, "# 法宝分析模板\n## 字段\n- 法宝")
+    graphify_repo = tmp_path / "graphify"
+    graphify_repo.mkdir()
+    config = _config(template_dir, graphify_repo)
+    config["agent_policy"]["sub_agent_json_payloads"] = [
+        "[" * 20000 + "0" + "]" * 20000
+    ]
+
+    result = build_stage1_graph(novel, config)
+
+    assert result["status"] == "failed"
+    assert "unparsable_subagent_json" in result["validation_errors"]
+    assert result["error"]["code"] == "unparsable_subagent_json"
+
+
 def test_stage1_single_writer_conflict_fails_before_success_outputs(tmp_path, monkeypatch):
     import storygraph_lib.stage1 as stage1_mod
     from storygraph_lib.agent_ledger import make_agent_run_record

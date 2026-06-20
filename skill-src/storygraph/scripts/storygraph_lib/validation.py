@@ -627,6 +627,8 @@ def _expected_source_length(manifest: dict, errors: list[str]) -> int:
         else:
             try:
                 return len(path.read_text(encoding="utf-8"))
+            except ValueError:
+                errors.append("bad_manifest_source_path")
             except (OSError, UnicodeDecodeError):
                 pass
     source_size = manifest.get("source_size")

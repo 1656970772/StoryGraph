@@ -651,7 +651,7 @@ def _parse_subagent_payloads(
     for index, payload in enumerate(config.get("agent_policy", {}).get("sub_agent_json_payloads", []), 1):
         try:
             json.loads(payload)
-        except json.JSONDecodeError as exc:
+        except (json.JSONDecodeError, RecursionError) as exc:
             error = {
                 "code": "unparsable_subagent_json",
                 "payload_index": index,
