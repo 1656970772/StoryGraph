@@ -94,6 +94,22 @@ def test_unsupported_output_policy_raises_value_error(tmp_path):
         resolve_render_target(graph_dir, novel_dir, "法宝分析", POLICY, overwrite_policy="replace")
 
 
+@pytest.mark.parametrize("default_dir", ["C:relative", "drafts:ads"])
+def test_stage2_default_dir_rejects_windows_drive_relative_and_colon(tmp_path, default_dir):
+    graph_dir = tmp_path / "book.storygraph"
+    novel_dir = tmp_path / "novel"
+    graph_dir.mkdir()
+    novel_dir.mkdir()
+    policy = {
+        "default_dir": default_dir,
+        "allowed_policies": ["draft", "backup-and-overwrite", "merge"],
+        "draft_action": "write_draft",
+    }
+
+    with pytest.raises(ValueError, match="unsafe output_policy.default_dir"):
+        resolve_render_target(graph_dir, novel_dir, "法宝分析", policy)
+
+
 @pytest.mark.parametrize(
     "template_name",
     [

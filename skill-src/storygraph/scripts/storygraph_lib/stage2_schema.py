@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 
 STAGE1_CHUNK_LEDGER = "coverage/chunk-ledger.json"
@@ -213,6 +213,9 @@ def resolve_render_target(
 
 def validate_extraction_record(record):
     errors = []
+    if not isinstance(record, dict):
+        return ExtractionValidation(ok=False, errors=["record.must_be_object"])
+
     required = [
         "template_name",
         "template_file",
@@ -298,7 +301,10 @@ def _validate_stage2_policy(stage2_policy, record, errors):
         errors.append("stage2_policy.stage2_output_policy_required")
     else:
         allowed = output_policy.get("allowed_policies")
-        if isinstance(allowed, list) and record.get("overwrite_policy") not in allowed:
+        if not isinstance(allowed, list):
+            errors.append("stage2_policy.stage2_output_policy.allowed_policies_must_be_list")
+            errors.append("overwrite_policy.unsupported")
+        elif record.get("overwrite_policy") not in allowed:
             errors.append("overwrite_policy.unsupported")
 
     return categories
@@ -349,7 +355,14 @@ def _safe_relative_dir(path_value):
     if not isinstance(path_value, str) or not path_value or "\x00" in path_value:
         raise ValueError("unsafe output_policy.default_dir")
     path = Path(path_value)
-    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+    windows_path = PureWindowsPath(path_value)
+    if (
+        ":" in path_value
+        or windows_path.drive
+        or windows_path.is_absolute()
+        or path.is_absolute()
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
         raise ValueError("unsafe output_policy.default_dir")
     return path
 

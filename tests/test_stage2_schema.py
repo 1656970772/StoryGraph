@@ -1,3 +1,5 @@
+import pytest
+
 from storygraph_lib.stage2_schema import (
     make_extraction_record,
     make_template_evidence_usage,
@@ -79,6 +81,26 @@ def test_stage2_validation_rejects_missing_policy_and_category_coverage():
     assert result.ok is False
     assert "missing:stage2_policy" in result.errors
     assert "not_found_items[0].category_required" in result.errors
+
+
+@pytest.mark.parametrize("bad_record", [None, []])
+def test_stage2_validation_rejects_non_object_record_without_crashing(bad_record):
+    result = validate_extraction_record(bad_record)
+
+    assert result.ok is False
+    assert "record.must_be_object" in result.errors
+
+
+def test_stage2_validation_rejects_bad_allowed_policies_shape_and_unsupported_overwrite():
+    record = _record()
+    record["overwrite_policy"] = "replace"
+    record["stage2_policy"]["stage2_output_policy"]["allowed_policies"] = "draft"
+
+    result = validate_extraction_record(record)
+
+    assert result.ok is False
+    assert "stage2_policy.stage2_output_policy.allowed_policies_must_be_list" in result.errors
+    assert "overwrite_policy.unsupported" in result.errors
 
 
 def test_stage2_scaffold_ledgers_use_input_templates_and_artifact_paths():
