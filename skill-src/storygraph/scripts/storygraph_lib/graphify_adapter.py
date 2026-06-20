@@ -73,6 +73,8 @@ class GraphifyAdapter:
                 cwd=cwd,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout_seconds,
             )
         except subprocess.TimeoutExpired as exc:
@@ -82,8 +84,8 @@ class GraphifyAdapter:
                 {
                     "code": "graphify_timeout",
                     "timeout_seconds": timeout_seconds,
-                    "stdout": (exc.stdout or "")[-4000:],
-                    "stderr": (exc.stderr or "")[-4000:],
+                    "stdout": _tail_text(exc.stdout),
+                    "stderr": _tail_text(exc.stderr),
                 },
                 command,
             )
@@ -109,7 +111,7 @@ class GraphifyAdapter:
                 {
                     "code": "graphify_failed",
                     "returncode": completed.returncode,
-                    "stderr": completed.stderr[-4000:],
+                    "stderr": _tail_text(completed.stderr),
                 },
                 command,
             )
@@ -122,7 +124,7 @@ class GraphifyAdapter:
                 {
                     "code": "graphify_artifact_missing",
                     "missing": missing,
-                    "stdout": completed.stdout[-4000:],
+                    "stdout": _tail_text(completed.stdout),
                 },
                 command,
             )
@@ -182,6 +184,14 @@ def _validated_timeout(value: Any) -> tuple[int | None, dict | None]:
     if value <= 0:
         return None, _bad_timeout_error(value)
     return value, None
+
+
+def _tail_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")[-4000:]
+    return value[-4000:]
 
 
 def _bad_timeout_error(value: Any) -> dict:

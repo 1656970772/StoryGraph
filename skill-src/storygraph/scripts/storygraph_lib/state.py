@@ -19,14 +19,18 @@ REQUIRED_STAGE1_FILES = [
 ]
 
 
+def _read_json_file(path: Path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError, RecursionError):
+        return None
+
+
 def _has_blocking_failure(graph_dir: Path) -> bool:
     ledger_path = graph_dir / "coverage" / "agent-run-ledger.json"
     if not ledger_path.exists():
         return False
-    try:
-        ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return False
+    ledger = _read_json_file(ledger_path)
     if not isinstance(ledger, list):
         return False
     for record in ledger:
@@ -54,10 +58,7 @@ def stage1_state(ctx, config_hash: str, graph_validator: Callable[[Path], object
     if not manifest_path.exists():
         return {"action": "build", "source_state": "new", "missing": missing}
 
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {"action": "rebuild", "source_state": "changed", "missing": missing}
+    manifest = _read_json_file(manifest_path)
     if not isinstance(manifest, dict):
         return {"action": "rebuild", "source_state": "changed", "missing": missing}
 

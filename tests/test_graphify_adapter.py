@@ -218,6 +218,20 @@ def test_adapter_command_exit_zero_but_missing_required_artifacts_is_structured_
     assert set(result.error["missing"]) == {"graph.json", "GRAPH_REPORT.md", "graph.html"}
 
 
+def test_adapter_invalid_stdout_encoding_is_structured_error(tmp_path):
+    import sys
+    from storygraph_lib.graphify_adapter import GraphifyAdapter
+
+    source = tmp_path / "novel.txt"
+    source.write_text("正文", encoding="utf-8")
+    cmd = [sys.executable, "-c", "import sys; sys.stdout.buffer.write(bytes([255]))"]
+
+    result = GraphifyAdapter(None, cmd, 5, mode="cli").build_graph(source, tmp_path / "out")
+
+    assert result.ok is False
+    assert result.error["code"] == "graphify_artifact_missing"
+
+
 def test_adapter_nonzero_exit_returns_failed_error_with_stderr_tail(tmp_path):
     source = tmp_path / "novel.txt"
     source.write_text("正文", encoding="utf-8")

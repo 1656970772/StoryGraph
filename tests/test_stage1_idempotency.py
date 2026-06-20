@@ -140,6 +140,59 @@ def test_stage1_state_rebuilds_when_manifest_stage_status_shape_is_malformed(tmp
     assert result["source_state"] == "changed"
 
 
+def test_stage1_state_rebuilds_on_unreadable_manifest(tmp_path):
+    from types import SimpleNamespace
+    from storygraph_lib.state import stage1_state
+
+    graph_dir = tmp_path / "mini.storygraph"
+    graph_dir.mkdir()
+    (graph_dir / "manifest.json").write_bytes(b"\xff")
+
+    ctx = SimpleNamespace(graph_dir=graph_dir, source_hash="h")
+    result = stage1_state(ctx, "cfg", lambda _: SimpleNamespace(ok=True))
+
+    assert result["action"] == "rebuild"
+    assert result["source_state"] == "changed"
+
+
+def test_stage1_state_rebuilds_on_deep_manifest_json(tmp_path):
+    from types import SimpleNamespace
+    from storygraph_lib.state import stage1_state
+
+    graph_dir = tmp_path / "mini.storygraph"
+    graph_dir.mkdir()
+    (graph_dir / "manifest.json").write_text("[" * 5000 + "]" * 5000, encoding="utf-8")
+
+    ctx = SimpleNamespace(graph_dir=graph_dir, source_hash="h")
+    result = stage1_state(ctx, "cfg", lambda _: SimpleNamespace(ok=True))
+
+    assert result["action"] == "rebuild"
+    assert result["source_state"] == "changed"
+
+
+def test_stage1_state_ignores_deep_blocking_ledger_json(tmp_path):
+    from types import SimpleNamespace
+    from storygraph_lib.state import stage1_state
+
+    graph_dir = tmp_path / "mini.storygraph"
+    graph_dir.mkdir()
+    _write_required_stage1_files(graph_dir)
+    (graph_dir / "manifest.json").write_text(
+        '{"source_hash":"h","config_hash":"cfg","stage_status":{"stage1":"success"}}',
+        encoding="utf-8",
+    )
+    (graph_dir / "coverage" / "agent-run-ledger.json").write_text(
+        "[" * 5000 + "]" * 5000,
+        encoding="utf-8",
+    )
+
+    ctx = SimpleNamespace(graph_dir=graph_dir, source_hash="h")
+    result = stage1_state(ctx, "cfg", lambda _: SimpleNamespace(ok=True))
+
+    assert result["action"] == "reuse"
+    assert result["source_state"] == "unchanged"
+
+
 def test_stage1_reuses_graph_when_source_hash_is_unchanged(tmp_path):
     novel = tmp_path / "mini.txt"
     novel.write_text("法宝 小瓶", encoding="utf-8")
