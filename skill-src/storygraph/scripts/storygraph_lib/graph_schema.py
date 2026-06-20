@@ -22,6 +22,13 @@ REQUIRED_TOP_LEVEL_FIELDS = [
 ]
 
 GRAPH_COLLECTION_FIELDS = ["nodes", "edges", "hyperedges", "events", "evidence_index"]
+GRAPH_ITEM_OWNERS = {
+    "nodes": "node",
+    "edges": "edge",
+    "hyperedges": "hyperedge",
+    "events": "event",
+    "evidence_index": "evidence",
+}
 
 STORYGRAPH_MARKERS = {
     "node_type",
@@ -98,28 +105,29 @@ def validate_canonical_graph(
         key: _graph_collection(graph, key, errors)
         for key in GRAPH_COLLECTION_FIELDS
     }
+    collections = {
+        key: _valid_graph_items(key, values, errors)
+        for key, values in collections.items()
+    }
     evidence_ids = _string_field_set(collections["evidence_index"], "evidence_id")
     node_ids = _string_field_set(collections["nodes"], "id")
 
     for node in collections["nodes"]:
-        if not isinstance(node, dict) or not _is_storygraph_item(node):
+        if not _is_storygraph_item(node):
             continue
         _validate_node(node, evidence_ids, enums, errors)
 
     for edge in collections["edges"]:
-        if not isinstance(edge, dict) or not _is_storygraph_item(edge):
+        if not _is_storygraph_item(edge):
             continue
         _validate_edge(edge, node_ids, evidence_ids, enums, errors)
 
     for event in collections["events"]:
-        if not isinstance(event, dict) or not _is_storygraph_item(event):
+        if not _is_storygraph_item(event):
             continue
         _validate_event(event, node_ids, evidence_ids, enums, errors)
 
     for evidence in collections["evidence_index"]:
-        if not isinstance(evidence, dict):
-            errors.append("bad_evidence_record")
-            continue
         _validate_evidence(evidence, enums, errors)
 
     return SchemaValidation(ok=not errors, errors=errors)
@@ -131,6 +139,26 @@ def _graph_collection(graph: dict[str, Any], key: str, errors: list[str]) -> lis
         errors.append(f"bad_graph_collection:{key}")
         return []
     return values
+
+
+def _valid_graph_items(key: str, values: list, errors: list[str]) -> list[dict[str, Any]]:
+    valid_items = []
+    owner = GRAPH_ITEM_OWNERS[key]
+    for item in values:
+        if not isinstance(item, dict):
+            errors.append(
+                "bad_evidence_record" if key == "evidence_index" else f"bad_graph_item:{key}"
+            )
+            continue
+        _validate_locator_ranges(owner, _graph_item_owner_id(key, item), item, errors)
+        valid_items.append(item)
+    return valid_items
+
+
+def _graph_item_owner_id(key: str, item: dict[str, Any]) -> object:
+    if key == "evidence_index":
+        return item.get("evidence_id")
+    return item.get("id")
 
 
 def _safe_collection(values: object) -> list:
@@ -274,7 +302,6 @@ def _validate_evidence(
     ]:
         if key not in evidence:
             errors.append(f"evidence_missing:{evidence_id}:{key}")
-    _validate_source_range("evidence", evidence_id, evidence, errors)
     _validate_status_fields(evidence, enums, errors)
     _validate_supports("evidence", evidence_id, evidence.get("supports_templates"), enums, errors)
 
@@ -300,16 +327,22 @@ def _known_string_ref(value: object, known_ids: set[str]) -> bool:
 def _validate_source_locator(
     owner: str, owner_id: object, item: dict[str, Any], errors: list[str]
 ) -> None:
-    _validate_source_range(owner, owner_id, item, errors)
     if not (_has_locator_value(item.get("source_location")) or _has_locator_value(item.get("source_range"))):
         errors.append(f"{owner}_without_source_location:{owner_id}")
 
 
-def _validate_source_range(
+def _validate_locator_ranges(
     owner: str, owner_id: object, item: dict[str, Any], errors: list[str]
 ) -> None:
     if "source_range" in item and _valid_source_range(item.get("source_range")) is None:
         errors.append(f"{owner}_bad_source_range:{owner_id}")
+    source_location = item.get("source_location")
+    if (
+        isinstance(source_location, dict)
+        and "source_range" in source_location
+        and _valid_source_range(source_location.get("source_range")) is None
+    ):
+        errors.append(f"{owner}_bad_source_location_range:{owner_id}")
 
 
 def _valid_source_range(value: object) -> list[int] | None:

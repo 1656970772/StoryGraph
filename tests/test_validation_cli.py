@@ -563,6 +563,20 @@ def test_validate_graph_dir_malformed_graph_collections_return_errors_without_th
     assert "bad_graph_collection:evidence_index" in result.errors
 
 
+def test_validate_graph_dir_malformed_graph_items_return_errors_without_throwing(
+    tmp_path,
+):
+    from storygraph_lib.validation import validate_graph_dir
+
+    graph_dir = tmp_path / "mini.storygraph"
+    _write_minimal_valid_graph_dir(graph_dir, graph={"nodes": ["not-object"]})
+
+    result = validate_graph_dir(graph_dir)
+
+    assert result.ok is False
+    assert "bad_graph_item:nodes" in result.errors
+
+
 def test_validate_graph_dir_graph_evidence_index_null_returns_errors_without_throwing(
     tmp_path,
 ):

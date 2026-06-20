@@ -104,6 +104,25 @@ def test_deep_validation_reports_malformed_collections_without_throwing():
     assert "bad_graph_collection:evidence_index" in result.errors
 
 
+def test_deep_validation_reports_malformed_graph_items_without_throwing():
+    graph = {
+        "schema_version": "1.0",
+        "graphify_schema_version": "x",
+        "storygraph_schema_version": "1.0",
+        "nodes": ["not-object"],
+        "edges": [],
+        "hyperedges": [],
+        "events": [],
+        "evidence_index": [],
+        "metadata": {},
+    }
+
+    result = validate_canonical_graph(graph)
+
+    assert result.ok is False
+    assert "bad_graph_item:nodes" in result.errors
+
+
 def test_deep_validation_reports_malformed_status_enums_without_throwing():
     graph = {
         "schema_version": "1.0",
@@ -378,6 +397,25 @@ def test_graphify_native_items_without_storygraph_markers_are_allowed():
     assert validate_canonical_graph(graph).ok is True
 
 
+def test_graphify_native_items_with_malformed_source_range_are_rejected():
+    graph = {
+        "schema_version": "1.0",
+        "graphify_schema_version": "x",
+        "storygraph_schema_version": "1.0",
+        "nodes": [{"id": "native-1", "label": "韩立", "source_range": [0.5, 1.5]}],
+        "edges": [],
+        "hyperedges": [],
+        "events": [],
+        "evidence_index": [],
+        "metadata": {},
+    }
+
+    result = validate_canonical_graph(graph)
+
+    assert result.ok is False
+    assert "node_bad_source_range:native-1" in result.errors
+
+
 def test_deep_validation_rejects_storygraph_items_without_source_location():
     graph = {
         "schema_version": "1.0",
@@ -590,6 +628,49 @@ def test_validate_canonical_graph_rejects_bad_source_range_even_with_source_loca
     errors = validate_canonical_graph(graph).errors
 
     assert "node_bad_source_range:node:item:float" in errors
+
+
+def test_validate_canonical_graph_rejects_bad_nested_source_location_range():
+    graph = {
+        "schema_version": "1.0",
+        "graphify_schema_version": "x",
+        "storygraph_schema_version": "1.0",
+        "nodes": [
+            {
+                "id": "node:item:nested",
+                "label": "小瓶",
+                "node_type": "artifact",
+                "source_location": {"source_range": [0.5, 1.5]},
+                "evidence_ids": ["evidence:1"],
+                "supports_templates": [
+                    {"template_name": "法宝分析", "requirement_id": "r1", "status": "covered"}
+                ],
+                "confidence": "EXTRACTED",
+                "verification_status": "verified",
+            }
+        ],
+        "edges": [],
+        "hyperedges": [],
+        "events": [],
+        "evidence_index": [
+            {
+                "evidence_id": "evidence:1",
+                "source_range": [0, 2],
+                "fact_summary": "韩立获得小瓶",
+                "confidence": "EXTRACTED",
+                "verification_status": "verified",
+                "supports_templates": [
+                    {"template_name": "法宝分析", "requirement_id": "r2", "status": "covered"}
+                ],
+            }
+        ],
+        "metadata": {},
+    }
+
+    result = validate_canonical_graph(graph)
+
+    assert result.ok is False
+    assert "node_bad_source_location_range:node:item:nested" in result.errors
 
 
 def test_validate_canonical_graph_accepts_configured_status_enums():
