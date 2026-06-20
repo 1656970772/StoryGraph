@@ -177,15 +177,11 @@ class GraphifyAdapter:
 
 
 def _validated_timeout(value: Any) -> tuple[int | None, dict | None]:
-    if isinstance(value, bool):
+    if isinstance(value, bool) or not isinstance(value, int):
         return None, _bad_timeout_error(value)
-    try:
-        timeout_seconds = int(value)
-    except (TypeError, ValueError):
+    if value <= 0:
         return None, _bad_timeout_error(value)
-    if timeout_seconds <= 0:
-        return None, _bad_timeout_error(value)
-    return timeout_seconds, None
+    return value, None
 
 
 def _bad_timeout_error(value: Any) -> dict:

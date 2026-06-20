@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 
 from .agent_ledger import validate_single_writer
-from .graph_schema import validate_canonical_graph
+from .graph_schema import DEFAULT_STATUS_ENUMS, validate_canonical_graph
 from .state import REQUIRED_STAGE1_FILES
 
 
@@ -19,7 +19,7 @@ class GraphDirValidation:
     errors: list[str]
 
 
-DEFAULT_REQUIREMENT_STATUSES = ["covered", "needs_review", "not_found_in_source"]
+DEFAULT_REQUIREMENT_STATUSES = DEFAULT_STATUS_ENUMS["requirement_statuses"]
 REQUIRED_STAGE1_AGENT_ROLES = ["模板需求分析", "图抽取", "覆盖审查", "质量审查"]
 
 
@@ -100,7 +100,7 @@ def validate_graph_dir(graph_dir: Path) -> GraphDirValidation:
     errors.extend(schema.errors)
     errors.extend(_validate_requirements_readiness(requirements, readiness, status_enums))
     errors.extend(_validate_chunks(manifest, chunks))
-    errors.extend(_validate_evidence_links(graph, coverage_evidence))
+    errors.extend(_validate_evidence_links(graph, coverage_evidence, status_enums))
 
     stage1_status = _stage1_status(manifest, errors)
     if stage1_status != "success":
@@ -202,17 +202,7 @@ def _validate_requirements_readiness(
     if expected_ids != actual_ids:
         errors.append("requirements_readiness_id_mismatch")
 
-    configured_statuses = (
-        status_enums.get("requirement_statuses", DEFAULT_REQUIREMENT_STATUSES)
-        if status_enums
-        else DEFAULT_REQUIREMENT_STATUSES
-    )
-    if not isinstance(configured_statuses, list):
-        errors.append("bad_status_enum:requirement_statuses")
-        configured_statuses = DEFAULT_REQUIREMENT_STATUSES
-    allowed_statuses = _safe_string_set(
-        configured_statuses, errors, "bad_status_enum_item:requirement_statuses"
-    )
+    allowed_statuses = _allowed_status_values(status_enums, "requirement_statuses", errors)
     for record in readiness:
         if not isinstance(record, dict):
             errors.append("bad_readiness_record")
@@ -230,6 +220,7 @@ def _validate_requirements_readiness(
             status_value = status.get("status")
             if not isinstance(status_value, str) or status_value not in allowed_statuses:
                 errors.append(f"bad_readiness_status:{status_value}")
+            _validate_readiness_status_shape(status, record.get("template_name"), errors)
     return errors
 
 
@@ -305,14 +296,16 @@ def _validate_chunks(manifest: dict, chunks: list[dict]) -> list[str]:
     return errors
 
 
-def _validate_evidence_links(graph: dict, coverage_evidence: list[dict]) -> list[str]:
+def _validate_evidence_links(
+    graph: dict, coverage_evidence: list[dict], status_enums: dict | None
+) -> list[str]:
     errors: list[str] = []
     graph_evidence = graph.get("evidence_index", [])
     if not isinstance(graph_evidence, list):
         errors.append("bad_graph_collection:evidence_index")
         graph_evidence = []
     graph_evidence_ids = _evidence_id_set(graph_evidence)
-    coverage_evidence_ids = _coverage_evidence_id_set(coverage_evidence, errors)
+    coverage_evidence_ids = _coverage_evidence_id_set(coverage_evidence, status_enums, errors)
     for evidence in graph_evidence:
         if not isinstance(evidence, dict):
             continue
@@ -352,7 +345,9 @@ def _evidence_id_set(records: list) -> set[str]:
     return ids
 
 
-def _coverage_evidence_id_set(records: list, errors: list[str]) -> set[str]:
+def _coverage_evidence_id_set(
+    records: list, status_enums: dict | None, errors: list[str]
+) -> set[str]:
     ids = set()
     for record in records:
         if not isinstance(record, dict):
@@ -363,21 +358,93 @@ def _coverage_evidence_id_set(records: list, errors: list[str]) -> set[str]:
             errors.append("bad_coverage_evidence_id")
             continue
         ids.add(evidence_id)
-        _validate_coverage_evidence_shape(record, evidence_id, errors)
+        _validate_coverage_evidence_shape(record, evidence_id, status_enums, errors)
     return ids
 
 
 def _validate_coverage_evidence_shape(
-    record: dict, evidence_id: str, errors: list[str]
+    record: dict, evidence_id: str, status_enums: dict | None, errors: list[str]
 ) -> None:
     source_range = record.get("source_range")
     if source_range is not None and _valid_source_range(source_range) is None:
         errors.append(f"bad_evidence_source_range:{evidence_id}")
-    for key in ["fact_summary", "confidence", "verification_status"]:
-        if key in record and not isinstance(record.get(key), str):
-            errors.append("bad_coverage_evidence_record")
+    if "fact_summary" in record and not isinstance(record.get("fact_summary"), str):
+        errors.append("bad_coverage_evidence_record")
+    confidence = record.get("confidence")
+    if "confidence" in record and (
+        not isinstance(confidence, str)
+        or confidence not in _allowed_status_values(status_enums, "confidence_levels", errors)
+    ):
+        errors.append(f"bad_confidence:{confidence}")
+    verification_status = record.get("verification_status")
+    if "verification_status" in record and (
+        not isinstance(verification_status, str)
+        or verification_status
+        not in _allowed_status_values(status_enums, "verification_statuses", errors)
+    ):
+        errors.append(f"bad_verification_status:{verification_status}")
     if "supports_templates" in record and not isinstance(record.get("supports_templates"), list):
         errors.append("bad_coverage_evidence_record")
+    if isinstance(record.get("supports_templates"), list):
+        _validate_supports_shape(
+            "evidence",
+            evidence_id,
+            record.get("supports_templates"),
+            _allowed_status_values(status_enums, "requirement_statuses", errors),
+            errors,
+        )
+
+
+def _validate_supports_shape(
+    owner: str,
+    owner_id: object,
+    supports: list,
+    allowed_statuses: set[str],
+    errors: list[str],
+) -> None:
+    if not supports:
+        errors.append(f"{owner}_without_supports:{owner_id}")
+        return
+    for support in supports:
+        if not isinstance(support, dict):
+            errors.append(f"{owner}_bad_support:{owner_id}")
+            continue
+        for key in ["template_name", "requirement_id", "status"]:
+            if key not in support:
+                errors.append(f"{owner}_support_missing:{owner_id}:{key}")
+        status = support.get("status")
+        if not isinstance(status, str) or status not in allowed_statuses:
+            errors.append(f"bad_requirement_status:{status}")
+
+
+def _validate_readiness_status_shape(
+    status: dict, template_name: object, errors: list[str]
+) -> None:
+    requirement_id = status.get("requirement_id")
+    owner = requirement_id if isinstance(requirement_id, str) else template_name
+    for key in ["linked_node_ids", "linked_edge_ids", "linked_event_ids", "evidence_ids"]:
+        if key in status and not _is_string_list(status.get(key)):
+            errors.append(f"bad_readiness_{key}:{owner}")
+    if "notes" in status and not _is_string_list(status.get("notes")):
+        errors.append(f"bad_readiness_notes:{owner}")
+
+
+def _allowed_status_values(
+    status_enums: dict | None, key: str, errors: list[str]
+) -> set[str]:
+    configured = (
+        status_enums.get(key, DEFAULT_STATUS_ENUMS[key])
+        if status_enums
+        else DEFAULT_STATUS_ENUMS[key]
+    )
+    if not isinstance(configured, list):
+        errors.append(f"bad_status_enum:{key}")
+        configured = DEFAULT_STATUS_ENUMS[key]
+    return _safe_string_set(configured, errors, f"bad_status_enum_item:{key}")
+
+
+def _is_string_list(value: object) -> bool:
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
 
 
 def _validate_required_agent_roles(agent_ledger: list[dict]) -> list[str]:

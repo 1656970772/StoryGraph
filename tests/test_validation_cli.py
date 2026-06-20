@@ -983,6 +983,82 @@ def test_validate_graph_dir_rejects_non_object_coverage_evidence_record(tmp_path
     assert "bad_coverage_evidence_record" in result.errors
 
 
+def test_validate_graph_dir_rejects_malformed_coverage_evidence_record(tmp_path):
+    from storygraph_lib.validation import validate_graph_dir
+
+    graph_dir = tmp_path / "mini.storygraph"
+    graph = {
+        "evidence_index": [
+            {
+                "evidence_id": "evidence:1",
+                "source_range": [0, 1],
+                "fact_summary": "ok",
+                "confidence": "EXTRACTED",
+                "verification_status": "verified",
+                "supports_templates": [
+                    {
+                        "template_name": "法宝分析",
+                        "requirement_id": "法宝分析.required_fields.法宝",
+                        "status": "covered",
+                    }
+                ],
+            }
+        ]
+    }
+    coverage_evidence = [
+        {
+            "evidence_id": "evidence:1",
+            "source_range": [0, 1],
+            "fact_summary": "ok",
+            "confidence": "BOGUS",
+            "verification_status": "bogus",
+            "supports_templates": ["bad"],
+        }
+    ]
+    _write_minimal_valid_graph_dir(
+        graph_dir, graph=graph, coverage_evidence=coverage_evidence
+    )
+
+    result = validate_graph_dir(graph_dir)
+
+    assert result.ok is False
+    assert "bad_confidence:BOGUS" in result.errors
+    assert "bad_verification_status:bogus" in result.errors
+    assert "evidence_bad_support:evidence:1" in result.errors
+
+
+def test_validate_graph_dir_rejects_malformed_readiness_link_fields(tmp_path):
+    from storygraph_lib.validation import validate_graph_dir
+
+    graph_dir = tmp_path / "mini.storygraph"
+    readiness = [
+        {
+            "template_name": "法宝分析",
+            "requirement_statuses": [
+                {
+                    "requirement_id": "法宝分析.required_fields.法宝",
+                    "status": "covered",
+                    "linked_node_ids": [["bad"]],
+                    "linked_edge_ids": "bad",
+                    "linked_event_ids": [1],
+                    "evidence_ids": [{"bad": "id"}],
+                    "notes": "bad",
+                }
+            ],
+        }
+    ]
+    _write_minimal_valid_graph_dir(graph_dir, readiness=readiness)
+
+    result = validate_graph_dir(graph_dir)
+
+    assert result.ok is False
+    assert "bad_readiness_linked_node_ids:法宝分析.required_fields.法宝" in result.errors
+    assert "bad_readiness_linked_edge_ids:法宝分析.required_fields.法宝" in result.errors
+    assert "bad_readiness_linked_event_ids:法宝分析.required_fields.法宝" in result.errors
+    assert "bad_readiness_evidence_ids:法宝分析.required_fields.法宝" in result.errors
+    assert "bad_readiness_notes:法宝分析.required_fields.法宝" in result.errors
+
+
 @pytest.mark.parametrize(
     ("case_name", "kwargs", "expected_errors"),
     [
@@ -1067,6 +1143,82 @@ def test_validate_graph_dir_rejects_non_object_coverage_evidence_record(tmp_path
             ["bad_coverage_evidence_id"],
         ),
         (
+            "coverage_evidence_bad_status_enums_and_support_shape",
+            {
+                "graph": {
+                    "evidence_index": [
+                        {
+                            "evidence_id": "evidence:1",
+                            "source_range": [0, 1],
+                            "fact_summary": "ok",
+                            "confidence": "EXTRACTED",
+                            "verification_status": "verified",
+                            "supports_templates": [
+                                {
+                                    "template_name": "法宝分析",
+                                    "requirement_id": "法宝分析.required_fields.法宝",
+                                    "status": "covered",
+                                }
+                            ],
+                        }
+                    ]
+                },
+                "coverage_evidence": [
+                    {
+                        "evidence_id": "evidence:1",
+                        "source_range": [0, 1],
+                        "fact_summary": "ok",
+                        "confidence": "BOGUS",
+                        "verification_status": "bogus",
+                        "supports_templates": ["bad"],
+                    }
+                ],
+            },
+            [
+                "bad_confidence:BOGUS",
+                "bad_verification_status:bogus",
+                "evidence_bad_support:evidence:1",
+            ],
+        ),
+        (
+            "coverage_evidence_support_missing_required_field",
+            {
+                "graph": {
+                    "evidence_index": [
+                        {
+                            "evidence_id": "evidence:1",
+                            "source_range": [0, 1],
+                            "fact_summary": "ok",
+                            "confidence": "EXTRACTED",
+                            "verification_status": "verified",
+                            "supports_templates": [
+                                {
+                                    "template_name": "法宝分析",
+                                    "requirement_id": "法宝分析.required_fields.法宝",
+                                    "status": "covered",
+                                }
+                            ],
+                        }
+                    ]
+                },
+                "coverage_evidence": [
+                    {
+                        "evidence_id": "evidence:1",
+                        "source_range": [0, 1],
+                        "fact_summary": "ok",
+                        "confidence": "EXTRACTED",
+                        "verification_status": "verified",
+                        "supports_templates": [{"template_name": "法宝分析"}],
+                    }
+                ],
+            },
+            [
+                "evidence_support_missing:evidence:1:requirement_id",
+                "evidence_support_missing:evidence:1:status",
+                "bad_requirement_status:None",
+            ],
+        ),
+        (
             "requirements_nested_required_fields",
             {
                 "requirements": {
@@ -1083,6 +1235,34 @@ def test_validate_graph_dir_rejects_non_object_coverage_evidence_record(tmp_path
             "readiness_requirement_statuses_non_list",
             {"readiness": [{"template_name": "法宝分析", "requirement_statuses": "bad"}]},
             ["bad_readiness_requirement_statuses:法宝分析"],
+        ),
+        (
+            "readiness_nested_link_fields",
+            {
+                "readiness": [
+                    {
+                        "template_name": "法宝分析",
+                        "requirement_statuses": [
+                            {
+                                "requirement_id": "法宝分析.required_fields.法宝",
+                                "status": "covered",
+                                "linked_node_ids": [["bad"]],
+                                "linked_edge_ids": "bad",
+                                "linked_event_ids": [1],
+                                "evidence_ids": [{"bad": "id"}],
+                                "notes": "bad",
+                            }
+                        ],
+                    }
+                ]
+            },
+            [
+                "bad_readiness_linked_node_ids:法宝分析.required_fields.法宝",
+                "bad_readiness_linked_edge_ids:法宝分析.required_fields.法宝",
+                "bad_readiness_linked_event_ids:法宝分析.required_fields.法宝",
+                "bad_readiness_evidence_ids:法宝分析.required_fields.法宝",
+                "bad_readiness_notes:法宝分析.required_fields.法宝",
+            ],
         ),
         (
             "agent_ledger_record_non_dict",

@@ -2,6 +2,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 from storygraph_lib.graphify_adapter import GraphifyAdapter
 
 
@@ -156,13 +158,16 @@ def test_adapter_bad_mode_returns_stable_config_error_without_crashing(tmp_path)
     assert result.error["mode"] == "bad-mode"
 
 
-def test_adapter_bad_timeout_returns_stable_config_error_without_crashing(tmp_path):
+@pytest.mark.parametrize("timeout_seconds", ["not-an-int", 1.5, True, 0, -1])
+def test_adapter_bad_timeout_returns_stable_config_error_without_crashing(
+    tmp_path, timeout_seconds
+):
     source = tmp_path / "novel.txt"
     source.write_text("正文", encoding="utf-8")
     adapter = GraphifyAdapter(
         graphify_repo=None,
         command=[sys.executable, "-c", "print('not reached')"],
-        timeout_seconds="not-an-int",
+        timeout_seconds=timeout_seconds,
         mode="cli",
     )
 
@@ -171,6 +176,27 @@ def test_adapter_bad_timeout_returns_stable_config_error_without_crashing(tmp_pa
     assert result.ok is False
     assert result.error["code"] == "graphify_bad_command"
     assert result.error["field"] == "timeout_seconds"
+
+
+def test_adapter_integer_timeout_still_runs_command(tmp_path):
+    source = tmp_path / "novel.txt"
+    source.write_text("正文", encoding="utf-8")
+    command = [
+        sys.executable,
+        "-c",
+        "import pathlib,sys; out=pathlib.Path(sys.argv[2]); out.mkdir(parents=True, exist_ok=True); "
+        "(out/'graph.json').write_text('{}', encoding='utf-8'); "
+        "(out/'GRAPH_REPORT.md').write_text('# ok', encoding='utf-8'); "
+        "(out/'graph.html').write_text('<!doctype html>', encoding='utf-8')",
+        "{source}",
+        "{output_dir}",
+    ]
+    adapter = GraphifyAdapter(None, command, 1, "cli")
+
+    result = adapter.build_graph(source, tmp_path / "out")
+
+    assert result.ok is True
+    assert result.error is None
 
 
 def test_adapter_command_exit_zero_but_missing_required_artifacts_is_structured_error(tmp_path):
