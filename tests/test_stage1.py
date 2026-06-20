@@ -166,6 +166,47 @@ def test_stage1_graphify_unavailable_is_blocking_failed(tmp_path):
     assert failed["errors"][0]["code"] == "graphify_unavailable"
 
 
+def test_stage1_empty_graphify_command_is_structured_failure_and_writes_outputs(tmp_path):
+    novel = tmp_path / "mini_novel.txt"
+    novel.write_text("法宝", encoding="utf-8")
+    template_dir = tmp_path / "templates"
+    _write_template(template_dir, "# 法宝分析模板\n## 字段\n- 法宝")
+    config = _config(template_dir, graphify_repo=None)
+    config["graphify_adapter"] = {
+        "mode": "cli",
+        "command": [],
+        "timeout_seconds": 5,
+    }
+
+    graph_dir = tmp_path / "mini_novel.storygraph"
+    stale_out = graph_dir / "graphify-out"
+    stale_out.mkdir(parents=True)
+    (stale_out / "graph.json").write_text("{}", encoding="utf-8")
+    (stale_out / "GRAPH_REPORT.md").write_text("# stale\n", encoding="utf-8")
+    (stale_out / "graph.html").write_text("<!doctype html>", encoding="utf-8")
+
+    result = build_stage1_graph(novel, config)
+
+    manifest = json.loads((graph_dir / "manifest.json").read_text(encoding="utf-8"))
+    ledger = json.loads((graph_dir / "coverage" / "agent-run-ledger.json").read_text(encoding="utf-8"))
+    gap = (graph_dir / "coverage" / "gap-report.md").read_text(encoding="utf-8")
+    validation = validate_graph_dir(graph_dir)
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "graphify_bad_command"
+    assert "graphify_bad_command" in result["validation_errors"]
+    assert manifest["stage_status"]["stage1"] == "failed"
+    assert any(
+        error["code"] == "graphify_bad_command"
+        for record in ledger
+        for error in record.get("errors", [])
+    )
+    assert "graphify_bad_command" in gap
+    assert "blocking_ledger:graphify_bad_command" in validation.errors
+    assert not (graph_dir / "graphify-out" / "graph.json").exists()
+    assert not (graph_dir / "graphify-out" / "GRAPH_REPORT.md").exists()
+    assert not (graph_dir / "graphify-out" / "graph.html").exists()
+
+
 def test_stage1_readiness_below_threshold_and_template_without_reliable_evidence_fail(tmp_path):
     novel = tmp_path / "mini_novel.txt"
     novel.write_text("完全无关正文", encoding="utf-8")

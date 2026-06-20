@@ -40,6 +40,14 @@ class GraphifyAdapter:
                 list(self.command),
             )
 
+        if not self.command:
+            return GraphifyResult(
+                False,
+                None,
+                {"code": "graphify_bad_command", "message": "graphify command must not be empty"},
+                [],
+            )
+
         cwd = self._resolve_cwd()
         if isinstance(cwd, dict):
             return GraphifyResult(False, None, cwd, list(self.command))
@@ -68,6 +76,13 @@ class GraphifyAdapter:
                 command,
             )
         except FileNotFoundError as exc:
+            return GraphifyResult(
+                False,
+                None,
+                {"code": "graphify_unavailable", "executable": command[0], "message": str(exc)},
+                command,
+            )
+        except OSError as exc:
             return GraphifyResult(
                 False,
                 None,

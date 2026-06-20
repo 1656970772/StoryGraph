@@ -894,6 +894,48 @@ def test_validate_graph_dir_rejects_graph_node_float_source_range(tmp_path):
     assert "node_bad_source_range:node:item:float" in result.errors
 
 
+def test_validate_graph_dir_rejects_native_graph_node_non_string_id(tmp_path):
+    from storygraph_lib.validation import validate_graph_dir
+
+    graph_dir = tmp_path / "mini.storygraph"
+    _write_minimal_valid_graph_dir(
+        graph_dir,
+        graph={"nodes": [{"id": ["bad"], "source_range": [0, 1]}]},
+    )
+
+    result = validate_graph_dir(graph_dir)
+
+    assert result.ok is False
+    assert "node_bad_id:['bad']" in result.errors
+
+
+def test_validate_graph_dir_rejects_native_graph_node_scalar_source_location(tmp_path):
+    from storygraph_lib.validation import validate_graph_dir
+
+    graph_dir = tmp_path / "mini.storygraph"
+    _write_minimal_valid_graph_dir(
+        graph_dir,
+        graph={"nodes": [{"id": "node:native", "source_location": 123}]},
+    )
+
+    result = validate_graph_dir(graph_dir)
+
+    assert result.ok is False
+    assert "node_bad_source_location:node:native" in result.errors
+
+
+def test_validate_graph_dir_rejects_non_object_coverage_evidence_record(tmp_path):
+    from storygraph_lib.validation import validate_graph_dir
+
+    graph_dir = tmp_path / "mini.storygraph"
+    _write_minimal_valid_graph_dir(graph_dir, coverage_evidence=["not-object"])
+
+    result = validate_graph_dir(graph_dir)
+
+    assert result.ok is False
+    assert "bad_coverage_evidence_record" in result.errors
+
+
 def test_validate_graph_dir_requires_success_stage1_agent_roles(tmp_path):
     from storygraph_lib.validation import validate_graph_dir
 

@@ -416,6 +416,44 @@ def test_graphify_native_items_with_malformed_source_range_are_rejected():
     assert "node_bad_source_range:native-1" in result.errors
 
 
+def test_graphify_native_items_with_non_string_id_are_rejected():
+    graph = {
+        "schema_version": "1.0",
+        "graphify_schema_version": "x",
+        "storygraph_schema_version": "1.0",
+        "nodes": [{"id": ["bad"], "label": "韩立", "source_range": [0, 1]}],
+        "edges": [],
+        "hyperedges": [],
+        "events": [],
+        "evidence_index": [],
+        "metadata": {},
+    }
+
+    result = validate_canonical_graph(graph)
+
+    assert result.ok is False
+    assert "node_bad_id:['bad']" in result.errors
+
+
+def test_graphify_native_items_with_scalar_source_location_are_rejected():
+    graph = {
+        "schema_version": "1.0",
+        "graphify_schema_version": "x",
+        "storygraph_schema_version": "1.0",
+        "nodes": [{"id": "node:native", "label": "韩立", "source_location": 123}],
+        "edges": [],
+        "hyperedges": [],
+        "events": [],
+        "evidence_index": [],
+        "metadata": {},
+    }
+
+    result = validate_canonical_graph(graph)
+
+    assert result.ok is False
+    assert "node_bad_source_location:node:native" in result.errors
+
+
 def test_deep_validation_rejects_storygraph_items_without_source_location():
     graph = {
         "schema_version": "1.0",

@@ -321,6 +321,7 @@ def _validate_evidence_links(graph: dict, coverage_evidence: list[dict]) -> list
             errors.append(f"bad_evidence_source_range:{evidence.get('evidence_id')}")
     for evidence in coverage_evidence:
         if not isinstance(evidence, dict):
+            errors.append("bad_coverage_evidence_record")
             continue
         source_range = evidence.get("source_range")
         if source_range is not None and _valid_source_range(source_range) is None:

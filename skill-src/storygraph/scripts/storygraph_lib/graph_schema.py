@@ -150,9 +150,19 @@ def _valid_graph_items(key: str, values: list, errors: list[str]) -> list[dict[s
                 "bad_evidence_record" if key == "evidence_index" else f"bad_graph_item:{key}"
             )
             continue
+        _validate_graph_item_id(key, item, errors)
         _validate_locator_ranges(owner, _graph_item_owner_id(key, item), item, errors)
         valid_items.append(item)
     return valid_items
+
+
+def _validate_graph_item_id(key: str, item: dict[str, Any], errors: list[str]) -> None:
+    if key == "evidence_index":
+        return
+    owner = GRAPH_ITEM_OWNERS[key]
+    item_id = item.get("id")
+    if not isinstance(item_id, str) or not item_id:
+        errors.append(f"{owner}_bad_id:{item_id}")
 
 
 def _graph_item_owner_id(key: str, item: dict[str, Any]) -> object:
@@ -337,12 +347,17 @@ def _validate_locator_ranges(
     if "source_range" in item and _valid_source_range(item.get("source_range")) is None:
         errors.append(f"{owner}_bad_source_range:{owner_id}")
     source_location = item.get("source_location")
-    if (
-        isinstance(source_location, dict)
-        and "source_range" in source_location
-        and _valid_source_range(source_location.get("source_range")) is None
-    ):
-        errors.append(f"{owner}_bad_source_location_range:{owner_id}")
+    if "source_location" not in item:
+        return
+    if isinstance(source_location, dict):
+        if "source_range" in source_location and _valid_source_range(
+            source_location.get("source_range")
+        ) is None:
+            errors.append(f"{owner}_bad_source_location_range:{owner_id}")
+        return
+    if isinstance(source_location, list) and _valid_source_range(source_location) is not None:
+        return
+    errors.append(f"{owner}_bad_source_location:{owner_id}")
 
 
 def _valid_source_range(value: object) -> list[int] | None:

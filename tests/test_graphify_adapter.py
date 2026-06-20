@@ -127,6 +127,18 @@ def test_adapter_cli_mode_does_not_require_local_repo(tmp_path):
     assert result.ok is True
 
 
+def test_adapter_empty_command_returns_structured_error_without_crashing(tmp_path):
+    source = tmp_path / "novel.txt"
+    source.write_text("正文", encoding="utf-8")
+    adapter = GraphifyAdapter(graphify_repo=None, command=[], timeout_seconds=5, mode="cli")
+
+    result = adapter.build_graph(source, tmp_path / "out")
+
+    assert result.ok is False
+    assert result.command == []
+    assert result.error["code"] == "graphify_bad_command"
+
+
 def test_adapter_command_exit_zero_but_missing_required_artifacts_is_structured_error(tmp_path):
     source = tmp_path / "novel.txt"
     source.write_text("正文", encoding="utf-8")
