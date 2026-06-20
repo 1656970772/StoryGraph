@@ -146,6 +146,11 @@ def _validate_requirements_readiness(
     requirement_records = requirements.get("templates", [])
     if not isinstance(requirement_records, list):
         return ["requirements_templates_not_list"]
+    template_count = requirements.get("template_count")
+    if not _is_non_negative_int(template_count):
+        errors.append("bad_requirements_template_count")
+    elif template_count != len(requirement_records):
+        errors.append("requirements_template_count_mismatch")
     requirement_templates = _template_name_set(requirement_records, errors, "bad_requirement_template_name")
     readiness_templates = _template_name_set(readiness, errors, "bad_readiness_template_name")
     if requirement_templates != readiness_templates:
@@ -627,14 +632,10 @@ def _expected_source_length(manifest: dict, errors: list[str]) -> int:
     source_size = manifest.get("source_size")
     if source_size is None:
         return 0
-    if isinstance(source_size, bool):
+    if not _is_non_negative_int(source_size):
         errors.append("bad_manifest_source_size")
         return 0
-    try:
-        return int(source_size)
-    except (TypeError, ValueError):
-        errors.append("bad_manifest_source_size")
-        return 0
+    return source_size
 
 
 def _safe_statuses(value: object) -> list:

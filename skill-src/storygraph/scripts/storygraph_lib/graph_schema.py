@@ -346,6 +346,8 @@ def _validate_evidence(
     ]:
         if key not in evidence:
             errors.append(f"evidence_missing:{evidence_id}:{key}")
+    if "fact_summary" in evidence and not isinstance(evidence.get("fact_summary"), str):
+        errors.append(f"bad_evidence_fact_summary:{evidence_id}")
     _validate_status_fields(evidence, enums, errors)
     _validate_supports("evidence", evidence_id, evidence.get("supports_templates"), enums, errors)
 
