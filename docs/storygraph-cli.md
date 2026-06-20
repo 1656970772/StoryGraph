@@ -23,6 +23,12 @@ Stable failure codes include `source_unreadable`, `source_encoding_error`, `chun
 
 Stage 1 reuses existing output only when the source hash, stage input hash, manifest status, required files, deep graph validation, and graphify failure ledger checks all pass. Source, template, config, graphify repo, graphify command, or chunk strategy changes trigger a rebuild.
 
+## Stage 2 Scaffold
+
+Stage 2 currently exposes schema and policy helpers only; it does not render full template documents. Extraction records use `stage2_categories` from configuration, keep their Stage 1 coverage scope at `coverage/chunk-ledger.json`, and write future run artifacts to `coverage/template-run-ledger.json`, `coverage/template-evidence-usage.json`, and `coverage/template-gap-report.md`.
+
+The default output policy is draft-first: `draft` resolves to `<graph_dir>/<stage2_output_policy.default_dir>/<template_name>.md` and does not overwrite a same-named Markdown file in the novel directory. Formal document targets are selected only by `backup-and-overwrite` or `merge`.
+
 ## Validation
 
 `validate-graph` checks required Stage 1 outputs, failed ledger records, graph schema, template readiness, chunk coverage, evidence references, manifest stage status, and single-writer scopes. Failed agent ledger entries are reported as `blocking_ledger:<error_code>`.
