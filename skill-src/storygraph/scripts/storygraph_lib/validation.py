@@ -373,11 +373,16 @@ def _validate_required_agent_roles(agent_ledger: list[dict]) -> list[str]:
 
 def _expected_source_length(manifest: dict, errors: list[str]) -> int:
     source_path = manifest.get("source_path")
-    if source_path:
+    if source_path not in (None, ""):
         try:
-            return len(Path(source_path).read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError):
-            pass
+            path = Path(source_path)
+        except TypeError:
+            errors.append("bad_manifest_source_path")
+        else:
+            try:
+                return len(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError):
+                pass
     source_size = manifest.get("source_size")
     if source_size is None:
         return 0

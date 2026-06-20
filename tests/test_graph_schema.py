@@ -1,3 +1,5 @@
+import pytest
+
 from storygraph_lib.graph_schema import merge_template_supplements, validate_canonical_graph
 from storygraph_lib.ids import (
     stable_edge_id,
@@ -454,6 +456,140 @@ def test_deep_validation_rejects_storygraph_items_without_source_location():
     assert "node_without_source_location:node:person:abc" in errors
     assert "edge_without_source_location:edge:owns:abc" in errors
     assert "event_without_source_location:event:gain:abc" in errors
+
+
+@pytest.mark.parametrize(
+    ("owner", "expected_error"),
+    [
+        ("node", "node_bad_source_range:node:item:float"),
+        ("edge", "edge_bad_source_range:edge:owns:float"),
+        ("event", "event_bad_source_range:event:gain:float"),
+        ("evidence", "evidence_bad_source_range:evidence:float"),
+    ],
+)
+def test_validate_canonical_graph_rejects_float_source_ranges(owner, expected_error):
+    graph = {
+        "schema_version": "1.0",
+        "graphify_schema_version": "x",
+        "storygraph_schema_version": "1.0",
+        "nodes": [
+            {
+                "id": "node:item:float",
+                "label": "小瓶",
+                "node_type": "artifact",
+                "source_range": [0, 2],
+                "evidence_ids": ["evidence:1"],
+                "supports_templates": [
+                    {"template_name": "法宝分析", "requirement_id": "r1", "status": "covered"}
+                ],
+                "confidence": "EXTRACTED",
+                "verification_status": "verified",
+            }
+        ],
+        "edges": [
+            {
+                "id": "edge:owns:float",
+                "source": "node:item:float",
+                "target": "node:item:float",
+                "edge_type": "owns",
+                "source_range": [0, 2],
+                "evidence_ids": ["evidence:1"],
+                "supports_templates": [
+                    {"template_name": "法宝分析", "requirement_id": "r2", "status": "covered"}
+                ],
+                "confidence": "EXTRACTED",
+                "verification_status": "verified",
+            }
+        ],
+        "hyperedges": [],
+        "events": [
+            {
+                "id": "event:gain:float",
+                "event_type": "gain",
+                "participants": ["node:item:float"],
+                "source_range": [0, 2],
+                "evidence_ids": ["evidence:1"],
+                "supports_templates": [
+                    {"template_name": "法宝分析", "requirement_id": "r3", "status": "covered"}
+                ],
+                "confidence": "EXTRACTED",
+                "verification_status": "verified",
+            }
+        ],
+        "evidence_index": [
+            {
+                "evidence_id": "evidence:1",
+                "source_range": [0, 2],
+                "fact_summary": "韩立获得小瓶",
+                "confidence": "EXTRACTED",
+                "verification_status": "verified",
+                "supports_templates": [
+                    {"template_name": "法宝分析", "requirement_id": "r4", "status": "covered"}
+                ],
+            }
+        ],
+        "metadata": {},
+    }
+    if owner == "node":
+        graph["nodes"][0]["source_range"] = [0.5, 1.5]
+    elif owner == "edge":
+        graph["edges"][0]["source_range"] = [0.5, 1.5]
+    elif owner == "event":
+        graph["events"][0]["source_range"] = [0.5, 1.5]
+    else:
+        graph["evidence_index"][0]["evidence_id"] = "evidence:float"
+        graph["nodes"][0]["evidence_ids"] = ["evidence:float"]
+        graph["edges"][0]["evidence_ids"] = ["evidence:float"]
+        graph["events"][0]["evidence_ids"] = ["evidence:float"]
+        graph["evidence_index"][0]["source_range"] = [0.5, 1.5]
+
+    result = validate_canonical_graph(graph)
+
+    assert result.ok is False
+    assert expected_error in result.errors
+
+
+def test_validate_canonical_graph_rejects_bad_source_range_even_with_source_location():
+    graph = {
+        "schema_version": "1.0",
+        "graphify_schema_version": "x",
+        "storygraph_schema_version": "1.0",
+        "nodes": [
+            {
+                "id": "node:item:float",
+                "label": "小瓶",
+                "node_type": "artifact",
+                "source_location": {"chapter": "第一章"},
+                "source_range": [0.5, 1.5],
+                "evidence_ids": ["evidence:1"],
+                "supports_templates": [
+                    {"template_name": "法宝分析", "requirement_id": "r1", "status": "covered"}
+                ],
+                "confidence": "EXTRACTED",
+                "verification_status": "verified",
+            }
+        ],
+        "edges": [],
+        "hyperedges": [],
+        "events": [],
+        "evidence_index": [
+            {
+                "evidence_id": "evidence:1",
+                "source_range": [0, 2],
+                "fact_summary": "韩立获得小瓶",
+                "confidence": "EXTRACTED",
+                "verification_status": "verified",
+                "supports_templates": [
+                    {"template_name": "法宝分析", "requirement_id": "r2", "status": "covered"}
+                ],
+            }
+        ],
+        "metadata": {},
+    }
+
+    errors = validate_canonical_graph(graph).errors
+
+    assert "node_bad_source_range:node:item:float" in errors
 
 
 def test_validate_canonical_graph_accepts_configured_status_enums():

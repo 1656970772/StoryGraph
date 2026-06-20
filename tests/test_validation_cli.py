@@ -4,6 +4,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from storygraph_lib.validation import validate_skill_tree
 
 
@@ -747,6 +749,24 @@ def test_validate_graph_dir_malformed_requirement_shapes_return_errors_without_t
     assert "bad_manifest_source_size" in result.errors
 
 
+@pytest.mark.parametrize("source_path", [[1], {"bad": "path"}, True])
+def test_validate_graph_dir_manifest_source_path_bad_shape_returns_errors_without_throwing(
+    tmp_path, source_path
+):
+    from storygraph_lib.validation import validate_graph_dir
+
+    graph_dir = tmp_path / "mini.storygraph"
+    _write_minimal_valid_graph_dir(
+        graph_dir,
+        manifest={"source_path": source_path, "source_size": len("法宝")},
+    )
+
+    result = validate_graph_dir(graph_dir)
+
+    assert result.ok is False
+    assert "bad_manifest_source_path" in result.errors
+
+
 def test_validate_graph_dir_requirement_nested_items_return_errors_without_throwing(
     tmp_path,
 ):
@@ -806,6 +826,58 @@ def test_validate_graph_dir_rejects_float_source_ranges(tmp_path):
     assert result.ok is False
     assert "bad_chunk_source_range:chunk-float" in result.errors
     assert "bad_evidence_source_range:evidence:float" in result.errors
+
+
+def test_validate_graph_dir_rejects_graph_node_float_source_range(tmp_path):
+    from storygraph_lib.validation import validate_graph_dir
+
+    graph_dir = tmp_path / "mini.storygraph"
+    evidence = [
+        {
+            "evidence_id": "evidence:valid",
+            "source_range": [0, 2],
+            "fact_summary": "valid",
+            "confidence": "EXTRACTED",
+            "verification_status": "verified",
+            "supports_templates": [
+                {
+                    "template_name": "法宝分析",
+                    "requirement_id": "法宝分析.required_fields.法宝",
+                    "status": "covered",
+                }
+            ],
+        }
+    ]
+    _write_minimal_valid_graph_dir(
+        graph_dir,
+        coverage_evidence=evidence,
+        graph={
+            "nodes": [
+                {
+                    "id": "node:item:float",
+                    "label": "小瓶",
+                    "node_type": "artifact",
+                    "source_range": [0.5, 1.5],
+                    "evidence_ids": ["evidence:valid"],
+                    "supports_templates": [
+                        {
+                            "template_name": "法宝分析",
+                            "requirement_id": "法宝分析.required_fields.法宝",
+                            "status": "covered",
+                        }
+                    ],
+                    "confidence": "EXTRACTED",
+                    "verification_status": "verified",
+                }
+            ],
+            "evidence_index": evidence,
+        },
+    )
+
+    result = validate_graph_dir(graph_dir)
+
+    assert result.ok is False
+    assert "node_bad_source_range:node:item:float" in result.errors
 
 
 def test_validate_graph_dir_requires_success_stage1_agent_roles(tmp_path):

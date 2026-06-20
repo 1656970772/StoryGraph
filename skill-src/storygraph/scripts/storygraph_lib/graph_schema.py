@@ -274,6 +274,7 @@ def _validate_evidence(
     ]:
         if key not in evidence:
             errors.append(f"evidence_missing:{evidence_id}:{key}")
+    _validate_source_range("evidence", evidence_id, evidence, errors)
     _validate_status_fields(evidence, enums, errors)
     _validate_supports("evidence", evidence_id, evidence.get("supports_templates"), enums, errors)
 
@@ -299,8 +300,28 @@ def _known_string_ref(value: object, known_ids: set[str]) -> bool:
 def _validate_source_locator(
     owner: str, owner_id: object, item: dict[str, Any], errors: list[str]
 ) -> None:
+    _validate_source_range(owner, owner_id, item, errors)
     if not (_has_locator_value(item.get("source_location")) or _has_locator_value(item.get("source_range"))):
         errors.append(f"{owner}_without_source_location:{owner_id}")
+
+
+def _validate_source_range(
+    owner: str, owner_id: object, item: dict[str, Any], errors: list[str]
+) -> None:
+    if "source_range" in item and _valid_source_range(item.get("source_range")) is None:
+        errors.append(f"{owner}_bad_source_range:{owner_id}")
+
+
+def _valid_source_range(value: object) -> list[int] | None:
+    if not isinstance(value, list) or len(value) != 2:
+        return None
+    if not all(isinstance(item, int) and not isinstance(item, bool) for item in value):
+        return None
+    start = value[0]
+    end = value[1]
+    if start < 0 or end < start:
+        return None
+    return [start, end]
 
 
 def _has_locator_value(value: object) -> bool:
