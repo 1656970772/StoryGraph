@@ -113,7 +113,12 @@ def build_requirement_matrix(
 
 
 def _template_file(path: Path) -> TemplateFile:
-    text = path.read_text(encoding="utf-8")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise TemplateDiscoveryError("template_encoding_error", path=path, file=path.name) from exc
+    except OSError as exc:
+        raise TemplateDiscoveryError("template_discovery_failed", path=path, file=path.name) from exc
     return TemplateFile(
         name=_strip_template_suffix(path.stem),
         path=path,
@@ -140,7 +145,17 @@ def _readme_missing_warnings(
     if not readme.exists():
         return []
     warnings = []
-    for file_name in _readme_template_items(readme.read_text(encoding="utf-8")):
+    try:
+        readme_text = readme.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise TemplateDiscoveryError(
+            "template_encoding_error", path=readme, file=readme.name
+        ) from exc
+    except OSError as exc:
+        raise TemplateDiscoveryError(
+            "template_discovery_failed", path=readme, file=readme.name
+        ) from exc
+    for file_name in _readme_template_items(readme_text):
         if file_name not in actual_files:
             if readme_missing_policy == "error":
                 raise TemplateDiscoveryError("missing_template_file", file=file_name)

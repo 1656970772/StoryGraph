@@ -135,6 +135,26 @@ def test_validate_single_writer_reports_absolute_and_out_of_bounds_paths():
     assert "invalid_path:/coverage/x.json" in result.errors
 
 
+def test_validate_single_writer_rejects_embedded_nul_paths():
+    records = [
+        make_agent_run_record(
+            "run-bad-nul",
+            "覆盖审查",
+            "stage1",
+            ["chunk-0001"],
+            ["法宝分析"],
+            ["requirements/template-requirements.json"],
+            ["coverage/x\0.json"],
+            ["coverage/x\0.json"],
+        )
+    ]
+
+    result = validate_single_writer(records)
+
+    assert result.ok is False
+    assert any(error.startswith("invalid_path:") for error in result.errors)
+
+
 def test_validate_single_writer_reports_malformed_records_and_path_lists():
     records = [
         "not-a-record",
@@ -241,3 +261,12 @@ def test_output_writer_rejects_unsafe_managed_and_write_paths(tmp_path):
         unsafe_writer = OutputWriter(tmp_path, ["coverage/x.json"])
         with pytest.raises(OutputWriteError, match="unmanaged_output"):
             unsafe_writer.write_json(unsafe_path, {"ok": False})
+
+
+def test_output_writer_rejects_embedded_nul_paths_before_filesystem(tmp_path):
+    with pytest.raises(OutputWriteError, match="unmanaged_output"):
+        OutputWriter(tmp_path, ["coverage/x\0.json"])
+
+    writer = OutputWriter(tmp_path, ["coverage/x.json"])
+    with pytest.raises(OutputWriteError, match="unmanaged_output"):
+        writer.write_json("coverage/x\0.json", {})

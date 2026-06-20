@@ -51,6 +51,8 @@ def normalize_relative_output_path(path: str | Path) -> str:
     raw = str(path)
     if not raw:
         raise OutputWriteError("unmanaged_output", raw)
+    if "\0" in raw:
+        raise OutputWriteError("unmanaged_output", raw)
     windows_path = PureWindowsPath(raw)
     posix_path = PurePosixPath(raw.replace("\\", "/"))
     if (

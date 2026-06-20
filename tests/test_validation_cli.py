@@ -301,6 +301,75 @@ def test_config_check_config_and_local_override_merge(capsys, tmp_path):
     assert payload["graph_dir_suffix"] == ".from-local"
 
 
+@pytest.mark.parametrize(
+    ("writer", "expected_error"),
+    [
+        (lambda path: path.write_text("{bad json", encoding="utf-8"), "config_json_error"),
+        (lambda path: path.write_bytes(b"\xff"), "config_encoding_error"),
+    ],
+)
+def test_config_check_bad_config_returns_structured_error(
+    capsys, tmp_path, writer, expected_error
+):
+    from storygraph_lib.cli import main
+
+    config = tmp_path / "storygraph.default.json"
+    writer(config)
+
+    assert main(["config-check", "--config", str(config)]) == 2
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["ok"] is False
+    assert payload["error"] == expected_error
+
+
+@pytest.mark.parametrize(
+    ("command", "writer", "expected_error"),
+    [
+        (
+            "build-stage1",
+            lambda path: path.write_text("{bad json", encoding="utf-8"),
+            "config_json_error",
+        ),
+        (
+            "build-stage1",
+            lambda path: path.write_bytes(b"\xff"),
+            "config_encoding_error",
+        ),
+        (
+            "inspect-templates",
+            lambda path: path.write_text("{bad json", encoding="utf-8"),
+            "config_json_error",
+        ),
+        (
+            "inspect-templates",
+            lambda path: path.write_bytes(b"\xff"),
+            "config_encoding_error",
+        ),
+    ],
+)
+def test_cli_commands_bad_config_returns_structured_error(
+    capsys, tmp_path, command, writer, expected_error
+):
+    from storygraph_lib.cli import main
+
+    config = tmp_path / "storygraph.default.json"
+    writer(config)
+    source = tmp_path / "mini.txt"
+    source.write_text("法宝", encoding="utf-8")
+    template_dir = tmp_path / "templates"
+    template_dir.mkdir()
+    args = [command, "--config", str(config), "--template-dir", str(template_dir)]
+    if command == "build-stage1":
+        args.extend(["--source", str(source)])
+
+    assert main(args) == 2
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["ok"] is False
+    assert payload["error"] == expected_error
+
+
 def test_inspect_templates_accepts_config_without_losing_count_default_mapping_guard(
     capsys, tmp_path
 ):
@@ -351,6 +420,55 @@ def test_inspect_templates_accepts_config_without_losing_count_default_mapping_g
     assert payload["count_matches_expected"] is True
     assert payload["has_default_mapping"] is True
     assert payload["error"] == "default_mapping_used"
+
+
+def test_inspect_templates_bad_utf8_template_returns_structured_error(capsys, tmp_path):
+    from storygraph_lib.cli import main
+
+    config = tmp_path / "storygraph.default.json"
+    config.write_text(
+        json.dumps(
+            {
+                "graph_dir_suffix": ".storygraph",
+                "output_language": "zh-CN",
+                "template_discovery": {
+                    "glob": "*模板.md",
+                    "readme_index_file": "README.md",
+                    "exclude_files": ["README.md"],
+                    "readme_missing_policy": "warn",
+                },
+                "template_parser_rules": None,
+                "template_graph_mappings": {
+                    "default_mapping": {
+                        "graph_node_mapping": ["generic_node"],
+                        "graph_event_mapping": ["generic_event"],
+                        "graph_relation_mapping": ["generic_relation"],
+                    }
+                },
+                "status_enums": {
+                    "requirement_statuses": [
+                        "covered",
+                        "needs_review",
+                        "not_found_in_source",
+                    ]
+                },
+                "template_count_policy": {
+                    "expected_existing_templates": 1,
+                    "enforce_integration_count": False,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    template_dir = tmp_path / "templates"
+    template_dir.mkdir()
+    (template_dir / "坏模板.md").write_bytes(b"\xff")
+
+    assert main(["inspect-templates", "--config", str(config), "--template-dir", str(template_dir)]) == 2
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["ok"] is False
+    assert payload["error"] in {"template_discovery_failed", "template_encoding_error"}
 
 
 def test_validate_graph_cli_reports_missing_outputs_and_blocking_ledger(capsys, tmp_path):
@@ -841,6 +959,28 @@ def test_validate_graph_dir_manifest_source_path_embedded_nul_is_reported(tmp_pa
 
     assert result.ok is False
     assert "bad_manifest_source_path" in result.errors
+
+
+def test_validate_graph_dir_agent_ledger_embedded_nul_path_is_invalid(tmp_path):
+    from storygraph_lib.validation import validate_graph_dir
+
+    graph_dir = tmp_path / "ledger-nul.storygraph"
+    agent_ledger = [
+        {
+            "run_id": f"stage1-{index}",
+            "agent_role": role,
+            "status": "completed",
+            "output_paths": ["coverage/x\0.json"] if index == 1 else [],
+            "write_scope": ["coverage/x\0.json"] if index == 1 else [],
+        }
+        for index, role in enumerate(["模板需求分析", "图抽取", "覆盖审查", "质量审查"], start=1)
+    ]
+    _write_minimal_valid_graph_dir(graph_dir, agent_ledger=agent_ledger)
+
+    result = validate_graph_dir(graph_dir)
+
+    assert result.ok is False
+    assert any(error.startswith("invalid_path:") for error in result.errors)
 
 
 def test_validate_graph_dir_requirement_nested_items_return_errors_without_throwing(

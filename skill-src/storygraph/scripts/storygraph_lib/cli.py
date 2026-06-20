@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from .config import load_config
+from .config import ConfigLoadError, load_config
 from .stage1 import build_stage1_graph
 from .templates import TemplateDiscoveryError, build_requirement_matrix, discover_templates
 from .validation import validate_graph_dir, validate_skill_tree
@@ -28,6 +28,14 @@ def _config_arg(args) -> Path:
 
 def _missing_local_override_payload(local: Path) -> dict:
     return {"ok": False, "error": "local_override_missing", "path": str(local)}
+
+
+def _load_config_for_cli(args, local: Path | None) -> tuple[dict | None, int | None]:
+    try:
+        return load_config(_config_arg(args), local_override=local), None
+    except ConfigLoadError as error:
+        _print_json(error.to_dict())
+        return None, 2
 
 
 def main(argv=None):
@@ -67,7 +75,9 @@ def main(argv=None):
         if local and not local.exists():
             print(_missing_local_override_payload(local))
             return 2
-        config = load_config(_config_arg(args), local_override=local)
+        config, error_code = _load_config_for_cli(args, local)
+        if error_code is not None:
+            return error_code
         print({"ok": True, "graph_dir_suffix": config["graph_dir_suffix"]})
         return 0
     if args.command == "inspect-templates":
@@ -89,7 +99,9 @@ def main(argv=None):
                 )
             )
             return 2
-        config = load_config(_config_arg(args), local_override=local)
+        config, error_code = _load_config_for_cli(args, local)
+        if error_code is not None:
+            return error_code
         discovery_config = config.get("template_discovery", {})
         try:
             discovery = discover_templates(
@@ -144,7 +156,9 @@ def main(argv=None):
         if local and not local.exists():
             _print_json(_missing_local_override_payload(local))
             return 2
-        config = load_config(_config_arg(args), local_override=local)
+        config, error_code = _load_config_for_cli(args, local)
+        if error_code is not None:
+            return error_code
         config.setdefault("paths", {})
         config["paths"]["template_dir"] = args.template_dir
         if args.graphify_repo is not None:
