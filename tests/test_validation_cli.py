@@ -1265,6 +1265,32 @@ def test_validate_graph_dir_rejects_malformed_readiness_link_fields(tmp_path):
             ],
         ),
         (
+            "readiness_unknown_link_references",
+            {
+                "readiness": [
+                    {
+                        "template_name": "法宝分析",
+                        "requirement_statuses": [
+                            {
+                                "requirement_id": "法宝分析.required_fields.法宝",
+                                "status": "covered",
+                                "linked_node_ids": ["node:missing"],
+                                "linked_edge_ids": ["edge:missing"],
+                                "linked_event_ids": ["event:missing"],
+                                "evidence_ids": ["evidence:missing"],
+                            }
+                        ],
+                    }
+                ]
+            },
+            [
+                "unknown_readiness_node:node:missing",
+                "unknown_readiness_edge:edge:missing",
+                "unknown_readiness_event:event:missing",
+                "unknown_readiness_evidence:evidence:missing",
+            ],
+        ),
+        (
             "agent_ledger_record_non_dict",
             {"agent_ledger": ["not-record"]},
             ["bad_agent_ledger_record"],

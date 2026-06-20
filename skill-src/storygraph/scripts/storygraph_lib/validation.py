@@ -101,6 +101,7 @@ def validate_graph_dir(graph_dir: Path) -> GraphDirValidation:
     errors.extend(_validate_requirements_readiness(requirements, readiness, status_enums))
     errors.extend(_validate_chunks(manifest, chunks))
     errors.extend(_validate_evidence_links(graph, coverage_evidence, status_enums))
+    errors.extend(_validate_readiness_references(graph, coverage_evidence, readiness))
 
     stage1_status = _stage1_status(manifest, errors)
     if stage1_status != "success":
@@ -427,6 +428,64 @@ def _validate_readiness_status_shape(
             errors.append(f"bad_readiness_{key}:{owner}")
     if "notes" in status and not _is_string_list(status.get("notes")):
         errors.append(f"bad_readiness_notes:{owner}")
+
+
+def _validate_readiness_references(
+    graph: dict, coverage_evidence: list[dict], readiness: list[dict]
+) -> list[str]:
+    errors: list[str] = []
+    node_ids = _graph_item_id_set(graph, "nodes")
+    edge_ids = _graph_item_id_set(graph, "edges")
+    event_ids = _graph_item_id_set(graph, "events")
+    evidence_ids = _evidence_id_set(_safe_list(graph.get("evidence_index"))) | _raw_evidence_id_set(
+        coverage_evidence
+    )
+    ref_fields = [
+        ("linked_node_ids", node_ids, "unknown_readiness_node"),
+        ("linked_edge_ids", edge_ids, "unknown_readiness_edge"),
+        ("linked_event_ids", event_ids, "unknown_readiness_event"),
+        ("evidence_ids", evidence_ids, "unknown_readiness_evidence"),
+    ]
+    for record in readiness:
+        if not isinstance(record, dict):
+            continue
+        for status in _safe_statuses(record.get("requirement_statuses")):
+            if not isinstance(status, dict):
+                continue
+            for key, known_ids, error_code in ref_fields:
+                refs = status.get(key)
+                if refs is None or not _is_string_list(refs):
+                    continue
+                for ref in refs:
+                    if ref not in known_ids:
+                        errors.append(f"{error_code}:{ref}")
+    return errors
+
+
+def _graph_item_id_set(graph: dict, key: str) -> set[str]:
+    ids = set()
+    for record in _safe_list(graph.get(key)):
+        if not isinstance(record, dict):
+            continue
+        item_id = record.get("id")
+        if isinstance(item_id, str):
+            ids.add(item_id)
+    return ids
+
+
+def _raw_evidence_id_set(records: list) -> set[str]:
+    ids = set()
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        evidence_id = record.get("evidence_id")
+        if isinstance(evidence_id, str):
+            ids.add(evidence_id)
+    return ids
+
+
+def _safe_list(value: object) -> list:
+    return value if isinstance(value, list) else []
 
 
 def _allowed_status_values(
