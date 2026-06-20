@@ -81,6 +81,27 @@ def test_deep_validation_requires_top_level_schema_versions():
     assert "missing:storygraph_schema_version" in errors
 
 
+def test_deep_validation_rejects_bad_top_level_schema_shapes():
+    graph = {
+        "schema_version": ["bad"],
+        "graphify_schema_version": 123,
+        "storygraph_schema_version": None,
+        "nodes": [],
+        "edges": [],
+        "hyperedges": [],
+        "events": [],
+        "evidence_index": [],
+        "metadata": "bad",
+    }
+
+    errors = validate_canonical_graph(graph).errors
+
+    assert "bad_graph_top_level:schema_version" in errors
+    assert "bad_graph_top_level:graphify_schema_version" in errors
+    assert "bad_graph_top_level:storygraph_schema_version" in errors
+    assert "bad_graph_top_level:metadata" in errors
+
+
 def test_deep_validation_reports_malformed_collections_without_throwing():
     graph = {
         "schema_version": "1.0",

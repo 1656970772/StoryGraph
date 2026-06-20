@@ -100,6 +100,7 @@ def validate_canonical_graph(
     graph: dict[str, Any], status_enums: dict[str, list[str]] | None = None
 ) -> SchemaValidation:
     errors = [f"missing:{key}" for key in REQUIRED_TOP_LEVEL_FIELDS if key not in graph]
+    _validate_top_level_shapes(graph, errors)
     enums = _status_enums(status_enums, errors)
     collections = {
         key: _graph_collection(graph, key, errors)
@@ -136,6 +137,14 @@ def validate_canonical_graph(
         _validate_evidence(evidence, enums, errors)
 
     return SchemaValidation(ok=not errors, errors=errors)
+
+
+def _validate_top_level_shapes(graph: dict[str, Any], errors: list[str]) -> None:
+    for key in ["schema_version", "graphify_schema_version", "storygraph_schema_version"]:
+        if key in graph and not isinstance(graph.get(key), str):
+            errors.append(f"bad_graph_top_level:{key}")
+    if "metadata" in graph and not isinstance(graph.get("metadata"), dict):
+        errors.append("bad_graph_top_level:metadata")
 
 
 def _graph_collection(graph: dict[str, Any], key: str, errors: list[str]) -> list:

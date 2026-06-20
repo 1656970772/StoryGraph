@@ -312,16 +312,9 @@ def _validate_evidence_links(graph: dict, coverage_evidence: list[dict]) -> list
         errors.append("bad_graph_collection:evidence_index")
         graph_evidence = []
     graph_evidence_ids = _evidence_id_set(graph_evidence)
-    coverage_evidence_ids = _evidence_id_set(coverage_evidence)
+    coverage_evidence_ids = _coverage_evidence_id_set(coverage_evidence, errors)
     for evidence in graph_evidence:
         if not isinstance(evidence, dict):
-            continue
-        source_range = evidence.get("source_range")
-        if source_range is not None and _valid_source_range(source_range) is None:
-            errors.append(f"bad_evidence_source_range:{evidence.get('evidence_id')}")
-    for evidence in coverage_evidence:
-        if not isinstance(evidence, dict):
-            errors.append("bad_coverage_evidence_record")
             continue
         source_range = evidence.get("source_range")
         if source_range is not None and _valid_source_range(source_range) is None:
@@ -357,6 +350,34 @@ def _evidence_id_set(records: list) -> set[str]:
         if isinstance(evidence_id, str):
             ids.add(evidence_id)
     return ids
+
+
+def _coverage_evidence_id_set(records: list, errors: list[str]) -> set[str]:
+    ids = set()
+    for record in records:
+        if not isinstance(record, dict):
+            errors.append("bad_coverage_evidence_record")
+            continue
+        evidence_id = record.get("evidence_id")
+        if not isinstance(evidence_id, str) or not evidence_id:
+            errors.append("bad_coverage_evidence_id")
+            continue
+        ids.add(evidence_id)
+        _validate_coverage_evidence_shape(record, evidence_id, errors)
+    return ids
+
+
+def _validate_coverage_evidence_shape(
+    record: dict, evidence_id: str, errors: list[str]
+) -> None:
+    source_range = record.get("source_range")
+    if source_range is not None and _valid_source_range(source_range) is None:
+        errors.append(f"bad_evidence_source_range:{evidence_id}")
+    for key in ["fact_summary", "confidence", "verification_status"]:
+        if key in record and not isinstance(record.get(key), str):
+            errors.append("bad_coverage_evidence_record")
+    if "supports_templates" in record and not isinstance(record.get("supports_templates"), list):
+        errors.append("bad_coverage_evidence_record")
 
 
 def _validate_required_agent_roles(agent_ledger: list[dict]) -> list[str]:

@@ -983,6 +983,197 @@ def test_validate_graph_dir_rejects_non_object_coverage_evidence_record(tmp_path
     assert "bad_coverage_evidence_record" in result.errors
 
 
+@pytest.mark.parametrize(
+    ("case_name", "kwargs", "expected_errors"),
+    [
+        (
+            "manifest_stage_status_non_dict",
+            {"manifest": {"stage_status": "success"}},
+            ["bad_manifest_stage_status"],
+        ),
+        (
+            "manifest_source_path_non_path_string",
+            {"manifest": {"source_path": {"bad": "path"}, "source_size": len("法宝")}},
+            ["bad_manifest_source_path"],
+        ),
+        (
+            "graph_collection_non_list",
+            {"graph": {"nodes": {}, "evidence_index": None}},
+            ["bad_graph_collection:nodes", "bad_graph_collection:evidence_index"],
+        ),
+        (
+            "graph_item_non_dict",
+            {"graph": {"nodes": ["not-object"]}},
+            ["bad_graph_item:nodes"],
+        ),
+        (
+            "graph_item_id_non_str",
+            {"graph": {"nodes": [{"id": ["bad"], "source_range": [0, 1]}]}},
+            ["node_bad_id:['bad']"],
+        ),
+        (
+            "graph_item_source_range_float",
+            {"graph": {"nodes": [{"id": "node:native", "source_range": [0.5, 1.5]}]}},
+            ["node_bad_source_range:node:native"],
+        ),
+        (
+            "graph_item_source_location_bad_shapes",
+            {
+                "graph": {
+                    "nodes": [
+                        {"id": "node:scalar", "source_location": 123},
+                        {
+                            "id": "node:nested",
+                            "source_location": {"source_range": [0.5, 1.5]},
+                        },
+                    ]
+                }
+            },
+            [
+                "node_bad_source_location:node:scalar",
+                "node_bad_source_location_range:node:nested",
+            ],
+        ),
+        (
+            "graph_evidence_index_non_list",
+            {"graph": {"evidence_index": "bad"}},
+            ["bad_graph_collection:evidence_index"],
+        ),
+        (
+            "graph_top_level_bad_shapes",
+            {
+                "graph": {
+                    "schema_version": ["bad"],
+                    "graphify_schema_version": 123,
+                    "storygraph_schema_version": None,
+                    "metadata": "bad",
+                }
+            },
+            [
+                "bad_graph_top_level:schema_version",
+                "bad_graph_top_level:graphify_schema_version",
+                "bad_graph_top_level:storygraph_schema_version",
+                "bad_graph_top_level:metadata",
+            ],
+        ),
+        (
+            "coverage_evidence_non_dict",
+            {"coverage_evidence": ["not-object"]},
+            ["bad_coverage_evidence_record"],
+        ),
+        (
+            "coverage_evidence_missing_evidence_id",
+            {"coverage_evidence": [{"source_range": [0, 1], "fact_summary": "missing"}]},
+            ["bad_coverage_evidence_id"],
+        ),
+        (
+            "requirements_nested_required_fields",
+            {
+                "requirements": {
+                    "template_count": 1,
+                    "templates": [
+                        {"template_name": "法宝分析", "required_fields": [["nested"], 1]}
+                    ],
+                },
+                "readiness": [{"template_name": "法宝分析", "requirement_statuses": []}],
+            },
+            ["bad_requirement_item:法宝分析:required_fields"],
+        ),
+        (
+            "readiness_requirement_statuses_non_list",
+            {"readiness": [{"template_name": "法宝分析", "requirement_statuses": "bad"}]},
+            ["bad_readiness_requirement_statuses:法宝分析"],
+        ),
+        (
+            "agent_ledger_record_non_dict",
+            {"agent_ledger": ["not-record"]},
+            ["bad_agent_ledger_record"],
+        ),
+        (
+            "agent_ledger_errors_non_list",
+            {
+                "agent_ledger": [
+                    {
+                        "run_id": "stage1-graph-extraction",
+                        "agent_role": "图抽取",
+                        "status": "failed",
+                        "errors": 1,
+                        "output_paths": [],
+                        "write_scope": [],
+                    }
+                ]
+            },
+            ["bad_agent_ledger_errors:stage1-graph-extraction"],
+        ),
+        (
+            "agent_ledger_path_item_dict_list",
+            {
+                "agent_ledger": [
+                    {
+                        "run_id": "stage1-template-requirements",
+                        "agent_role": "模板需求分析",
+                        "status": "completed",
+                        "output_paths": [{"not": "a path"}],
+                        "write_scope": [],
+                    },
+                    {
+                        "run_id": "stage1-graph-extraction",
+                        "agent_role": "图抽取",
+                        "status": "completed",
+                        "output_paths": [],
+                        "write_scope": [["also-not-a-path"]],
+                    },
+                    {
+                        "run_id": "stage1-coverage-review",
+                        "agent_role": "覆盖审查",
+                        "status": "completed",
+                        "output_paths": [],
+                        "write_scope": [],
+                    },
+                    {
+                        "run_id": "stage1-quality-review",
+                        "agent_role": "质量审查",
+                        "status": "completed",
+                        "output_paths": [],
+                        "write_scope": [],
+                    },
+                ]
+            },
+            [
+                "invalid_path_item:stage1-template-requirements:output_paths",
+                "invalid_path_item:stage1-graph-extraction:write_scope",
+            ],
+        ),
+        (
+            "chunk_source_range_float",
+            {
+                "chunks": [
+                    {
+                        "chunk_id": "chunk-float",
+                        "source_range": [0.0, 2.0],
+                        "extraction_status": "completed",
+                    }
+                ]
+            },
+            ["bad_chunk_source_range:chunk-float"],
+        ),
+    ],
+)
+def test_validate_graph_dir_external_json_malformed_regression_matrix(
+    tmp_path, case_name, kwargs, expected_errors
+):
+    from storygraph_lib.validation import validate_graph_dir
+
+    graph_dir = tmp_path / f"{case_name}.storygraph"
+    _write_minimal_valid_graph_dir(graph_dir, **kwargs)
+
+    result = validate_graph_dir(graph_dir)
+
+    assert result.ok is False
+    for expected_error in expected_errors:
+        assert expected_error in result.errors
+
+
 def test_validate_graph_dir_requires_success_stage1_agent_roles(tmp_path):
     from storygraph_lib.validation import validate_graph_dir
 
