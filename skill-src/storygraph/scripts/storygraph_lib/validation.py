@@ -208,6 +208,7 @@ def _validate_requirements_readiness(
         if not isinstance(record, dict):
             errors.append("bad_readiness_record")
             continue
+        _validate_readiness_summary_shape(record, errors)
         statuses = record.get("requirement_statuses")
         if not isinstance(statuses, list):
             errors.append(f"bad_readiness_requirement_statuses:{record.get('template_name')}")
@@ -273,6 +274,7 @@ def _validate_chunks(manifest: dict, chunks: list[dict]) -> list[str]:
         if not isinstance(chunk, dict):
             errors.append("bad_chunk_record")
             continue
+        _validate_chunk_shape(chunk, errors)
         source_range = _valid_source_range(chunk.get("source_range"))
         if source_range is None:
             errors.append(f"bad_chunk_source_range:{chunk.get('chunk_id')}")
@@ -366,6 +368,20 @@ def _coverage_evidence_id_set(
 def _validate_coverage_evidence_shape(
     record: dict, evidence_id: str, status_enums: dict | None, errors: list[str]
 ) -> None:
+    if "source_path" in record and not isinstance(record.get("source_path"), str):
+        errors.append(f"bad_coverage_source_path:{evidence_id}")
+    source_location = record.get("source_location")
+    if "source_location" in record and not _valid_coverage_source_location(source_location):
+        errors.append(f"bad_coverage_source_location:{evidence_id}")
+    if "chunk_id" in record and not isinstance(record.get("chunk_id"), str):
+        errors.append(f"bad_coverage_chunk_id:{evidence_id}")
+    if "chapter_hint" in record and not _is_optional_str(record.get("chapter_hint")):
+        errors.append(f"bad_coverage_chapter_hint:{evidence_id}")
+    if "support" in record and not isinstance(record.get("support"), str):
+        errors.append(f"bad_coverage_support:{evidence_id}")
+    for key in ["linked_node_ids", "linked_edge_ids", "linked_event_ids"]:
+        if key in record and not _is_string_list(record.get(key)):
+            errors.append(f"bad_coverage_{key}:{evidence_id}")
     source_range = record.get("source_range")
     if source_range is not None and _valid_source_range(source_range) is None:
         errors.append(f"bad_evidence_source_range:{evidence_id}")
@@ -428,6 +444,57 @@ def _validate_readiness_status_shape(
             errors.append(f"bad_readiness_{key}:{owner}")
     if "notes" in status and not _is_string_list(status.get("notes")):
         errors.append(f"bad_readiness_notes:{owner}")
+
+
+def _validate_readiness_summary_shape(record: dict, errors: list[str]) -> None:
+    template_name = record.get("template_name")
+    if "readiness_score" in record and not _is_non_negative_number(
+        record.get("readiness_score")
+    ):
+        errors.append(f"bad_readiness_score:{template_name}")
+    for key in [
+        "supporting_node_count",
+        "supporting_edge_count",
+        "supporting_event_count",
+        "evidence_count",
+    ]:
+        if key in record and not _is_non_negative_int(record.get(key)):
+            errors.append(f"bad_readiness_{key}:{template_name}")
+    if "missing_requirement_types" in record and not _is_string_list(
+        record.get("missing_requirement_types")
+    ):
+        errors.append(f"bad_readiness_missing_requirement_types:{template_name}")
+    if "notes" in record and not _is_string_list(record.get("notes")):
+        errors.append(f"bad_readiness_notes:{template_name}")
+
+
+def _validate_chunk_shape(chunk: dict, errors: list[str]) -> None:
+    owner = _chunk_owner(chunk)
+    if not isinstance(chunk.get("chunk_id"), str):
+        errors.append("bad_chunk_id")
+    if "source_path" in chunk and not isinstance(chunk.get("source_path"), str):
+        errors.append(f"bad_chunk_source_path:{owner}")
+    if "chapter_hint" in chunk and not _is_optional_str(chunk.get("chapter_hint")):
+        errors.append(f"bad_chunk_chapter_hint:{owner}")
+    if "hash" in chunk and not _is_optional_str(chunk.get("hash")):
+        errors.append(f"bad_chunk_hash:{owner}")
+    if "scanned_at" in chunk and not _is_optional_str(chunk.get("scanned_at")):
+        errors.append(f"bad_chunk_scanned_at:{owner}")
+    if "processor" in chunk and not isinstance(chunk.get("processor"), str):
+        errors.append(f"bad_chunk_processor:{owner}")
+    if "failure" in chunk and not (
+        isinstance(chunk.get("failure"), dict) or chunk.get("failure") is None
+    ):
+        errors.append(f"bad_chunk_failure:{owner}")
+    if "retry_count" in chunk and not _is_non_negative_int(chunk.get("retry_count")):
+        errors.append(f"bad_chunk_retry_count:{owner}")
+    if "text" in chunk and not isinstance(chunk.get("text"), str):
+        errors.append(f"bad_chunk_text:{owner}")
+
+
+def _chunk_owner(chunk: dict) -> str:
+    chunk_id = chunk.get("chunk_id")
+    return chunk_id if isinstance(chunk_id, str) else "unknown"
 
 
 def _validate_readiness_references(
@@ -504,6 +571,32 @@ def _allowed_status_values(
 
 def _is_string_list(value: object) -> bool:
     return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+
+def _is_non_negative_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _is_non_negative_number(value: object) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and value >= 0
+    )
+
+
+def _is_optional_str(value: object) -> bool:
+    return value is None or isinstance(value, str)
+
+
+def _valid_coverage_source_location(value: object) -> bool:
+    if isinstance(value, str):
+        return True
+    if isinstance(value, dict):
+        if "source_range" in value and _valid_source_range(value.get("source_range")) is None:
+            return False
+        return True
+    return isinstance(value, list) and _valid_source_range(value) is not None
 
 
 def _validate_required_agent_roles(agent_ledger: list[dict]) -> list[str]:

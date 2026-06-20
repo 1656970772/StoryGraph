@@ -297,7 +297,7 @@ def graphify_source_fingerprint(config: dict) -> dict:
         repo_content_hash = _directory_content_hash(repo)
     elif repo and repo.exists():
         repo_content_hash = _directory_content_hash(repo)
-    adapter_config = config.get("graphify_adapter", {})
+    adapter_config, adapter_config_error = _graphify_adapter_config(config)
     command = adapter_config.get("command", [])
     return {
         "graphify_repo": str(repo) if repo else None,
@@ -310,6 +310,7 @@ def graphify_source_fingerprint(config: dict) -> dict:
         "adapter_command": command,
         "adapter_timeout_seconds": adapter_config.get("timeout_seconds"),
         "adapter_executable": _executable_fingerprint(command),
+        "adapter_config_error": adapter_config_error,
     }
 
 
@@ -363,14 +364,26 @@ def _build_matrix(templates: list, config: dict) -> dict:
 
 
 def _graphify_adapter(config: dict) -> GraphifyAdapter:
-    adapter_config = config.get("graphify_adapter", {})
+    adapter_config, adapter_config_error = _graphify_adapter_config(config)
     repo_value = config.get("paths", {}).get("graphify_repo")
     return GraphifyAdapter(
         Path(repo_value) if repo_value else None,
         adapter_config.get("command", []),
         adapter_config.get("timeout_seconds", 1800),
         adapter_config.get("mode", "local-repo-or-cli"),
+        config_error=adapter_config_error,
     )
+
+
+def _graphify_adapter_config(config: dict) -> tuple[dict, dict | None]:
+    adapter_config = config.get("graphify_adapter", {})
+    if isinstance(adapter_config, dict):
+        return adapter_config, None
+    return {}, {
+        "code": "graphify_bad_command",
+        "field": "graphify_adapter",
+        "message": "graphify_adapter must be an object",
+    }
 
 
 def _read_graphify_artifacts(graph_path: Path, output_dir: Path) -> tuple[dict | None, dict | None]:

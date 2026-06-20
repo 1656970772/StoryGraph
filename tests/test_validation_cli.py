@@ -1219,6 +1219,64 @@ def test_validate_graph_dir_rejects_malformed_readiness_link_fields(tmp_path):
             ],
         ),
         (
+            "coverage_evidence_malformed_optional_fields",
+            {
+                "graph": {
+                    "evidence_index": [
+                        {
+                            "evidence_id": "evidence:1",
+                            "source_range": [0, 1],
+                            "fact_summary": "ok",
+                            "confidence": "EXTRACTED",
+                            "verification_status": "verified",
+                            "supports_templates": [
+                                {
+                                    "template_name": "法宝分析",
+                                    "requirement_id": "法宝分析.required_fields.法宝",
+                                    "status": "covered",
+                                }
+                            ],
+                        }
+                    ]
+                },
+                "coverage_evidence": [
+                    {
+                        "evidence_id": "evidence:1",
+                        "source_path": {},
+                        "source_location": 123,
+                        "chunk_id": [],
+                        "chapter_hint": {},
+                        "support": None,
+                        "linked_node_ids": "bad",
+                        "linked_edge_ids": [{}],
+                        "linked_event_ids": [1],
+                    }
+                ],
+                "readiness": [
+                    {
+                        "template_name": "法宝分析",
+                        "requirement_statuses": [
+                            {
+                                "requirement_id": "法宝分析.required_fields.法宝",
+                                "status": "covered",
+                                "evidence_ids": ["evidence:1"],
+                            }
+                        ],
+                    }
+                ],
+            },
+            [
+                "bad_coverage_source_path:evidence:1",
+                "bad_coverage_source_location:evidence:1",
+                "bad_coverage_chunk_id:evidence:1",
+                "bad_coverage_chapter_hint:evidence:1",
+                "bad_coverage_support:evidence:1",
+                "bad_coverage_linked_node_ids:evidence:1",
+                "bad_coverage_linked_edge_ids:evidence:1",
+                "bad_coverage_linked_event_ids:evidence:1",
+            ],
+        ),
+        (
             "requirements_nested_required_fields",
             {
                 "requirements": {
@@ -1288,6 +1346,38 @@ def test_validate_graph_dir_rejects_malformed_readiness_link_fields(tmp_path):
                 "unknown_readiness_edge:edge:missing",
                 "unknown_readiness_event:event:missing",
                 "unknown_readiness_evidence:evidence:missing",
+            ],
+        ),
+        (
+            "readiness_summary_malformed_fields",
+            {
+                "readiness": [
+                    {
+                        "template_name": "法宝分析",
+                        "readiness_score": "bad",
+                        "supporting_node_count": "x",
+                        "supporting_edge_count": {},
+                        "supporting_event_count": [],
+                        "evidence_count": None,
+                        "missing_requirement_types": "fields",
+                        "requirement_statuses": [
+                            {
+                                "requirement_id": "法宝分析.required_fields.法宝",
+                                "status": "covered",
+                            }
+                        ],
+                        "notes": "bad",
+                    }
+                ]
+            },
+            [
+                "bad_readiness_score:法宝分析",
+                "bad_readiness_supporting_node_count:法宝分析",
+                "bad_readiness_supporting_edge_count:法宝分析",
+                "bad_readiness_supporting_event_count:法宝分析",
+                "bad_readiness_evidence_count:法宝分析",
+                "bad_readiness_missing_requirement_types:法宝分析",
+                "bad_readiness_notes:法宝分析",
             ],
         ),
         (
@@ -1362,6 +1452,37 @@ def test_validate_graph_dir_rejects_malformed_readiness_link_fields(tmp_path):
                 ]
             },
             ["bad_chunk_source_range:chunk-float"],
+        ),
+        (
+            "chunk_malformed_optional_fields",
+            {
+                "chunks": [
+                    {
+                        "chunk_id": ["bad-id"],
+                        "source_path": {"bad": "path"},
+                        "source_range": [0, 2],
+                        "chapter_hint": 123,
+                        "hash": [],
+                        "scanned_at": {},
+                        "processor": None,
+                        "extraction_status": "completed",
+                        "failure": "bad",
+                        "retry_count": "zero",
+                        "text": 5,
+                    }
+                ]
+            },
+            [
+                "bad_chunk_id",
+                "bad_chunk_source_path:unknown",
+                "bad_chunk_chapter_hint:unknown",
+                "bad_chunk_hash:unknown",
+                "bad_chunk_scanned_at:unknown",
+                "bad_chunk_processor:unknown",
+                "bad_chunk_failure:unknown",
+                "bad_chunk_retry_count:unknown",
+                "bad_chunk_text:unknown",
+            ],
         ),
     ],
 )

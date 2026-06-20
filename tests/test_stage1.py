@@ -542,6 +542,35 @@ def test_stage1_graphify_malformed_graph_json_is_structured_failure(tmp_path):
     assert not (graph_dir / "graphify-out" / "graph.json").exists()
 
 
+def test_stage1_bad_graphify_adapter_shape_is_structured_failure(tmp_path):
+    novel = tmp_path / "mini_novel.txt"
+    novel.write_text("法宝", encoding="utf-8")
+    template_dir = tmp_path / "templates"
+    _write_template(template_dir, "# 法宝分析模板\n## 字段\n- 法宝")
+    config = _config(template_dir, graphify_repo=None)
+    config["graphify_adapter"] = "not-an-object"
+
+    result = build_stage1_graph(novel, config)
+
+    graph_dir = tmp_path / "mini_novel.storygraph"
+    manifest = json.loads((graph_dir / "manifest.json").read_text(encoding="utf-8"))
+    ledger = json.loads((graph_dir / "coverage" / "agent-run-ledger.json").read_text(encoding="utf-8"))
+    gap = (graph_dir / "coverage" / "gap-report.md").read_text(encoding="utf-8")
+    validation = validate_graph_dir(graph_dir)
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "graphify_bad_command"
+    assert result["error"]["field"] == "graphify_adapter"
+    assert "graphify_bad_command" in result["validation_errors"]
+    assert manifest["stage_status"]["stage1"] == "failed"
+    assert any(
+        error["code"] == "graphify_bad_command"
+        for record in ledger
+        for error in record.get("errors", [])
+    )
+    assert "graphify_bad_command" in gap
+    assert "blocking_ledger:graphify_bad_command" in validation.errors
+
+
 def test_stage1_graphify_unreadable_report_is_structured_failure(tmp_path):
     novel = tmp_path / "mini_novel.txt"
     novel.write_text("第一章\n法宝卡片记载法宝。小瓶出现。", encoding="utf-8")
