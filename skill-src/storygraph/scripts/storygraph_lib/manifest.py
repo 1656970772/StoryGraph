@@ -13,7 +13,7 @@ def _load_existing_manifest(path: Path) -> dict:
         return {}
     try:
         existing = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError):
         return {}
     if not isinstance(existing, dict):
         return {}

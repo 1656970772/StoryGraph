@@ -2,6 +2,8 @@ import sys
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from storygraph_lib.paths import NovelContext
 from storygraph_lib.state import REQUIRED_STAGE1_FILES, stage1_state
 from storygraph_lib.stage1 import build_stage1_graph
@@ -113,6 +115,33 @@ def _config(template_dir: Path, graphify_repo: Path) -> dict:
         "agent_policy": {"sub_agent_json_payloads": []},
         "writer_policy": {"managed_outputs": MANAGED_OUTPUTS},
     }
+
+
+@pytest.mark.parametrize(
+    "writer",
+    [
+        lambda path: path.write_bytes(b"\xff"),
+        lambda path: path.write_text("[" * 6000 + "0" + "]" * 6000, encoding="utf-8"),
+    ],
+)
+def test_build_stage1_rebuilds_when_existing_manifest_is_unreadable(tmp_path, writer):
+    novel = tmp_path / "mini.txt"
+    novel.write_text("法宝 小瓶", encoding="utf-8")
+    template_dir = tmp_path / "templates"
+    template_dir.mkdir()
+    _write_37_templates(template_dir)
+    graphify_repo = tmp_path / "graphify"
+    graphify_repo.mkdir()
+    config = _config(template_dir, graphify_repo)
+
+    first = build_stage1_graph(novel, config)
+    graph_dir = Path(first["graph_dir"])
+    writer(graph_dir / "manifest.json")
+
+    result = build_stage1_graph(novel, config)
+
+    assert result["source_state"] == "changed"
+    assert result["status"] in {"success", "warning", "failed"}
 
 
 def test_stage1_state_rebuilds_when_manifest_stage_status_shape_is_malformed(tmp_path):
