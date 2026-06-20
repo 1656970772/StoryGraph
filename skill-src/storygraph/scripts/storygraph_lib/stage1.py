@@ -389,7 +389,7 @@ def _graphify_adapter_config(config: dict) -> tuple[dict, dict | None]:
 def _read_graphify_artifacts(graph_path: Path, output_dir: Path) -> tuple[dict | None, dict | None]:
     try:
         base_graph = json.loads(graph_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         return None, _artifact_error("graphify_failed", "graph.json", exc)
     if not isinstance(base_graph, dict):
         return None, {
@@ -416,13 +416,20 @@ def _read_graphify_artifacts(graph_path: Path, output_dir: Path) -> tuple[dict |
                 "artifact": "graph.json",
                 "message": f"graph.json field {key} must contain objects",
             }
-    try:
-        report = (output_dir / "GRAPH_REPORT.md").read_text(encoding="utf-8")
-        html = (output_dir / "graph.html").read_text(encoding="utf-8")
-    except OSError as exc:
-        artifact = "GRAPH_REPORT.md" if "GRAPH_REPORT.md" in str(exc) else "graph.html"
-        return None, _artifact_error("graphify_failed", artifact, exc)
+    report, report_error = _read_utf8_artifact(output_dir, "GRAPH_REPORT.md")
+    if report_error:
+        return None, report_error
+    html, html_error = _read_utf8_artifact(output_dir, "graph.html")
+    if html_error:
+        return None, html_error
     return {"graph": base_graph, "report": report, "html": html}, None
+
+
+def _read_utf8_artifact(output_dir: Path, artifact: str) -> tuple[str | None, dict | None]:
+    try:
+        return (output_dir / artifact).read_text(encoding="utf-8"), None
+    except (OSError, UnicodeDecodeError) as exc:
+        return None, _artifact_error("graphify_failed", artifact, exc)
 
 
 def _artifact_error(code: str, artifact: str, exc: Exception) -> dict:

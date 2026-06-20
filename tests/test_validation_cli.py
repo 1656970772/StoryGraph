@@ -1583,6 +1583,37 @@ def test_validate_graph_dir_external_json_malformed_regression_matrix(
         assert expected_error in result.errors
 
 
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "manifest.json",
+        "graphify-out/graph.json",
+        "requirements/template-requirements.json",
+        "coverage/chunk-ledger.json",
+        "coverage/evidence-index.json",
+        "coverage/template-readiness.json",
+        "coverage/agent-run-ledger.json",
+    ],
+)
+def test_validate_graph_dir_external_json_invalid_utf8_regression_matrix(
+    tmp_path, relative_path
+):
+    from storygraph_lib.validation import validate_graph_dir
+
+    graph_dir = tmp_path / "invalid_utf8.storygraph"
+    _write_minimal_valid_graph_dir(
+        graph_dir,
+        requirements={"template_count": 0, "templates": []},
+        readiness=[],
+    )
+    (graph_dir / Path(*relative_path.split("/"))).write_bytes(b"\xff")
+
+    result = validate_graph_dir(graph_dir)
+
+    assert result.ok is False
+    assert f"bad_json:{relative_path}" in result.errors
+
+
 def test_validate_graph_dir_requires_success_stage1_agent_roles(tmp_path):
     from storygraph_lib.validation import validate_graph_dir
 
