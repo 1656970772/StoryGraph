@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from storygraph_lib.stage1 import _graphify_adapter, build_stage1_graph
+from storygraph_lib.stage1 import _graphify_adapter, _read_graphify_artifacts, build_stage1_graph
 from storygraph_lib.validation import validate_graph_dir
 
 
@@ -593,6 +593,68 @@ def test_stage1_graphify_invalid_utf8_artifacts_are_structured_failure(
     assert result["error"]["code"] == "graphify_failed"
     assert result["error"]["artifact"] == artifact_name
     assert "utf-8" in result["error"]["message"]
+    assert "graphify_failed" in result["validation_errors"]
+    assert manifest["stage_status"]["stage1"] == "failed"
+    assert any(
+        error["code"] == "graphify_failed"
+        for record in ledger
+        for error in record.get("errors", [])
+    )
+    assert "graphify_failed" in gap
+    assert not (graph_dir / "graphify-out" / "graph.json").exists()
+    assert not (graph_dir / "graphify-out" / "GRAPH_REPORT.md").exists()
+    assert not (graph_dir / "graphify-out" / "graph.html").exists()
+
+
+def test_read_graphify_artifacts_deep_json_is_structured_failure(tmp_path):
+    out = tmp_path / "graphify-out"
+    out.mkdir()
+    (out / "graph.json").write_text(
+        "[" * 20000 + "0" + "]" * 20000,
+        encoding="utf-8",
+    )
+    (out / "GRAPH_REPORT.md").write_text("# Graph Report\n", encoding="utf-8")
+    (out / "graph.html").write_text(
+        "<!doctype html><title>graph</title>",
+        encoding="utf-8",
+    )
+
+    artifacts, error = _read_graphify_artifacts(out / "graph.json", out)
+
+    assert artifacts is None
+    assert error["code"] == "graphify_failed"
+    assert error["artifact"] == "graph.json"
+    assert "recursion" in error["message"].lower()
+
+
+def test_stage1_graphify_deep_json_artifact_is_structured_failure(tmp_path):
+    novel = tmp_path / "mini_novel.txt"
+    novel.write_text("第一章\n法宝卡片记载法宝。小瓶出现。", encoding="utf-8")
+    template_dir = tmp_path / "templates"
+    _write_template(template_dir)
+    config = _config(template_dir, graphify_repo=None)
+    config["graphify_adapter"] = {
+        "mode": "cli",
+        "command": _graphify_command_with(
+            "import pathlib,sys; "
+            "out=pathlib.Path(sys.argv[2]); out.mkdir(parents=True, exist_ok=True); "
+            "(out/'graph.json').write_text('[' * 20000 + '0' + ']' * 20000, encoding='utf-8'); "
+            "(out/'GRAPH_REPORT.md').write_text('# Graph Report\\n', encoding='utf-8'); "
+            "(out/'graph.html').write_text('<!doctype html><title>graph</title>', encoding='utf-8')"
+        ),
+        "timeout_seconds": 5,
+    }
+
+    result = build_stage1_graph(novel, config)
+
+    graph_dir = tmp_path / "mini_novel.storygraph"
+    manifest = json.loads((graph_dir / "manifest.json").read_text(encoding="utf-8"))
+    ledger = json.loads((graph_dir / "coverage" / "agent-run-ledger.json").read_text(encoding="utf-8"))
+    gap = (graph_dir / "coverage" / "gap-report.md").read_text(encoding="utf-8")
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "graphify_failed"
+    assert result["error"]["artifact"] == "graph.json"
+    assert "recursion" in result["error"]["message"].lower()
     assert "graphify_failed" in result["validation_errors"]
     assert manifest["stage_status"]["stage1"] == "failed"
     assert any(

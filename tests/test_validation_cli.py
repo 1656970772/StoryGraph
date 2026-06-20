@@ -1614,6 +1614,26 @@ def test_validate_graph_dir_external_json_invalid_utf8_regression_matrix(
     assert f"bad_json:{relative_path}" in result.errors
 
 
+def test_validate_graph_dir_external_json_deep_recursion_is_bad_json(tmp_path):
+    from storygraph_lib.validation import validate_graph_dir
+
+    graph_dir = tmp_path / "deep.storygraph"
+    _write_minimal_valid_graph_dir(
+        graph_dir,
+        requirements={"template_count": 0, "templates": []},
+        readiness=[],
+    )
+    (graph_dir / "graphify-out" / "graph.json").write_text(
+        "[" * 20000 + "0" + "]" * 20000,
+        encoding="utf-8",
+    )
+
+    result = validate_graph_dir(graph_dir)
+
+    assert result.ok is False
+    assert "bad_json:graphify-out/graph.json" in result.errors
+
+
 def test_validate_graph_dir_requires_success_stage1_agent_roles(tmp_path):
     from storygraph_lib.validation import validate_graph_dir
 

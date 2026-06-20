@@ -389,7 +389,7 @@ def _graphify_adapter_config(config: dict) -> tuple[dict, dict | None]:
 def _read_graphify_artifacts(graph_path: Path, output_dir: Path) -> tuple[dict | None, dict | None]:
     try:
         base_graph = json.loads(graph_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
         return None, _artifact_error("graphify_failed", "graph.json", exc)
     if not isinstance(base_graph, dict):
         return None, {

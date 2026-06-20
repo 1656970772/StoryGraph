@@ -660,7 +660,7 @@ def _read_json(graph_dir: Path, relative_path: str, default, errors: list[str]):
         return default
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError):
         errors.append(f"bad_json:{relative_path}")
         return default
 
