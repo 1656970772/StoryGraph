@@ -381,6 +381,43 @@ def test_deep_validation_rejects_bad_edges_events_evidence_and_unknown_evidence(
     assert "bad_evidence_id:bad" in errors
 
 
+def test_deep_validation_rejects_malformed_storygraph_hyperedges():
+    graph = {
+        "schema_version": "1.0",
+        "graphify_schema_version": "x",
+        "storygraph_schema_version": "1.0",
+        "nodes": [],
+        "edges": [],
+        "hyperedges": [
+            {
+                "id": "hyperedge:bad",
+                "source_range": [0, 1],
+                "evidence_ids": [],
+                "supports_templates": [
+                    {
+                        "template_name": "法宝分析",
+                        "requirement_id": "r1",
+                        "status": ["covered"],
+                    }
+                ],
+                "confidence": "NOT_A_CONFIDENCE",
+                "verification_status": "not-real",
+            }
+        ],
+        "events": [],
+        "evidence_index": [],
+        "metadata": {},
+    }
+
+    result = validate_canonical_graph(graph)
+
+    assert result.ok is False
+    assert "hyperedge_without_evidence:hyperedge:bad" in result.errors
+    assert "bad_confidence:NOT_A_CONFIDENCE" in result.errors
+    assert "bad_verification_status:not-real" in result.errors
+    assert "bad_requirement_status:['covered']" in result.errors
+
+
 def test_graphify_native_items_without_storygraph_markers_are_allowed():
     graph = {
         "schema_version": "1.0",

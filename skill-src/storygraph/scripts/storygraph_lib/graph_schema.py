@@ -122,6 +122,11 @@ def validate_canonical_graph(
             continue
         _validate_edge(edge, node_ids, evidence_ids, enums, errors)
 
+    for hyperedge in collections["hyperedges"]:
+        if not _is_storygraph_item(hyperedge):
+            continue
+        _validate_hyperedge(hyperedge, evidence_ids, enums, errors)
+
     for event in collections["events"]:
         if not _is_storygraph_item(event):
             continue
@@ -263,6 +268,26 @@ def _validate_edge(
     _validate_evidence_refs("edge", edge_id, edge.get("evidence_ids"), evidence_ids, errors)
     _validate_status_fields(edge, enums, errors)
     _validate_supports("edge", edge_id, edge.get("supports_templates"), enums, errors)
+
+
+def _validate_hyperedge(
+    hyperedge: dict[str, Any],
+    evidence_ids: set[str | None],
+    enums: dict[str, set[str]],
+    errors: list[str],
+) -> None:
+    hyperedge_id = hyperedge.get("id")
+    if not isinstance(hyperedge_id, str) or not hyperedge_id.startswith("hyperedge:"):
+        errors.append(f"bad_hyperedge_id:{hyperedge_id}")
+    for key in ["id", "evidence_ids", "supports_templates", "confidence", "verification_status"]:
+        if key not in hyperedge:
+            errors.append(f"hyperedge_missing:{hyperedge_id}:{key}")
+    _validate_source_locator("hyperedge", hyperedge_id, hyperedge, errors)
+    _validate_evidence_refs(
+        "hyperedge", hyperedge_id, hyperedge.get("evidence_ids"), evidence_ids, errors
+    )
+    _validate_status_fields(hyperedge, enums, errors)
+    _validate_supports("hyperedge", hyperedge_id, hyperedge.get("supports_templates"), enums, errors)
 
 
 def _validate_event(

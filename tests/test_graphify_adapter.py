@@ -139,6 +139,40 @@ def test_adapter_empty_command_returns_structured_error_without_crashing(tmp_pat
     assert result.error["code"] == "graphify_bad_command"
 
 
+def test_adapter_bad_mode_returns_stable_config_error_without_crashing(tmp_path):
+    source = tmp_path / "novel.txt"
+    source.write_text("正文", encoding="utf-8")
+    adapter = GraphifyAdapter(
+        graphify_repo=None,
+        command=[sys.executable, "-c", "print('not reached')"],
+        timeout_seconds=5,
+        mode="bad-mode",
+    )
+
+    result = adapter.build_graph(source, tmp_path / "out")
+
+    assert result.ok is False
+    assert result.error["code"] == "graphify_bad_command"
+    assert result.error["mode"] == "bad-mode"
+
+
+def test_adapter_bad_timeout_returns_stable_config_error_without_crashing(tmp_path):
+    source = tmp_path / "novel.txt"
+    source.write_text("正文", encoding="utf-8")
+    adapter = GraphifyAdapter(
+        graphify_repo=None,
+        command=[sys.executable, "-c", "print('not reached')"],
+        timeout_seconds="not-an-int",
+        mode="cli",
+    )
+
+    result = adapter.build_graph(source, tmp_path / "out")
+
+    assert result.ok is False
+    assert result.error["code"] == "graphify_bad_command"
+    assert result.error["field"] == "timeout_seconds"
+
+
 def test_adapter_command_exit_zero_but_missing_required_artifacts_is_structured_error(tmp_path):
     source = tmp_path / "novel.txt"
     source.write_text("正文", encoding="utf-8")

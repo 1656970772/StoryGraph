@@ -2,7 +2,7 @@ import json
 import sys
 from pathlib import Path
 
-from storygraph_lib.stage1 import build_stage1_graph
+from storygraph_lib.stage1 import _graphify_adapter, build_stage1_graph
 from storygraph_lib.validation import validate_graph_dir
 
 
@@ -205,6 +205,68 @@ def test_stage1_empty_graphify_command_is_structured_failure_and_writes_outputs(
     assert not (graph_dir / "graphify-out" / "graph.json").exists()
     assert not (graph_dir / "graphify-out" / "GRAPH_REPORT.md").exists()
     assert not (graph_dir / "graphify-out" / "graph.html").exists()
+
+
+def test_stage1_bad_graphify_timeout_is_structured_failure_and_writes_outputs(tmp_path):
+    novel = tmp_path / "mini_novel.txt"
+    novel.write_text("法宝", encoding="utf-8")
+    template_dir = tmp_path / "templates"
+    _write_template(template_dir, "# 法宝分析模板\n## 字段\n- 法宝")
+    config = _config(template_dir, graphify_repo=None)
+    config["graphify_adapter"] = {
+        "mode": "cli",
+        "command": _graphify_command(),
+        "timeout_seconds": "not-an-int",
+    }
+
+    adapter_result = _graphify_adapter(config).build_graph(novel, tmp_path / "direct-out")
+    result = build_stage1_graph(novel, config)
+
+    graph_dir = tmp_path / "mini_novel.storygraph"
+    manifest = json.loads((graph_dir / "manifest.json").read_text(encoding="utf-8"))
+    ledger = json.loads((graph_dir / "coverage" / "agent-run-ledger.json").read_text(encoding="utf-8"))
+    gap = (graph_dir / "coverage" / "gap-report.md").read_text(encoding="utf-8")
+    validation = validate_graph_dir(graph_dir)
+    assert adapter_result.ok is False
+    assert adapter_result.error["code"] == "graphify_bad_command"
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "graphify_bad_command"
+    assert manifest["stage_status"]["stage1"] == "failed"
+    assert any(
+        error["code"] == "graphify_bad_command"
+        for record in ledger
+        for error in record.get("errors", [])
+    )
+    assert "graphify_bad_command" in gap
+    assert "blocking_ledger:graphify_bad_command" in validation.errors
+
+
+def test_stage1_bad_graphify_mode_is_structured_failure_and_writes_outputs(tmp_path):
+    novel = tmp_path / "mini_novel.txt"
+    novel.write_text("法宝", encoding="utf-8")
+    template_dir = tmp_path / "templates"
+    _write_template(template_dir, "# 法宝分析模板\n## 字段\n- 法宝")
+    config = _config(template_dir, graphify_repo=None)
+    config["graphify_adapter"] = {
+        "mode": "bad-mode",
+        "command": _graphify_command(),
+        "timeout_seconds": 5,
+    }
+
+    result = build_stage1_graph(novel, config)
+
+    graph_dir = tmp_path / "mini_novel.storygraph"
+    manifest = json.loads((graph_dir / "manifest.json").read_text(encoding="utf-8"))
+    ledger = json.loads((graph_dir / "coverage" / "agent-run-ledger.json").read_text(encoding="utf-8"))
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "graphify_bad_command"
+    assert result["error"]["mode"] == "bad-mode"
+    assert manifest["stage_status"]["stage1"] == "failed"
+    assert any(
+        error["code"] == "graphify_bad_command"
+        for record in ledger
+        for error in record.get("errors", [])
+    )
 
 
 def test_stage1_readiness_below_threshold_and_template_without_reliable_evidence_fail(tmp_path):

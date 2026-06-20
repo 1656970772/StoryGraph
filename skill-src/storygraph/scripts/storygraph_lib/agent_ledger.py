@@ -167,13 +167,23 @@ def _safe_path_list(
 ) -> tuple[list[str], list[str]]:
     normalized = []
     errors = []
-    try:
-        values = _path_list(values)
-    except TypeError:
+    if values is None:
+        return [], []
+    if isinstance(values, (str, Path)):
+        path_items = [values]
+    elif isinstance(values, dict):
         return [], [f"invalid_path_list:{label}"]
-    for value in values:
+    else:
         try:
-            normalized.append(normalize_relative_output_path(value))
+            path_items = list(values)
+        except TypeError:
+            return [], [f"invalid_path_list:{label}"]
+    for value in path_items:
+        if not isinstance(value, (str, Path)):
+            errors.append(f"invalid_path_item:{label}")
+            continue
+        try:
+            normalized.append(normalize_relative_output_path(_path_text(value)))
         except OutputWriteError:
             errors.append(f"invalid_path:{value}")
     return normalized, errors

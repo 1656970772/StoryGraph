@@ -368,7 +368,7 @@ def _graphify_adapter(config: dict) -> GraphifyAdapter:
     return GraphifyAdapter(
         Path(repo_value) if repo_value else None,
         adapter_config.get("command", []),
-        int(adapter_config.get("timeout_seconds", 1800)),
+        adapter_config.get("timeout_seconds", 1800),
         adapter_config.get("mode", "local-repo-or-cli"),
     )
 
@@ -441,8 +441,8 @@ def _directory_content_hash(root: Path) -> str | None:
     return h.hexdigest()
 
 
-def _executable_fingerprint(command: list[str]) -> dict:
-    if not command:
+def _executable_fingerprint(command: object) -> dict:
+    if not isinstance(command, list) or not command or not isinstance(command[0], str):
         return {}
     executable = command[0]
     resolved = shutil.which(executable) or executable

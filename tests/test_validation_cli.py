@@ -694,6 +694,53 @@ def test_validate_graph_dir_malformed_agent_ledger_records_return_errors_without
     assert "invalid_path_list:stage1-graph-extraction:write_scope" in result.errors
 
 
+def test_validate_graph_dir_malformed_agent_ledger_path_items_return_errors_without_throwing(
+    tmp_path,
+):
+    from storygraph_lib.validation import validate_graph_dir
+
+    graph_dir = tmp_path / "mini.storygraph"
+    _write_minimal_valid_graph_dir(
+        graph_dir,
+        agent_ledger=[
+            {
+                "run_id": "stage1-template-requirements",
+                "agent_role": "模板需求分析",
+                "status": "completed",
+                "output_paths": [{"not": "a path"}],
+                "write_scope": [],
+            },
+            {
+                "run_id": "stage1-graph-extraction",
+                "agent_role": "图抽取",
+                "status": "completed",
+                "output_paths": [],
+                "write_scope": [["also-not-a-path"]],
+            },
+            {
+                "run_id": "stage1-coverage-review",
+                "agent_role": "覆盖审查",
+                "status": "completed",
+                "output_paths": [],
+                "write_scope": [],
+            },
+            {
+                "run_id": "stage1-quality-review",
+                "agent_role": "质量审查",
+                "status": "completed",
+                "output_paths": [],
+                "write_scope": [],
+            },
+        ],
+    )
+
+    result = validate_graph_dir(graph_dir)
+
+    assert result.ok is False
+    assert "invalid_path_item:stage1-template-requirements:output_paths" in result.errors
+    assert "invalid_path_item:stage1-graph-extraction:write_scope" in result.errors
+
+
 def test_validate_graph_dir_failed_ledger_bad_errors_shape_returns_errors_without_throwing(
     tmp_path,
 ):

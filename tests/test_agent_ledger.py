@@ -160,6 +160,24 @@ def test_validate_single_writer_reports_malformed_records_and_path_lists():
     assert "invalid_path_list:run-bad-scope:write_scope" in result.errors
 
 
+def test_validate_single_writer_rejects_malformed_path_items_without_stringifying():
+    records = [
+        {
+            "run_id": "run-bad-items",
+            "agent_role": "图抽取",
+            "status": "completed",
+            "output_paths": [{"not": "a path"}],
+            "write_scope": [["also-not-a-path"]],
+        }
+    ]
+
+    result = validate_single_writer(records)
+
+    assert result.ok is False
+    assert "invalid_path_item:run-bad-items:output_paths" in result.errors
+    assert "invalid_path_item:run-bad-items:write_scope" in result.errors
+
+
 def test_make_stage_agent_records_returns_required_roles_and_io_scope():
     records = make_stage_agent_records(
         chunk_ids=["chunk-0001", "chunk-0002"],
