@@ -127,6 +127,45 @@ def _write_template_requirement_parts(graph_dir: Path) -> list[dict]:
     return packets
 
 
+def _write_five_chapter_novel(path: Path) -> Path:
+    path.write_text(
+        "\n".join(
+            [
+                "第一章\n韩立获得小瓶。",
+                "第二章\n韩立进入坊市。",
+                "第三章\n韩立遭遇敌人。",
+                "第四章\n韩立炼制丹药。",
+                "第五章\n韩立返回洞府。",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _three_required_lanes() -> list[dict]:
+    return [
+        {
+            "lane_id": "characters",
+            "agent_role": "character-element-agent",
+            "required": True,
+            "schema": "lane-output.schema.json",
+        },
+        {
+            "lane_id": "events",
+            "agent_role": "event-element-agent",
+            "required": True,
+            "schema": "lane-output.schema.json",
+        },
+        {
+            "lane_id": "relations",
+            "agent_role": "relation-element-agent",
+            "required": True,
+            "schema": "lane-output.schema.json",
+        },
+    ]
+
+
 @pytest.fixture
 def graph_dir_without_agent_outputs(graph_dir):
     return graph_dir
@@ -342,6 +381,166 @@ def test_prepare_stage1_uses_configured_template_requirements_strategy(
     assert template_run["attempt"] == packet["attempt"]
 
 
+def test_prepare_stage1_writes_agent_dispatch_plan(
+    novel, template_dir, graph_dir, config
+):
+    from storygraph_lib.stage1 import prepare_stage1
+
+    config["agent_policy"] = {"max_parallel": 4}
+    result = prepare_stage1(
+        source_path=novel,
+        template_dir=template_dir,
+        graph_dir=graph_dir,
+        config=config,
+    )
+
+    dispatch_path = graph_dir / "intermediate" / "agent-dispatch-plan.json"
+    dispatch = json.loads(dispatch_path.read_text(encoding="utf-8"))
+
+    assert result["status"] == "prepared"
+    assert result["next_action"] == "dispatch_template_requirements_agents"
+    assert result["agent_dispatch"]["dispatch_plan_path"] == (
+        "intermediate/agent-dispatch-plan.json"
+    )
+    assert result["agent_dispatch"]["max_parallel"] == config["agent_policy"]["max_parallel"]
+    assert [phase["phase"] for phase in dispatch["phases"]] == [
+        "template_requirements",
+        "lane_extraction",
+        "review",
+    ]
+    assert dispatch["phases"][0]["next_action"] == "dispatch_template_requirements_agents"
+    assert dispatch["phases"][0]["task_packets"][0]["output_path"] == (
+        "intermediate/template-requirements-parts/batch-0001.json"
+    )
+    assert dispatch["phases"][1]["next_action"] == "dispatch_lane_agents"
+    assert dispatch["phases"][1]["task_packets"][0]["task_packet_path"].startswith(
+        "intermediate/task-packets/chunk-0001/"
+    )
+    assert dispatch["phases"][2]["next_action"] == "dispatch_reviewer_agents"
+    assert dispatch["phases"][2]["review_findings_path"] == "coverage/review-findings.json"
+
+
+def test_prepare_stage1_groups_lane_execution_batches_by_configured_chunk_count(
+    tmp_path, template_dir, graph_dir, config
+):
+    from storygraph_lib.stage1 import prepare_stage1
+
+    novel = _write_five_chapter_novel(tmp_path / "five_chapters.txt")
+    config["element_lanes"] = _three_required_lanes()
+    config["agent_orchestration"] = {
+        "lane_batch_strategy": "by-lane-contiguous-chunks",
+        "lane_chunks_per_agent": 2,
+        "max_parallel_agents": 4,
+    }
+
+    result = prepare_stage1(
+        source_path=novel,
+        template_dir=template_dir,
+        graph_dir=graph_dir,
+        config=config,
+    )
+    dispatch = json.loads(
+        (graph_dir / "intermediate" / "agent-dispatch-plan.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    lane_phase = next(phase for phase in dispatch["phases"] if phase["phase"] == "lane_extraction")
+    batches = lane_phase["execution_batches"]
+
+    assert result["agent_dispatch"]["max_parallel"] == 4
+    assert len(lane_phase["task_packets"]) == 15
+    assert len(batches) == 9
+    assert {
+        lane_id: len([batch for batch in batches if batch["lane_id"] == lane_id])
+        for lane_id in ["characters", "events", "relations"]
+    } == {"characters": 3, "events": 3, "relations": 3}
+    assert batches[0]["batch_id"] == "lane-characters-batch-0001"
+    assert batches[0]["chunk_ids"] == ["chunk-0001", "chunk-0002"]
+    assert len(batches[0]["task_packet_paths"]) == 2
+    assert len(batches[0]["expected_output_paths"]) == 2
+    assert batches[0]["write_scope"] == batches[0]["expected_output_paths"]
+
+
+def test_lane_execution_batches_expected_outputs_cover_task_packets_once(
+    tmp_path, template_dir, graph_dir, config
+):
+    from storygraph_lib.stage1 import prepare_stage1
+
+    novel = _write_five_chapter_novel(tmp_path / "five_chapters.txt")
+    config["element_lanes"] = _three_required_lanes()
+    config["agent_orchestration"] = {
+        "lane_batch_strategy": "by-lane-contiguous-chunks",
+        "lane_chunks_per_agent": 2,
+    }
+
+    prepare_stage1(
+        source_path=novel,
+        template_dir=template_dir,
+        graph_dir=graph_dir,
+        config=config,
+    )
+    dispatch = json.loads(
+        (graph_dir / "intermediate" / "agent-dispatch-plan.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    lane_phase = next(phase for phase in dispatch["phases"] if phase["phase"] == "lane_extraction")
+    task_paths = [
+        packet["task_packet_path"] for packet in lane_phase["task_packets"]
+    ]
+    batch_task_paths = [
+        path
+        for batch in lane_phase["execution_batches"]
+        for path in batch["task_packet_paths"]
+    ]
+    batch_output_paths = [
+        path
+        for batch in lane_phase["execution_batches"]
+        for path in batch["expected_output_paths"]
+    ]
+
+    assert sorted(batch_task_paths) == sorted(task_paths)
+    assert len(batch_task_paths) == len(set(batch_task_paths)) == 15
+    assert len(batch_output_paths) == len(set(batch_output_paths)) == 15
+    assert all(
+        path.startswith("intermediate/lane-outputs/") and path.endswith("/run-001.json")
+        for path in batch_output_paths
+    )
+
+
+def test_next_agent_batches_returns_only_pending_batches(
+    tmp_path, template_dir, graph_dir, config
+):
+    from storygraph_lib.stage1 import next_agent_batches, prepare_stage1
+
+    novel = _write_five_chapter_novel(tmp_path / "five_chapters.txt")
+    config["element_lanes"] = _three_required_lanes()
+    config["agent_orchestration"] = {
+        "lane_batch_strategy": "by-lane-contiguous-chunks",
+        "lane_chunks_per_agent": 2,
+    }
+    prepare_stage1(
+        source_path=novel,
+        template_dir=template_dir,
+        graph_dir=graph_dir,
+        config=config,
+    )
+    first = next_agent_batches(graph_dir=graph_dir, phase="lane_extraction", limit=1)
+    for output_path in first["batches"][0]["expected_output_paths"]:
+        path = graph_dir / Path(*output_path.split("/"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}", encoding="utf-8")
+
+    result = next_agent_batches(graph_dir=graph_dir, phase="lane_extraction", limit=2)
+
+    assert result["status"] == "pending_agent_batches"
+    assert result["pending_count"] == 8
+    assert result["returned_count"] == 2
+    assert first["batches"][0]["batch_id"] not in [
+        batch["batch_id"] for batch in result["batches"]
+    ]
+
+
 def test_ingest_stage1_requires_agent_template_requirements_before_lane_merge(
     graph_dir, config
 ):
@@ -351,6 +550,34 @@ def test_ingest_stage1_requires_agent_template_requirements_before_lane_merge(
 
     assert result["status"] == "failed"
     assert result["error"]["code"] == "template_requirements_missing"
+
+
+def test_ingest_template_requirements_does_not_require_lane_outputs_or_reviews(
+    novel,
+    template_dir,
+    graph_dir,
+    config,
+):
+    from storygraph_lib.stage1 import ingest_template_requirements, prepare_stage1
+
+    prepare_stage1(
+        source_path=novel,
+        template_dir=template_dir,
+        graph_dir=graph_dir,
+        config=config,
+    )
+    _write_template_requirement_parts(graph_dir)
+
+    result = ingest_template_requirements(graph_dir=graph_dir, config=config)
+
+    assert result["status"] == "requirements_ingested"
+    requirements = json.loads(
+        (graph_dir / "requirements" / "template-requirements.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert [item["template_name"] for item in requirements["templates"]] == ["法宝分析"]
+    assert not (graph_dir / "intermediate" / "merge-queue.json").exists()
 
 
 def test_ingest_stage1_aggregates_template_requirements_parts_before_lane_merge(
@@ -1324,8 +1551,13 @@ def test_build_stage1_cli_returns_pending_when_agent_outputs_missing(
 
     payload = json.loads(capsys.readouterr().out)
     assert code == 0
-    assert payload["status"] in {"prepared", "pending_agent_outputs"}
-    assert payload["next_action"] == "run_agent_task_packets"
+    assert payload["status"] == "prepared"
+    assert payload["next_action"] == "dispatch_template_requirements_agents"
+    assert "pending_reason" not in payload
+    assert "template_requirements_missing" not in payload.get("validation_errors", [])
+    assert payload["agent_dispatch"]["dispatch_plan_path"] == (
+        "intermediate/agent-dispatch-plan.json"
+    )
     assert not (graph_dir / "graphify-out" / "graph.json").exists()
 
 

@@ -109,6 +109,20 @@ def test_stage1_docs_assign_template_requirements_to_agent_before_ingest():
         assert "在 `ingest-stage1` 前" in text
 
 
+def test_stage1_workflow_documents_parallel_dispatch_plan_contract():
+    text = (SKILL / "references" / "workflow.md").read_text(encoding="utf-8")
+
+    assert "intermediate/agent-dispatch-plan.json" in text
+    assert "execution_batches" in text
+    assert "next-agent-batches" in text
+    assert "stage1_runner_unavailable" in text
+    assert "agent_policy.max_parallel" in text
+    assert "并行" in text
+    assert "等待所有 template requirements 分片产物" in text
+    assert "不得在未派发 agent 时调用 ingest/merge 宣称完成" in text
+    assert "ingest-template-requirements" in text
+
+
 def test_repair_protocol_requires_reproduce_red_test_minimal_fix_and_regression():
     workflow = (SKILL / "references" / "workflow.md").read_text(encoding="utf-8")
     cli_docs = (ROOT / "docs" / "storygraph-cli.md").read_text(encoding="utf-8")

@@ -2111,7 +2111,149 @@ def test_cli_prepare_stage1_outputs_json_and_pending_agent_tasks(capsys, novel, 
     payload = json.loads(capsys.readouterr().out)
     assert code == 0
     assert payload["status"] == "prepared"
-    assert payload["next_action"] == "run_agent_task_packets"
+    assert payload["next_action"] == "dispatch_template_requirements_agents"
+    assert payload["agent_dispatch"]["dispatch_plan_path"] == (
+        "intermediate/agent-dispatch-plan.json"
+    )
+
+
+def test_cli_ingest_template_requirements_only_requires_requirement_parts(
+    capsys, novel, template_dir, graph_dir
+):
+    from storygraph_lib.cli import main
+
+    prepare_code = main(
+        [
+            "prepare-stage1",
+            "--source",
+            str(novel),
+            "--template-dir",
+            str(template_dir),
+            "--graph-dir",
+            str(graph_dir),
+        ]
+    )
+    assert prepare_code == 0
+    capsys.readouterr()
+
+    packets = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in sorted(
+            (graph_dir / "intermediate" / "task-packets" / "template-requirements").glob(
+                "batch-*.json"
+            )
+        )
+    ]
+    for packet in packets:
+        part_path = graph_dir / Path(*packet["output_path"].split("/"))
+        part_path.parent.mkdir(parents=True, exist_ok=True)
+        part_path.write_text(
+            json.dumps(
+                {
+                    "templates": [
+                        {
+                            "template_name": item["template_name"],
+                            "template_file": item["template_file"],
+                            "required_fields": ["字段"],
+                            "required_tables": [],
+                            "required_cards": [],
+                            "required_case_patterns": [],
+                            "required_evidence_fields": ["原文位置"],
+                            "graph_node_mapping": ["node"],
+                            "graph_event_mapping": ["event"],
+                            "graph_relation_mapping": ["relation"],
+                            "coverage_rules": {
+                                "requirement_statuses": [
+                                    "covered",
+                                    "needs_review",
+                                    "not_found_in_source",
+                                ]
+                            },
+                        }
+                        for item in packet["template_inventory"]
+                    ]
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+    code = main(["ingest-template-requirements", "--graph-dir", str(graph_dir)])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["status"] == "requirements_ingested"
+    assert (graph_dir / "requirements" / "template-requirements.json").exists()
+    assert not (graph_dir / "intermediate" / "merge-queue.json").exists()
+
+
+def test_cli_next_agent_batches_returns_limited_pending_batches(
+    capsys, novel, template_dir, graph_dir
+):
+    from storygraph_lib.cli import main
+
+    prepare_code = main(
+        [
+            "prepare-stage1",
+            "--source",
+            str(novel),
+            "--template-dir",
+            str(template_dir),
+            "--graph-dir",
+            str(graph_dir),
+        ]
+    )
+    assert prepare_code == 0
+    capsys.readouterr()
+
+    code = main(
+        [
+            "next-agent-batches",
+            "--graph-dir",
+            str(graph_dir),
+            "--phase",
+            "lane_extraction",
+            "--limit",
+            "1",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["status"] == "pending_agent_batches"
+    assert payload["phase"] == "lane_extraction"
+    assert payload["returned_count"] == 1
+    assert payload["batches"][0]["expected_output_paths"]
+
+
+def test_cli_inspect_dispatch_reports_phase_batch_counts(
+    capsys, novel, template_dir, graph_dir
+):
+    from storygraph_lib.cli import main
+
+    prepare_code = main(
+        [
+            "prepare-stage1",
+            "--source",
+            str(novel),
+            "--template-dir",
+            str(template_dir),
+            "--graph-dir",
+            str(graph_dir),
+        ]
+    )
+    assert prepare_code == 0
+    capsys.readouterr()
+
+    code = main(["inspect-dispatch", "--graph-dir", str(graph_dir)])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["status"] == "dispatch_ready"
+    assert payload["dispatch_plan_path"] == "intermediate/agent-dispatch-plan.json"
+    assert payload["phases"][0]["phase"] == "template_requirements"
+    assert "execution_batch_count" in payload["phases"][1]
 
 
 def test_cli_argument_errors_are_json(capsys):

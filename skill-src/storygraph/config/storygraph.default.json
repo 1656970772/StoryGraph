@@ -20,6 +20,7 @@
   },
   "stage1_artifacts": {
     "requirements": "requirements/template-requirements.json",
+    "agent_dispatch_plan": "intermediate/agent-dispatch-plan.json",
     "task_packet_dir": "intermediate/task-packets",
     "template_requirements_part_dir": "intermediate/template-requirements-parts",
     "chunk_text_dir": "intermediate/chunks",
@@ -97,6 +98,10 @@
   ],
   "agent_orchestration": {
     "lane_assignment_strategy": "configured-element-lanes",
+    "lane_batch_strategy": "by-lane-contiguous-chunks",
+    "lane_chunks_per_agent": 8,
+    "max_parallel_agents": 6,
+    "template_requirements_parallel": true,
     "max_parallel_lanes": 3,
     "reviewer_sequence": ["contract-reviewer", "code-quality-reviewer"],
     "merge_queue_artifact": "intermediate/merge-queue.json"
@@ -154,6 +159,7 @@
       "graphify-out/GRAPH_REPORT.md",
       "graphify-out/graph.html",
       "requirements/template-requirements.json",
+      "intermediate/agent-dispatch-plan.json",
       "intermediate/task-packets/*/*.json",
       "intermediate/template-requirements-parts/*.json",
       "intermediate/chunks/*.txt",

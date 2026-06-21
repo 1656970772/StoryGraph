@@ -1,7 +1,15 @@
 from pathlib import Path
 
 from .config import ConfigLoadError, load_config
-from .stage1 import build_stage1_graph, ingest_stage1, merge_stage1, prepare_stage1
+from .stage1 import (
+    build_stage1_graph,
+    ingest_stage1,
+    ingest_template_requirements,
+    inspect_dispatch,
+    merge_stage1,
+    next_agent_batches,
+    prepare_stage1,
+)
 from .templates import (
     TemplateDiscoveryError,
     discover_templates,
@@ -85,6 +93,9 @@ def _stage1_cli_ok(status: str | None) -> bool:
         "prepared",
         "pending_agent_outputs",
         "ingested",
+        "requirements_ingested",
+        "dispatch_ready",
+        "pending_agent_batches",
     }
 
 
@@ -125,6 +136,16 @@ def main(argv=None):
     ingest.add_argument("--config")
     ingest.add_argument("--local-override")
     ingest.add_argument("--graph-dir", required=True)
+    ingest_requirements = sub.add_parser("ingest-template-requirements")
+    ingest_requirements.add_argument("--config")
+    ingest_requirements.add_argument("--local-override")
+    ingest_requirements.add_argument("--graph-dir", required=True)
+    inspect_dispatch_parser = sub.add_parser("inspect-dispatch")
+    inspect_dispatch_parser.add_argument("--graph-dir", required=True)
+    next_batches = sub.add_parser("next-agent-batches")
+    next_batches.add_argument("--graph-dir", required=True)
+    next_batches.add_argument("--phase", required=True)
+    next_batches.add_argument("--limit", type=int)
     merge = sub.add_parser("merge-stage1")
     merge.add_argument("--config")
     merge.add_argument("--local-override")
@@ -271,6 +292,29 @@ def main(argv=None):
         result = ingest_stage1(graph_dir=Path(args.graph_dir), config=config)
         _print_json(result)
         return 0 if result.get("status") == "ingested" else 2
+    if args.command == "ingest-template-requirements":
+        local = _local_override_arg(args)
+        if local and not local.exists():
+            _print_json(_missing_local_override_payload(local))
+            return 2
+        config, error_code = _load_config_for_cli(args, local)
+        if error_code is not None:
+            return error_code
+        result = ingest_template_requirements(graph_dir=Path(args.graph_dir), config=config)
+        _print_json(result)
+        return 0 if result.get("status") == "requirements_ingested" else 2
+    if args.command == "inspect-dispatch":
+        result = inspect_dispatch(graph_dir=Path(args.graph_dir))
+        _print_json(result)
+        return 0 if result.get("status") == "dispatch_ready" else 2
+    if args.command == "next-agent-batches":
+        result = next_agent_batches(
+            graph_dir=Path(args.graph_dir),
+            phase=args.phase,
+            limit=args.limit,
+        )
+        _print_json(result)
+        return 0 if result.get("status") == "pending_agent_batches" else 2
     if args.command == "merge-stage1":
         local = _local_override_arg(args)
         if local and not local.exists():

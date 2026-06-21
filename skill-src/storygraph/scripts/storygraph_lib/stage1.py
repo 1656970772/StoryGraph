@@ -28,6 +28,7 @@ from .templates import discover_templates
 
 DEFAULT_STAGE1_ARTIFACTS = {
     "requirements": "requirements/template-requirements.json",
+    "agent_dispatch_plan": "intermediate/agent-dispatch-plan.json",
     "task_packet_dir": "intermediate/task-packets",
     "chunk_text_dir": "intermediate/chunks",
     "lane_output_dir": "intermediate/lane-outputs",
@@ -38,16 +39,6 @@ DEFAULT_STAGE1_ARTIFACTS = {
     "agent_run_ledger": "coverage/agent-run-ledger.json",
     "template_requirements_part_dir": "intermediate/template-requirements-parts",
 }
-
-PENDING_AGENT_OUTPUT_CODES = {
-    "template_requirements_missing",
-    "template_requirements_part_missing",
-    "chunk_ledger_missing",
-    "agent_lane_outputs_missing",
-    "review_findings_missing",
-    "required_lane_missing",
-}
-
 
 def prepare_stage1(
     *,
@@ -133,13 +124,20 @@ def prepare_stage1(
                 next_action=None,
             )
 
+        dispatch_plan = _build_agent_dispatch_plan(
+            template_requirements_packets,
+            packets,
+            artifacts,
+            active_config,
+        )
+        writer.write_json(artifacts["agent_dispatch_plan"], dispatch_plan)
         write_coverage_outputs(
             writer,
             chunks,
             [],
             [],
             agent_runs,
-            ["- pending_agent_outputs: run agent task packets"],
+            ["- pending_agent_outputs: dispatch template requirements agents"],
         )
         _update_manifest_stage(manifest_path, "prepared")
         return _stage_result(
@@ -148,7 +146,14 @@ def prepare_stage1(
             discovery.warnings,
             [],
             None,
-            next_action="run_agent_task_packets",
+            next_action="dispatch_template_requirements_agents",
+            extra={
+                "agent_dispatch": {
+                    "dispatch_plan_path": artifacts["agent_dispatch_plan"],
+                    "max_parallel": dispatch_plan["max_parallel"],
+                    "phases": dispatch_plan["phases"],
+                }
+            },
         )
     except UnicodeDecodeError as exc:
         return _failure_response(ctx.graph_dir, _error("source_encoding_error", exc), True)
@@ -346,6 +351,95 @@ def ingest_stage1(*, graph_dir: str | Path, config: dict) -> dict:
     )
 
 
+def ingest_template_requirements(*, graph_dir: str | Path, config: dict) -> dict:
+    graph_root = Path(graph_dir)
+    writer = OutputWriter(graph_root, _managed_outputs(config))
+    aggregate_error = _aggregate_template_requirements_from_parts(
+        graph_root, config, writer
+    )
+    if aggregate_error is not None:
+        return _failure_response(
+            graph_root,
+            aggregate_error,
+            _manifest_exists(graph_root),
+            validation_errors=aggregate_error.get("validation_errors"),
+        )
+    return _stage_result(
+        "requirements_ingested",
+        graph_root,
+        [],
+        [],
+        None,
+        next_action="dispatch_lane_agents",
+    )
+
+
+def inspect_dispatch(*, graph_dir: str | Path) -> dict:
+    graph_root = Path(graph_dir)
+    dispatch, error = _read_dispatch_plan(graph_root)
+    if error:
+        return _failure_response(graph_root, error, _manifest_exists(graph_root))
+    phases = []
+    for phase in dispatch.get("phases", []):
+        if not isinstance(phase, dict):
+            continue
+        phases.append(
+            {
+                "phase": phase.get("phase"),
+                "task_packet_count": len(phase.get("task_packets", []))
+                if isinstance(phase.get("task_packets"), list)
+                else 0,
+                "execution_batch_count": len(phase.get("execution_batches", []))
+                if isinstance(phase.get("execution_batches"), list)
+                else 0,
+            }
+        )
+    return {
+        "status": "dispatch_ready",
+        "graph_dir": str(graph_root),
+        "dispatch_plan_path": DEFAULT_STAGE1_ARTIFACTS["agent_dispatch_plan"],
+        "max_parallel": dispatch.get("max_parallel"),
+        "phases": phases,
+    }
+
+
+def next_agent_batches(
+    *, graph_dir: str | Path, phase: str, limit: int | None = None
+) -> dict:
+    graph_root = Path(graph_dir)
+    dispatch, error = _read_dispatch_plan(graph_root)
+    if error:
+        return _failure_response(graph_root, error, _manifest_exists(graph_root))
+    phase_record = _dispatch_phase(dispatch, phase)
+    if phase_record is None:
+        return _failure_response(
+            graph_root,
+            {"code": "dispatch_phase_missing", "phase": phase},
+            _manifest_exists(graph_root),
+        )
+    batches = phase_record.get("execution_batches")
+    if not isinstance(batches, list):
+        return _failure_response(
+            graph_root,
+            {"code": "dispatch_execution_batches_missing", "phase": phase},
+            _manifest_exists(graph_root),
+        )
+    pending = [
+        batch
+        for batch in batches
+        if isinstance(batch, dict) and not _batch_outputs_exist(graph_root, batch)
+    ]
+    selected = pending[:limit] if limit is not None and limit >= 0 else pending
+    return {
+        "status": "pending_agent_batches",
+        "graph_dir": str(graph_root),
+        "phase": phase,
+        "pending_count": len(pending),
+        "returned_count": len(selected),
+        "batches": selected,
+    }
+
+
 def merge_stage1(*, graph_dir: str | Path, config: dict) -> dict:
     graph_root = Path(graph_dir)
     artifacts = _artifact_paths(config)
@@ -541,21 +635,7 @@ def build_stage1_graph(source_path: str | Path, config: dict) -> dict:
     )
     if prepared.get("status") != "prepared":
         return prepared
-
-    ingested = ingest_stage1(graph_dir=graph_dir, config=config)
-    if ingested.get("status") != "ingested":
-        error = ingested.get("error", {})
-        code = error.get("code")
-        if code in PENDING_AGENT_OUTPUT_CODES:
-            pending = dict(prepared)
-            pending["status"] = "pending_agent_outputs"
-            pending["next_action"] = "run_agent_task_packets"
-            pending["pending_reason"] = error
-            pending["validation_errors"] = ingested.get("validation_errors", [])
-            return pending
-        return ingested
-
-    return merge_stage1(graph_dir=graph_dir, config=config)
+    return prepared
 
 
 def graphify_source_fingerprint(config: dict) -> dict:
@@ -775,6 +855,162 @@ def _pending_agent_run_ledger(
             )
         )
     return records
+
+
+def _build_agent_dispatch_plan(
+    template_requirements_packets: list[dict],
+    lane_packets: list[dict],
+    artifacts: dict[str, str],
+    config: dict,
+) -> dict:
+    template_batches = _template_execution_batches(template_requirements_packets)
+    lane_batches = _lane_execution_batches(lane_packets, artifacts, config)
+    return {
+        "schema_version": "storygraph.agent-dispatch.v1",
+        "stage": "stage1",
+        "max_parallel": _agent_max_parallel(config),
+        "phases": [
+            {
+                "phase": "template_requirements",
+                "next_action": "dispatch_template_requirements_agents",
+                "task_packets": [
+                    _dispatch_task_packet(packet) for packet in template_requirements_packets
+                ],
+                "execution_batches": template_batches,
+                "wait_for_outputs": [
+                    packet["output_path"] for packet in template_requirements_packets
+                ],
+            },
+            {
+                "phase": "lane_extraction",
+                "next_action": "dispatch_lane_agents",
+                "task_packets": [
+                    _dispatch_task_packet(packet) for packet in lane_packets
+                ],
+                "execution_batches": lane_batches,
+                "wait_for_outputs_root": artifacts["lane_output_dir"],
+            },
+            {
+                "phase": "review",
+                "next_action": "dispatch_reviewer_agents",
+                "review_findings_path": artifacts["review_findings"],
+                "wait_for_outputs": [artifacts["review_findings"]],
+            },
+        ],
+    }
+
+
+def _template_execution_batches(packets: list[dict]) -> list[dict]:
+    batches = []
+    for index, packet in enumerate(packets, start=1):
+        output_paths = [packet["output_path"]]
+        batches.append(
+            {
+                "batch_id": f"template-requirements-batch-{index:04d}",
+                "phase": "template_requirements",
+                "agent_role": packet["agent_role"],
+                "lane_id": packet["lane_id"],
+                "chunk_ids": packet.get("chunk_ids", []),
+                "template_names": packet.get("template_names", []),
+                "task_packet_paths": [packet["task_packet_path"]],
+                "expected_output_paths": output_paths,
+                "write_scope": output_paths,
+            }
+        )
+    return batches
+
+
+def _lane_execution_batches(
+    packets: list[dict], artifacts: dict[str, str], config: dict
+) -> list[dict]:
+    if _lane_batch_strategy(config) != "by-lane-contiguous-chunks":
+        return _lane_execution_batches_by_lane(packets, artifacts, 1)
+    return _lane_execution_batches_by_lane(
+        packets, artifacts, _lane_chunks_per_agent(config)
+    )
+
+
+def _lane_execution_batches_by_lane(
+    packets: list[dict], artifacts: dict[str, str], chunks_per_agent: int
+) -> list[dict]:
+    lane_order: list[str] = []
+    packets_by_lane: dict[str, list[dict]] = {}
+    for packet in packets:
+        lane_id = packet["lane_id"]
+        if lane_id not in packets_by_lane:
+            lane_order.append(lane_id)
+            packets_by_lane[lane_id] = []
+        packets_by_lane[lane_id].append(packet)
+
+    batches: list[dict] = []
+    for lane_id in lane_order:
+        lane_packets = packets_by_lane[lane_id]
+        for index, start in enumerate(range(0, len(lane_packets), chunks_per_agent), start=1):
+            batch_packets = lane_packets[start : start + chunks_per_agent]
+            output_paths = [
+                _lane_packet_output_path(packet, artifacts) for packet in batch_packets
+            ]
+            batches.append(
+                {
+                    "batch_id": f"lane-{lane_id}-batch-{index:04d}",
+                    "phase": "lane_extraction",
+                    "agent_role": batch_packets[0]["agent_role"],
+                    "lane_id": lane_id,
+                    "chunk_ids": [packet["chunk_id"] for packet in batch_packets],
+                    "task_packet_paths": [
+                        packet["task_packet_path"] for packet in batch_packets
+                    ],
+                    "expected_output_paths": output_paths,
+                    "write_scope": output_paths,
+                }
+            )
+    return batches
+
+
+def _lane_packet_output_path(packet: dict, artifacts: dict[str, str]) -> str:
+    return _join_artifact(
+        artifacts["lane_output_dir"],
+        packet["chunk_id"],
+        packet["lane_id"],
+        f"run-{packet.get('attempt', 1):03d}.json",
+    )
+
+
+def _dispatch_task_packet(packet: dict) -> dict:
+    item = {
+        "task_packet_path": packet["task_packet_path"],
+        "agent_role": packet["agent_role"],
+        "stage": packet["stage"],
+        "lane_id": packet["lane_id"],
+    }
+    for field in ("chunk_id", "batch_id", "output_path", "write_scope", "template_names"):
+        if field in packet:
+            item[field] = packet[field]
+    return item
+
+
+def _agent_max_parallel(config: dict) -> int:
+    value = config.get("agent_orchestration", {}).get("max_parallel_agents")
+    if type(value) is int and value > 0:
+        return value
+    value = config.get("agent_policy", {}).get("max_parallel", 1)
+    if type(value) is int and value > 0:
+        return value
+    return 1
+
+
+def _lane_batch_strategy(config: dict) -> str:
+    value = config.get("agent_orchestration", {}).get("lane_batch_strategy")
+    if isinstance(value, str) and value:
+        return value
+    return "by-lane-contiguous-chunks"
+
+
+def _lane_chunks_per_agent(config: dict) -> int:
+    value = config.get("agent_orchestration", {}).get("lane_chunks_per_agent", 1)
+    if type(value) is int and value > 0:
+        return value
+    return 1
 
 
 def _failed_agent_runs(agent_runs: list[dict], code: str, errors: list[dict]) -> list[dict]:
@@ -1158,6 +1394,40 @@ def _read_template_requirements_packets(
     return packets, None
 
 
+def _read_dispatch_plan(graph_root: Path) -> tuple[dict | None, dict | None]:
+    path = _artifact_path(graph_root, DEFAULT_STAGE1_ARTIFACTS["agent_dispatch_plan"])
+    payload, error = _read_json_artifact(
+        path,
+        missing_code="dispatch_plan_missing",
+        bad_code="dispatch_plan_invalid",
+    )
+    if error:
+        return None, error
+    if not isinstance(payload, dict):
+        return None, {"code": "dispatch_plan_invalid"}
+    return payload, None
+
+
+def _dispatch_phase(dispatch: dict, phase: str) -> dict | None:
+    phases = dispatch.get("phases")
+    if not isinstance(phases, list):
+        return None
+    for item in phases:
+        if isinstance(item, dict) and item.get("phase") == phase:
+            return item
+    return None
+
+
+def _batch_outputs_exist(graph_root: Path, batch: dict) -> bool:
+    output_paths = batch.get("expected_output_paths")
+    if not isinstance(output_paths, list) or not output_paths:
+        return False
+    return all(
+        isinstance(path, str) and _artifact_path(graph_root, path).exists()
+        for path in output_paths
+    )
+
+
 def _template_requirements_batch_size_is_valid(items: list) -> bool:
     return 1 <= len(items) <= 5
 
@@ -1503,6 +1773,7 @@ def _managed_outputs(config: dict) -> list[str]:
     artifacts = _artifact_paths(config)
     derived = [
         artifacts["requirements"],
+        artifacts["agent_dispatch_plan"],
         _join_artifact(artifacts["task_packet_dir"], "*", "*.json"),
         _join_artifact(artifacts["template_requirements_part_dir"], "*.json"),
         _join_artifact(artifacts["chunk_text_dir"], "*.txt"),

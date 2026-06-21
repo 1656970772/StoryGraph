@@ -114,6 +114,14 @@ def test_stage1_agent_driven_config_contains_lanes_review_and_writer_policy(defa
         for lane in default_config["element_lanes"]
     )
     assert default_config["review_policy"]["require_review_before_canonical_merge"] is True
+    assert default_config["agent_orchestration"]["lane_batch_strategy"] == (
+        "by-lane-contiguous-chunks"
+    )
+    assert default_config["agent_orchestration"]["lane_chunks_per_agent"] == 8
+    assert default_config["agent_orchestration"]["max_parallel_agents"] == (
+        default_config["agent_policy"]["max_parallel"]
+    )
+    assert default_config["agent_orchestration"]["template_requirements_parallel"] is True
 
 
 def test_default_element_lanes_do_not_carry_legacy_artifact_paths(default_config):
@@ -127,6 +135,7 @@ def test_default_element_lanes_do_not_carry_legacy_artifact_paths(default_config
 def test_stage1_artifacts_include_agent_driven_output_dirs(default_config):
     required = {
         "requirements",
+        "agent_dispatch_plan",
         "task_packet_dir",
         "chunk_text_dir",
         "lane_output_dir",
@@ -143,6 +152,7 @@ def test_stage1_artifacts_include_agent_driven_output_dirs(default_config):
 def test_writer_policy_manages_agent_driven_stage1_outputs(default_config):
     managed = set(default_config["writer_policy"]["managed_outputs"])
     assert "coverage/review-findings.json" in managed
+    assert "intermediate/agent-dispatch-plan.json" in managed
     assert "intermediate/merge-queue.json" in managed
     assert "requirements/template-requirements.json" in managed
     assert "intermediate/template-requirements-parts/*.json" in managed
@@ -154,6 +164,7 @@ def test_writer_policy_accepts_configured_stage1_artifact_samples(default_config
     artifacts = default_config["stage1_artifacts"]
     managed = default_config["writer_policy"]["managed_outputs"]
     samples = [
+        artifacts["agent_dispatch_plan"],
         f"{artifacts['task_packet_dir']}/chunk-0001/events.json",
         f"{artifacts['chunk_text_dir']}/chunk-0001.txt",
         f"{artifacts['lane_output_dir']}/chunk-0001/events/run-001.json",
