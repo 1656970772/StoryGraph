@@ -7,6 +7,7 @@
   },
   "supported_source_exts": [".txt", ".md"],
   "output_language": "zh-CN",
+  "stage1_mode": "agent-driven",
   "template_discovery": {
     "glob": "*模板.md",
     "exclude_files": ["README.md"],
@@ -15,75 +16,43 @@
     "require_all_templates_scope": "existing_template_files"
   },
   "stages": {
-    "build_template_aware_graph": true,
     "extract_template_documents": false
+  },
+  "stage1_artifacts": {
+    "requirements": "requirements/template-requirements.json",
+    "task_packet_dir": "intermediate/task-packets",
+    "chunk_text_dir": "intermediate/chunks",
+    "lane_output_dir": "intermediate/lane-outputs",
+    "reviewed_bundle_dir": "intermediate/reviewed-bundles",
+    "merge_queue": "intermediate/merge-queue.json",
+    "review_findings": "coverage/review-findings.json",
+    "canonical_graph": "graphify-out/graph.json",
+    "agent_run_ledger": "coverage/agent-run-ledger.json"
   },
   "graphify_adapter": {
     "mode": "local-repo-or-cli",
     "allowed_modes": ["local-repo", "cli", "local-repo-or-cli"],
-    "canonical_graph_policy": "merge-template-aware-supplements",
-    "command": ["python", "-m", "graphify.cli", "build", "--input", "{source}", "--output", "{output_dir}"],
+    "input_strategy": "canonical-graph-or-graph-dir-only",
+    "allowed_input_strategies": ["canonical-graph-or-graph-dir-only"],
+    "failure_policy": "degrade-visualization-and-query",
+    "allowed_failure_policies": ["degrade-visualization-and-query", "blocking"],
+    "command": ["python", "-m", "graphify.cli", "build", "--input", "{canonical_graph}", "--output", "{output_dir}"],
     "timeout_seconds": 1800
   },
   "status_enums": {
     "requirement_statuses": ["covered", "needs_review", "not_found_in_source"],
     "verification_statuses": ["verified", "needs_review", "rejected"],
-    "confidence_levels": ["EXTRACTED", "INFERRED", "AMBIGUOUS"]
+    "confidence_levels": ["EXTRACTED", "INFERRED", "AMBIGUOUS"],
+    "lane_output_statuses": ["pending", "completed", "blocked", "failed", "needs_repair"],
+    "reviewer_statuses": ["pending", "passed", "failed", "blocked"],
+    "finding_statuses": ["open", "closed", "waived"],
+    "finding_severities": ["must_fix", "should_fix", "note"],
+    "structured_failure_statuses": ["blocking", "rebuild_required", "degraded", "not_applicable"]
   },
   "template_count_policy": {
     "scope": "existing_template_files",
     "expected_existing_templates": 37,
     "enforce_integration_count": true
-  },
-  "template_parser_rules": {
-    "field_headings": ["字段", "字段说明", "核心字段", "输出字段"],
-    "table_markers": ["|", "表格", "清单"],
-    "card_markers": ["卡片", "档案", "条目卡"],
-    "case_markers": ["案例", "示例", "样例", "场景"],
-    "evidence_markers": ["证据", "原文", "引用", "依据"],
-    "gap_markers": ["缺口", "待核验", "未见可靠证据"]
-  },
-  "template_graph_mappings": {
-    "有限视角与叙事日志": {
-      "graph_node_mapping": ["perspective"],
-      "graph_event_mapping": ["narrative_view"],
-      "graph_relation_mapping": ["known_unknown"]
-    },
-    "角色AI行为参考": {
-      "graph_node_mapping": ["decision", "resource_constraint"],
-      "graph_event_mapping": ["action_chain"],
-      "graph_relation_mapping": ["constraint_outcome"]
-    },
-    "记忆情绪与执念": {
-      "graph_node_mapping": ["emotion_memory"],
-      "graph_event_mapping": ["emotion_trigger"],
-      "graph_relation_mapping": ["long_term_influence"]
-    },
-    "相遇剧情与对话设计": {
-      "graph_node_mapping": ["scene_dialogue"],
-      "graph_event_mapping": ["encounter"],
-      "graph_relation_mapping": ["attitude_change", "information_exchange"]
-    },
-    "动态事件与机会点": {
-      "graph_node_mapping": ["opportunity"],
-      "graph_event_mapping": ["time_causality"],
-      "graph_relation_mapping": ["trigger_effect"]
-    },
-    "事件因果链（长程因果图）": {
-      "graph_node_mapping": ["timepoint"],
-      "graph_event_mapping": ["time_causality"],
-      "graph_relation_mapping": ["precondition", "delayed_effect"]
-    },
-    "default_mapping": {
-      "graph_node_mapping": ["template_specific_node"],
-      "graph_event_mapping": ["template_specific_event"],
-      "graph_relation_mapping": ["template_specific_relation"]
-    }
-  },
-  "supplemental_graph_policy": {
-    "write_to_canonical_graph": true,
-    "sidecar_dir": "template-graph",
-    "fail_stage_if_canonical_merge_fails": true
   },
   "chunk_strategy": {
     "mode": "chapter-aware",
@@ -93,15 +62,70 @@
     "overlap_chars": 1200,
     "chapter_heading_patterns": ["^第.+章", "^Chapter\\s+\\d+"]
   },
-  "evidence_matching_strategy": {
-    "mode": "substring",
-    "allowed_modes": ["substring", "regex", "external-reranker"],
-    "case_sensitive": false,
-    "minimum_confidence": "EXTRACTED"
-  },
   "template_requirements_strategy": {
     "mode": "auto-from-templates",
-    "allow_manual_overrides": true
+    "allow_manual_overrides": true,
+    "python_validate_only": true
+  },
+  "element_lanes": [
+    {
+      "lane_id": "characters",
+      "agent_role": "character-element-agent",
+      "required": true,
+      "schema": "lane-output.schema.json",
+      "status_enum_ref": "status_enums.lane_output_statuses"
+    },
+    {
+      "lane_id": "events",
+      "agent_role": "event-element-agent",
+      "required": true,
+      "schema": "lane-output.schema.json",
+      "status_enum_ref": "status_enums.lane_output_statuses"
+    },
+    {
+      "lane_id": "relations",
+      "agent_role": "relation-element-agent",
+      "required": true,
+      "schema": "lane-output.schema.json",
+      "status_enum_ref": "status_enums.lane_output_statuses"
+    }
+  ],
+  "agent_orchestration": {
+    "lane_assignment_strategy": "configured-element-lanes",
+    "max_parallel_lanes": 3,
+    "reviewer_sequence": ["contract-reviewer", "code-quality-reviewer"],
+    "merge_queue_artifact": "intermediate/merge-queue.json"
+  },
+  "review_policy": {
+    "require_review_before_canonical_merge": true,
+    "reviewers": [
+      {
+        "reviewer_id": "contract-reviewer",
+        "agent_role": "stage1-contract-review-agent",
+        "status_enum_ref": "status_enums.reviewer_statuses"
+      },
+      {
+        "reviewer_id": "code-quality-reviewer",
+        "agent_role": "stage1-code-quality-review-agent",
+        "status_enum_ref": "status_enums.reviewer_statuses"
+      }
+    ],
+    "finding_status_enum_ref": "status_enums.finding_statuses",
+    "finding_severity_enum_ref": "status_enums.finding_severities"
+  },
+  "retry_repair_policy": {
+    "max_repair_attempts": 1,
+    "retry_on_lane_statuses": ["failed", "needs_repair"],
+    "retry_on_reviewer_statuses": ["failed", "blocked"],
+    "repair_status": "needs_repair",
+    "exhausted_status": "blocked"
+  },
+  "canonical_graph_writer": {
+    "mode": "single-writer",
+    "semantic_generation": "disabled",
+    "input_queue": "intermediate/merge-queue.json",
+    "output_path": "graphify-out/graph.json",
+    "failure_status_enum_ref": "status_enums.structured_failure_statuses"
   },
   "stage2_categories": {
     "facts": "原作事实",
@@ -125,6 +149,12 @@
       "graphify-out/GRAPH_REPORT.md",
       "graphify-out/graph.html",
       "requirements/template-requirements.json",
+      "intermediate/task-packets/*/*.json",
+      "intermediate/chunks/*.txt",
+      "intermediate/lane-outputs/*/*/*.json",
+      "intermediate/reviewed-bundles/*.json",
+      "intermediate/merge-queue.json",
+      "coverage/review-findings.json",
       "coverage/chunk-ledger.json",
       "coverage/evidence-index.json",
       "coverage/template-readiness.json",

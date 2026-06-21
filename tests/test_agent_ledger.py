@@ -4,7 +4,12 @@ import pytest
 
 from storygraph_lib.agent_ledger import (
     make_agent_run_record,
+    make_lane_agent_record,
+    make_repair_agent_record,
+    make_review_agent_record,
     make_stage_agent_records,
+    make_template_agent_record,
+    validate_repair_attempts,
     validate_single_writer,
 )
 from storygraph_lib.output_writer import OutputWriteError, OutputWriter
@@ -38,6 +43,425 @@ def test_make_agent_run_record_uses_plan_contract_defaults():
         "started_at": None,
         "finished_at": None,
     }
+
+
+def test_make_lane_agent_record_requires_task_packet_and_output_path():
+    record = make_lane_agent_record(
+        run_id="run-001",
+        chunk_id="chunk-0001",
+        lane_id="entities_resources",
+        agent_role="实体道具资源抽取 agent",
+        task_packet_path="intermediate/task-packets/chunk-0001/entities_resources.json",
+        output_path="intermediate/lane-outputs/chunk-0001/entities_resources/run-001.json",
+        attempt=1,
+    )
+
+    assert record["stage"] == "stage1"
+    assert record["chunk_id"] == "chunk-0001"
+    assert record["lane_id"] == "entities_resources"
+    assert record["prompt_or_input_packet"].endswith("entities_resources.json")
+    assert record["status"] == "pending"
+    assert record["attempt"] == 1
+
+
+def test_make_lane_agent_record_defaults_attempt_to_first_try():
+    record = make_lane_agent_record(
+        run_id="run-default-attempt",
+        chunk_id="chunk-0001",
+        lane_id="entities_resources",
+        agent_role="probe agent",
+        task_packet_path="intermediate/task-packets/chunk-0001/entities_resources.json",
+        output_path="intermediate/lane-outputs/chunk-0001/entities_resources/run-default-attempt.json",
+    )
+
+    assert record["stage"] == "stage1"
+    assert record["status"] == "pending"
+    assert record["attempt"] == 1
+
+
+def test_agent_record_factories_include_required_rewrite_fields():
+    required_keys = {
+        "run_id",
+        "chunk_id",
+        "lane_id",
+        "agent_role",
+        "prompt_or_input_packet",
+        "input_paths",
+        "output_paths",
+        "write_scope",
+        "status",
+        "errors",
+        "reviewer_status",
+        "repair_of",
+        "attempt",
+        "started_at",
+        "ended_at",
+    }
+
+    records = [
+        make_template_agent_record(
+            run_id="run-template-001",
+            chunk_id="chunk-0001",
+            lane_id="template_requirements",
+            agent_role="模板需求分析 agent",
+            template_name="人物分析",
+            task_packet_path="intermediate/task-packets/chunk-0001/template_requirements.json",
+            output_path="intermediate/template-outputs/chunk-0001/run-template-001.json",
+            attempt=1,
+        ),
+        make_review_agent_record(
+            run_id="run-review-001",
+            chunk_id="chunk-0001",
+            lane_id="entities_resources",
+            agent_role="实体道具资源审查 agent",
+            review_input_path="intermediate/lane-outputs/chunk-0001/entities_resources/run-001.json",
+            output_path="intermediate/reviews/chunk-0001/entities_resources/run-review-001.json",
+            attempt=1,
+        ),
+        make_repair_agent_record(
+            run_id="run-repair-001",
+            chunk_id="chunk-0001",
+            lane_id="entities_resources",
+            agent_role="实体道具资源修复 agent",
+            task_packet_path="intermediate/task-packets/chunk-0001/entities_resources.json",
+            output_path="intermediate/lane-outputs/chunk-0001/entities_resources/run-repair-001.json",
+            repair_of="finding-001",
+            attempt=2,
+        ),
+    ]
+
+    for record in records:
+        assert required_keys <= record.keys()
+        assert record["status"] == "pending"
+        assert record["errors"] == []
+        assert record["started_at"] is None
+        assert record["ended_at"] is None
+        assert validate_single_writer([record]).ok is True
+    assert records[0]["template_name"] == "人物分析"
+    assert records[2]["repair_of"] == "finding-001"
+    assert records[2]["attempt"] == 2
+
+
+@pytest.mark.parametrize(
+    "factory, factory_kwargs",
+    [
+        (
+            make_lane_agent_record,
+            {
+                "task_packet_path": "intermediate/task-packets/chunk-0001/entities_resources.json",
+            },
+        ),
+        (
+            make_template_agent_record,
+            {
+                "template_name": "人物分析",
+                "task_packet_path": "intermediate/task-packets/chunk-0001/template_requirements.json",
+            },
+        ),
+        (
+            make_review_agent_record,
+            {
+                "review_input_path": "intermediate/reviews/chunk-0001/entities_resources/input.json",
+            },
+        ),
+        (
+            make_repair_agent_record,
+            {
+                "task_packet_path": "intermediate/task-packets/chunk-0001/entities_resources.json",
+                "repair_of": "finding-001",
+            },
+        ),
+    ],
+)
+@pytest.mark.parametrize("output_path", [None, []])
+def test_agent_record_factories_reject_missing_output_paths(factory, factory_kwargs, output_path):
+    kwargs = {
+        "run_id": "run-missing-output",
+        "chunk_id": "chunk-0001",
+        "lane_id": "entities_resources",
+        "agent_role": "实体道具资源抽取 agent",
+        "output_path": output_path,
+        "attempt": 1,
+        **factory_kwargs,
+    }
+
+    with pytest.raises(OutputWriteError, match="unmanaged_output:output_paths"):
+        factory(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "factory, factory_kwargs",
+    [
+        (
+            make_lane_agent_record,
+            {
+                "task_packet_path": "intermediate/task-packets/chunk-0001/entities_resources.json",
+            },
+        ),
+        (
+            make_template_agent_record,
+            {
+                "template_name": "人物分析",
+                "task_packet_path": "intermediate/task-packets/chunk-0001/template_requirements.json",
+            },
+        ),
+        (
+            make_review_agent_record,
+            {
+                "review_input_path": "intermediate/reviews/chunk-0001/entities_resources/input.json",
+            },
+        ),
+        (
+            make_repair_agent_record,
+            {
+                "task_packet_path": "intermediate/task-packets/chunk-0001/entities_resources.json",
+                "repair_of": "finding-001",
+            },
+        ),
+    ],
+)
+def test_agent_record_factories_reject_malformed_input_path_items_without_stringifying(
+    factory, factory_kwargs
+):
+    kwargs = {
+        "run_id": "run-bad-items",
+        "chunk_id": "chunk-0001",
+        "lane_id": "entities_resources",
+        "agent_role": "实体道具资源抽取 agent",
+        "output_path": "intermediate/lane-outputs/chunk-0001/entities_resources/run-001.json",
+        "input_paths": [{"not": "path"}],
+        "attempt": 1,
+        **factory_kwargs,
+    }
+
+    with pytest.raises(OutputWriteError) as exc_info:
+        factory(**kwargs)
+
+    message = str(exc_info.value)
+    assert message == "invalid_path_item:input_paths"
+    assert "{'not': 'path'}" not in message
+
+
+@pytest.mark.parametrize(
+    "factory, factory_kwargs, prompt_key",
+    [
+        (
+            make_lane_agent_record,
+            {
+                "task_packet_path": "intermediate/task-packets/chunk-0001/entities_resources.json",
+            },
+            "task_packet_path",
+        ),
+        (
+            make_template_agent_record,
+            {
+                "template_name": "人物分析",
+                "task_packet_path": "intermediate/task-packets/chunk-0001/template_requirements.json",
+            },
+            "task_packet_path",
+        ),
+        (
+            make_review_agent_record,
+            {
+                "review_input_path": "intermediate/reviews/chunk-0001/entities_resources/input.json",
+            },
+            "review_input_path",
+        ),
+        (
+            make_repair_agent_record,
+            {
+                "task_packet_path": "intermediate/task-packets/chunk-0001/entities_resources.json",
+                "repair_of": "finding-001",
+            },
+            "task_packet_path",
+        ),
+    ],
+)
+@pytest.mark.parametrize("bad_prompt", [{"not": "path"}, ["not-a-scalar"]])
+def test_agent_record_factories_reject_malformed_prompt_paths_without_stringifying(
+    factory, factory_kwargs, prompt_key, bad_prompt
+):
+    kwargs = {
+        "run_id": "run-bad-prompt",
+        "chunk_id": "chunk-0001",
+        "lane_id": "entities_resources",
+        "agent_role": "实体道具资源抽取 agent",
+        "output_path": "intermediate/lane-outputs/chunk-0001/entities_resources/run-001.json",
+        "attempt": 1,
+        **factory_kwargs,
+    }
+    kwargs[prompt_key] = bad_prompt
+
+    with pytest.raises(OutputWriteError) as exc_info:
+        factory(**kwargs)
+
+    message = str(exc_info.value)
+    assert message == "invalid_path_item:prompt_or_input_packet"
+    assert "{'not': 'path'}" not in message
+    assert "['not-a-scalar']" not in message
+
+
+@pytest.mark.parametrize("unsafe_path", ["/x.json", "C:/tmp/x.json", "../x.json", "x\0.json"])
+def test_agent_record_factories_reject_unsafe_prompt_or_output_paths(unsafe_path):
+    with pytest.raises(OutputWriteError):
+        make_lane_agent_record(
+            run_id="run-bad-input",
+            chunk_id="chunk-0001",
+            lane_id="entities_resources",
+            agent_role="实体道具资源抽取 agent",
+            task_packet_path=unsafe_path,
+            output_path="intermediate/lane-outputs/chunk-0001/entities_resources/run-001.json",
+            attempt=1,
+        )
+
+    with pytest.raises(OutputWriteError):
+        make_lane_agent_record(
+            run_id="run-bad-output",
+            chunk_id="chunk-0001",
+            lane_id="entities_resources",
+            agent_role="实体道具资源抽取 agent",
+            task_packet_path="intermediate/task-packets/chunk-0001/entities_resources.json",
+            output_path=unsafe_path,
+            attempt=1,
+        )
+
+
+def test_repair_agent_must_be_new_run_for_finding():
+    finding = {"finding_id": "finding-001", "repair_required": True, "status": "open"}
+    bad_records = [
+        {"run_id": "run-001", "lane_id": "entities_resources", "repair_of": None},
+        {"run_id": "run-001", "lane_id": "entities_resources", "repair_of": "finding-001"},
+    ]
+
+    result = validate_repair_attempts([finding], bad_records)
+
+    assert result.ok is False
+    assert "repair_agent_not_fresh:finding-001" in result.errors
+
+
+@pytest.mark.parametrize(
+    "finding, expected_error",
+    [
+        (
+            {"finding_id": "finding-missing-status", "repair_required": True},
+            "bad_review_finding_status:finding-missing-status",
+        ),
+        (
+            {
+                "finding_id": "finding-bad-status",
+                "repair_required": True,
+                "status": ["open"],
+            },
+            "bad_review_finding_status:finding-bad-status",
+        ),
+        (
+            {"finding_id": {"bad": "id"}, "repair_required": True, "status": "open"},
+            "bad_review_finding_id",
+        ),
+        (
+            {"finding_id": "finding-bad-required", "repair_required": "yes", "status": "open"},
+            "bad_review_finding_repair_required:finding-bad-required",
+        ),
+    ],
+)
+def test_validate_repair_attempts_rejects_malformed_findings_without_stringifying(
+    finding, expected_error
+):
+    result = validate_repair_attempts([finding], [])
+
+    assert result.ok is False
+    assert expected_error in result.errors
+    error_text = "\n".join(result.errors)
+    assert "{'bad': 'id'}" not in error_text
+    assert "['open']" not in error_text
+
+
+@pytest.mark.parametrize(
+    "records, expected_error",
+    [
+        (
+            [{"run_id": {"bad": "id"}, "repair_of": "finding-001"}],
+            "bad_repair_run_id:finding-001",
+        ),
+        (
+            [{"run_id": "run-repair-001", "repair_of": {"bad": "id"}}],
+            "bad_repair_of",
+        ),
+    ],
+)
+def test_validate_repair_attempts_rejects_malformed_repair_records_without_stringifying(
+    records, expected_error
+):
+    finding = {"finding_id": "finding-001", "repair_required": True, "status": "open"}
+
+    result = validate_repair_attempts([finding], records)
+
+    assert result.ok is False
+    assert expected_error in result.errors
+    assert "{'bad': 'id'}" not in "\n".join(result.errors)
+
+
+@pytest.mark.parametrize(
+    "findings, records, expected_error",
+    [
+        (
+            [],
+            [{"run_id": {"bad": "id"}, "repair_of": "finding-missing"}],
+            "bad_repair_run_id:finding-missing",
+        ),
+        (
+            [{"finding_id": "finding-closed", "repair_required": True, "status": "closed"}],
+            [{"run_id": {"bad": "id"}, "repair_of": "finding-closed"}],
+            "bad_repair_run_id:finding-closed",
+        ),
+        (
+            [{"finding_id": "finding-non-required", "repair_required": False, "status": "open"}],
+            [{"run_id": ["bad-id"], "repair_of": "finding-non-required"}],
+            "bad_repair_run_id:finding-non-required",
+        ),
+        (
+            [],
+            [{"repair_of": None}],
+            "bad_agent_run_id",
+        ),
+    ],
+)
+def test_validate_repair_attempts_rejects_malformed_records_before_finding_filter(
+    findings, records, expected_error
+):
+    result = validate_repair_attempts(findings, records)
+
+    assert result.ok is False
+    assert expected_error in result.errors
+    error_text = "\n".join(result.errors)
+    assert "{'bad': 'id'}" not in error_text
+    assert "['bad-id']" not in error_text
+
+
+def test_repair_agent_validation_accepts_fresh_repair_run():
+    finding = {"finding_id": "finding-001", "repair_required": True, "status": "open"}
+    records = [
+        {"run_id": "run-001", "lane_id": "entities_resources", "repair_of": None},
+        {
+            "run_id": "run-repair-001",
+            "lane_id": "entities_resources",
+            "repair_of": "finding-001",
+        },
+    ]
+
+    result = validate_repair_attempts([finding], records)
+
+    assert result.ok is True
+    assert result.errors == []
+
+
+def test_validate_repair_attempts_ignores_closed_repair_required_findings():
+    finding = {"finding_id": "finding-closed", "repair_required": True, "status": "closed"}
+
+    result = validate_repair_attempts([finding], [])
+
+    assert result.ok is True
+    assert result.errors == []
 
 
 def test_validate_single_writer_detects_duplicate_outputs_write_scopes_and_cross_conflicts():

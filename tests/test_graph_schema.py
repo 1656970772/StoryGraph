@@ -257,6 +257,11 @@ def test_merge_template_supplements_preserves_graphify_fields_and_requires_non_e
                 ],
                 "confidence": "EXTRACTED",
                 "verification_status": "verified",
+                "provenance": {
+                    "semantic_generation": "agent-produced",
+                    "chunk_ids": ["chunk-0001"],
+                    "lane_output_paths": ["intermediate/lane-outputs/chunk-0001/run-001.json"],
+                },
             }
         ],
         "edges": [],
@@ -275,6 +280,11 @@ def test_merge_template_supplements_preserves_graphify_fields_and_requires_non_e
                         "status": "covered",
                     }
                 ],
+                "provenance": {
+                    "semantic_generation": "agent-produced",
+                    "chunk_ids": ["chunk-0001"],
+                    "lane_output_paths": ["intermediate/lane-outputs/chunk-0001/run-001.json"],
+                },
             }
         ],
     }
@@ -784,6 +794,11 @@ def test_validate_canonical_graph_accepts_configured_status_enums():
                     ],
                     "confidence": "HIGH",
                     "verification_status": "checked",
+                    "provenance": {
+                        "semantic_generation": "agent-produced",
+                        "chunk_ids": ["chunk-0001"],
+                        "lane_output_paths": ["intermediate/lane-outputs/chunk-0001/run-001.json"],
+                    },
                 }
             ],
             "evidence_index": [
@@ -796,6 +811,11 @@ def test_validate_canonical_graph_accepts_configured_status_enums():
                     "supports_templates": [
                         {"template_name": "人物分析", "requirement_id": "r1", "status": "done"}
                     ],
+                    "provenance": {
+                        "semantic_generation": "agent-produced",
+                        "chunk_ids": ["chunk-0001"],
+                        "lane_output_paths": ["intermediate/lane-outputs/chunk-0001/run-001.json"],
+                    },
                 }
             ],
         },
@@ -811,3 +831,217 @@ def test_validate_canonical_graph_accepts_configured_status_enums():
     )
 
     assert result.ok is True
+
+
+def test_validate_canonical_graph_accepts_agent_produced_metadata_and_provenance():
+    graph = {
+        "schema_version": "1.0",
+        "graphify_schema_version": "agent-produced",
+        "storygraph_schema_version": "1.0",
+        "nodes": [
+            {
+                "id": "node:artifact:x",
+                "label": "小瓶",
+                "node_type": "artifact",
+                "source_range": [3, 5],
+                "evidence_ids": ["evidence:1"],
+                "supports_templates": [
+                    {"template_name": "法宝分析", "requirement_id": "r1", "status": "covered"}
+                ],
+                "confidence": "EXTRACTED",
+                "verification_status": "verified",
+                "provenance": {
+                    "semantic_generation": "agent-produced",
+                    "chunk_ids": ["chunk-0001"],
+                    "lane_output_paths": [
+                        "intermediate/lane-outputs/chunk-0001/entities_resources/run-001.json"
+                    ],
+                },
+            }
+        ],
+        "edges": [],
+        "hyperedges": [],
+        "events": [],
+        "evidence_index": [
+            {
+                "evidence_id": "evidence:1",
+                "source_range": [3, 5],
+                "fact_summary": "韩立获得小瓶",
+                "confidence": "EXTRACTED",
+                "verification_status": "verified",
+                "supports_templates": [
+                    {"template_name": "法宝分析", "requirement_id": "r1", "status": "covered"}
+                ],
+                "provenance": {
+                    "semantic_generation": "agent-produced",
+                    "chunk_ids": ["chunk-0001"],
+                    "lane_output_paths": [
+                        "intermediate/lane-outputs/chunk-0001/entities_resources/run-001.json"
+                    ],
+                },
+            }
+        ],
+        "metadata": {
+            "semantic_generation": "agent-produced",
+            "canonical_writer_version": "1.0",
+            "source_bundle_paths": ["intermediate/chunk-bundles/chunk-0001.json"],
+        },
+    }
+
+    result = validate_canonical_graph(graph)
+
+    assert result.ok is True
+
+
+def test_validate_canonical_graph_rejects_storygraph_items_missing_provenance():
+    graph = {
+        "schema_version": "1.0",
+        "graphify_schema_version": "agent-produced",
+        "storygraph_schema_version": "1.0",
+        "nodes": [
+            {
+                "id": "node:artifact:missing-provenance",
+                "label": "小瓶",
+                "node_type": "artifact",
+                "source_range": [3, 5],
+                "evidence_ids": ["evidence:missing-provenance"],
+                "supports_templates": [
+                    {"template_name": "法宝分析", "requirement_id": "r1", "status": "covered"}
+                ],
+                "confidence": "EXTRACTED",
+                "verification_status": "verified",
+            }
+        ],
+        "edges": [],
+        "hyperedges": [],
+        "events": [],
+        "evidence_index": [
+            {
+                "evidence_id": "evidence:missing-provenance",
+                "source_range": [3, 5],
+                "fact_summary": "韩立获得小瓶",
+                "confidence": "EXTRACTED",
+                "verification_status": "verified",
+                "supports_templates": [
+                    {"template_name": "法宝分析", "requirement_id": "r1", "status": "covered"}
+                ],
+            }
+        ],
+        "metadata": {},
+    }
+
+    result = validate_canonical_graph(graph)
+
+    assert result.ok is False
+    assert "node_missing_provenance:node:artifact:missing-provenance" in result.errors
+    assert "evidence_missing_provenance:evidence:missing-provenance" in result.errors
+
+
+def test_validate_canonical_graph_rejects_non_agent_produced_storygraph_provenance():
+    bad_provenance = {
+        "semantic_generation": "python-produced",
+        "chunk_ids": ["chunk-0001"],
+        "lane_output_paths": [
+            "intermediate/lane-outputs/chunk-0001/entities_resources/run-001.json"
+        ],
+    }
+    graph = {
+        "schema_version": "1.0",
+        "graphify_schema_version": "agent-produced",
+        "storygraph_schema_version": "1.0",
+        "nodes": [
+            {
+                "id": "node:artifact:python-provenance",
+                "label": "小瓶",
+                "node_type": "artifact",
+                "source_range": [3, 5],
+                "evidence_ids": ["evidence:python-provenance"],
+                "supports_templates": [
+                    {"template_name": "法宝分析", "requirement_id": "r1", "status": "covered"}
+                ],
+                "confidence": "EXTRACTED",
+                "verification_status": "verified",
+                "provenance": bad_provenance,
+            }
+        ],
+        "edges": [],
+        "hyperedges": [],
+        "events": [],
+        "evidence_index": [
+            {
+                "evidence_id": "evidence:python-provenance",
+                "source_range": [3, 5],
+                "fact_summary": "韩立获得小瓶",
+                "confidence": "EXTRACTED",
+                "verification_status": "verified",
+                "supports_templates": [
+                    {"template_name": "法宝分析", "requirement_id": "r1", "status": "covered"}
+                ],
+                "provenance": bad_provenance,
+            }
+        ],
+        "metadata": {},
+    }
+
+    result = validate_canonical_graph(graph)
+
+    assert result.ok is False
+    assert (
+        "bad_provenance_semantic_generation:node:artifact:python-provenance"
+        in result.errors
+    )
+    assert (
+        "bad_provenance_semantic_generation:evidence:python-provenance"
+        in result.errors
+    )
+
+
+def test_validate_canonical_graph_rejects_bad_agent_produced_metadata_without_repr():
+    graph = {
+        "schema_version": "1.0",
+        "graphify_schema_version": "agent-produced",
+        "storygraph_schema_version": "1.0",
+        "nodes": [
+            {
+                "id": "node:artifact:x",
+                "label": "小瓶",
+                "node_type": "artifact",
+                "source_range": [3, 5],
+                "evidence_ids": ["evidence:1"],
+                "supports_templates": [
+                    {"template_name": "法宝分析", "requirement_id": "r1", "status": "covered"}
+                ],
+                "confidence": "EXTRACTED",
+                "verification_status": "verified",
+                "provenance": {"lane_output_paths": [object()]},
+            }
+        ],
+        "edges": [],
+        "hyperedges": [],
+        "events": [],
+        "evidence_index": [
+            {
+                "evidence_id": "evidence:1",
+                "source_range": [3, 5],
+                "fact_summary": "韩立获得小瓶",
+                "confidence": "EXTRACTED",
+                "verification_status": "verified",
+                "supports_templates": [
+                    {"template_name": "法宝分析", "requirement_id": "r1", "status": "covered"}
+                ],
+            }
+        ],
+        "metadata": {
+            "semantic_generation": "agent-produced",
+            "canonical_writer_version": 1,
+            "source_bundle_paths": [object()],
+        },
+    }
+
+    result = validate_canonical_graph(graph)
+
+    assert result.ok is False
+    assert "bad_agent_metadata:canonical_writer_version" in result.errors
+    assert "bad_agent_metadata:source_bundle_paths" in result.errors
+    assert "bad_provenance_lane_output_path:node:artifact:x:0" in result.errors
+    assert all("object at" not in error for error in result.errors)

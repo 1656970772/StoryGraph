@@ -42,6 +42,7 @@ E:\AI_Projects\StoryGraph\
           graphify_adapter.py
           ids.py
           manifest.py
+          output_writer.py
           paths.py
           stage1.py
           stage2_schema.py
@@ -93,6 +94,7 @@ Responsibility map:
 - `storygraph_lib/graph_schema.py`: canonical graph schema、稳定 ID、StoryGraph 扩展合并。
 - `storygraph_lib/coverage.py`: `chunk-ledger.json`、`evidence-index.json`、`template-readiness.json`、gap report。
 - `storygraph_lib/agent_ledger.py`: 动态子 agent 运行记录 schema 和 single-writer 约束。
+- `storygraph_lib/output_writer.py`: 受管输出路径注册表，阻止 Stage 1/2 写入未声明产物。
 - `storygraph_lib/stage1.py`: 阶段 1 pipeline 编排。
 - `storygraph_lib/stage2_schema.py`: 阶段 2 extraction JSON schema 和 Markdown 证据规则骨架。
 - `storygraph_lib/state.py`: 幂等复用、原文 hash 改变检测、no-overwrite/draft 写入策略。
@@ -187,6 +189,65 @@ Read in order:
 Run `scripts/storygraph.py validate-skill` before reporting the skill source as ready.
 ```
 
+```yaml
+# skill-src/storygraph/agents/openai.yaml
+name: storygraph
+model: gpt-5
+role: storygraph-skill-worker
+description: Build and validate template-aware novel graphs before any downstream extraction.
+instructions:
+  - Read SKILL.md and the referenced workflow documents before running commands.
+  - Treat graph construction, template analysis, coverage review, and extraction as separate stages.
+  - Write only through configured StoryGraph output writers; never overwrite user-authored documents by default.
+  - Record every stage in coverage/agent-run-ledger.json with assigned inputs, outputs, status, and errors.
+```
+
+```markdown
+<!-- skill-src/storygraph/references/workflow.md -->
+# StoryGraph Workflow
+
+1. Validate the skill source with `scripts/storygraph.py validate-skill`.
+2. Load `config/storygraph.default.json`, optional `storygraph.local.json`, then CLI overrides in that order.
+3. Discover template files from the configured template directory. Existing template files define the integration scope; README-only entries are warnings.
+4. Build the Stage 1 graph into `<novel-stem>.storygraph/`.
+5. Require the Stage 1 manifest, graphify outputs, requirement matrix, coverage ledgers, and gap report before any Stage 2 extraction.
+6. Stage 2 is draft-first. Existing formal Markdown documents are not overwritten unless the configured output policy explicitly allows backup overwrite or merge.
+```
+
+```markdown
+<!-- skill-src/storygraph/references/graph-schema.md -->
+# StoryGraph Graph Schema
+
+The canonical graph preserves graphify-native fields and adds StoryGraph template-aware fields.
+
+Required top-level fields:
+- `nodes`
+- `edges`
+- `hyperedges`
+- `events`
+- `evidence_index`
+- `metadata`
+
+StoryGraph extension nodes, edges, events, and evidence records require:
+- stable `id` or `evidence_id`
+- source location or source range
+- `evidence_ids` where applicable
+- `supports_templates`
+- `confidence`
+- `verification_status`
+
+Graphify-native nodes may remain in the graph without StoryGraph-only fields before merge. Any node, edge, event, or evidence item created or modified by StoryGraph must pass the full StoryGraph validation contract.
+```
+
+```markdown
+<!-- skill-src/storygraph/references/extraction-workflow.md -->
+# Extraction Workflow
+
+Stage 2 is a schema scaffold in this plan, not a complete extraction implementation.
+
+Every future extraction record must cite Stage 1 graph evidence, template requirements, and chunk ranges. Output categories, draft directory, allowed overwrite actions, and render targets come from configuration rather than Python constants.
+```
+
 ```python
 # skill-src/storygraph/scripts/storygraph.py
 from storygraph_lib.cli import main
@@ -205,6 +266,14 @@ def main(argv=None):
     if args.version:
         print("storygraph 0.1.0")
     return 0
+```
+
+```python
+# skill-src/storygraph/scripts/storygraph_lib/__init__.py
+"""StoryGraph skill runtime helpers."""
+
+__all__ = ["__version__"]
+__version__ = "0.1.0"
 ```
 
 - [ ] **Step 4: Add project metadata and ignored local artifacts**
@@ -238,7 +307,7 @@ Expected: `1 passed`.
 - [ ] **Step 6: Commit baseline structure**
 
 ```powershell
-$env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; git -c core.quotePath=false add .gitignore pyproject.toml skill-src tests; git commit -m "chore: add storygraph skill source skeleton"
+$env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; git -c core.quotePath=false add .gitignore pyproject.toml skill-src tests; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; git commit -m "chore: add storygraph skill source skeleton"; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
 
 ### Task 2: Sync And Install Workflow
@@ -276,8 +345,9 @@ def test_validate_skill_tree_requires_core_directories(tmp_path):
 
 def test_sync_clean_script_contains_destination_boundary_guard():
     script = Path("skill-src/storygraph/scripts/sync-skill.ps1").read_text(encoding="utf-8")
-    assert "Resolve-Path -LiteralPath $Destination" in script
+    assert "[IO.Path]::GetFullPath($Destination).TrimEnd('\\')" in script
     assert ".codex\\skills\\storygraph" in script
+    assert "if ($Clean -and $destinationRoot -ne $expectedResolved)" in script
     assert "Remove-Item -LiteralPath $target -Recurse -Force" in script
 
 def test_sync_clean_refuses_unexpected_destination(tmp_path):
@@ -289,6 +359,16 @@ def test_sync_clean_refuses_unexpected_destination(tmp_path):
     result = __import__("subprocess").run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script), "-Source", str(source), "-Destination", str(destination), "-Clean"], capture_output=True, text=True)
     assert result.returncode != 0
     assert "Refusing to clean unexpected destination" in (result.stderr + result.stdout)
+
+def test_sync_without_clean_allows_custom_destination(tmp_path):
+    source = tmp_path / "source"
+    destination = tmp_path / "custom-storygraph"
+    (source / "scripts").mkdir(parents=True)
+    (source / "SKILL.md").write_text("# StoryGraph\n", encoding="utf-8")
+    script = Path("skill-src/storygraph/scripts/sync-skill.ps1")
+    result = __import__("subprocess").run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script), "-Source", str(source), "-Destination", str(destination)], capture_output=True, text=True)
+    assert result.returncode == 0
+    assert (destination / "SKILL.md").exists()
 ```
 
 - [ ] **Step 2: Run validation test and confirm it fails**
@@ -363,17 +443,18 @@ $ErrorActionPreference = "Stop"
 $items = @("SKILL.md", "agents", "references", "scripts", "config")
 $sourceRoot = (Resolve-Path -LiteralPath $Source).Path
 New-Item -ItemType Directory -Path $Destination -Force | Out-Null
-$destinationRoot = (Resolve-Path -LiteralPath $Destination).Path
+$destinationRoot = [IO.Path]::GetFullPath($Destination).TrimEnd('\')
 $expectedRoot = Join-Path $env:USERPROFILE ".codex\skills\storygraph"
-$expectedResolved = (Resolve-Path -LiteralPath $expectedRoot).Path
-if ($destinationRoot -ne $expectedResolved) {
+$expectedResolved = [IO.Path]::GetFullPath($expectedRoot).TrimEnd('\')
+if ($Clean -and $destinationRoot -ne $expectedResolved) {
   throw "Refusing to clean unexpected destination: $destinationRoot"
 }
 if ($Clean) {
   foreach ($item in $items) {
     $target = Join-Path $destinationRoot $item
     $resolvedParent = Split-Path -Parent $target
-    if ((Resolve-Path -LiteralPath $resolvedParent).Path -ne $destinationRoot) {
+    $resolvedParentFull = [IO.Path]::GetFullPath($resolvedParent).TrimEnd('\')
+    if ($resolvedParentFull -ne $destinationRoot) {
       throw "Refusing to remove path outside destination: $target"
     }
     if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force }
@@ -396,12 +477,12 @@ Run:
 $env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; python -m pytest tests\test_validation_cli.py -v
 ```
 
-Expected: pytest reports `3 passed`. Full `validate-skill --skill-root skill-src\storygraph` is run in Task 3 after the default config file exists.
+Expected: pytest reports `4 passed`. Full `validate-skill --skill-root skill-src\storygraph` is run in Task 3 after the default config file exists.
 
 - [ ] **Step 6: Commit sync workflow**
 
 ```powershell
-$env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; git -c core.quotePath=false add skill-src\storygraph\scripts tests\test_validation_cli.py; git commit -m "feat: add storygraph skill sync validation"
+$env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; git -c core.quotePath=false add skill-src\storygraph\scripts tests\test_validation_cli.py; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; git commit -m "feat: add storygraph skill sync validation"; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
 
 ### Task 3: Portable Config And Local Override
@@ -467,9 +548,20 @@ Expected: `FAIL` because `storygraph_lib.config` is not defined.
   },
   "graphify_adapter": {
     "mode": "local-repo-or-cli",
+    "allowed_modes": ["local-repo", "cli", "local-repo-or-cli"],
     "canonical_graph_policy": "merge-template-aware-supplements",
     "command": ["python", "-m", "graphify.cli", "build", "--input", "{source}", "--output", "{output_dir}"],
     "timeout_seconds": 1800
+  },
+  "status_enums": {
+    "requirement_statuses": ["covered", "needs_review", "not_found_in_source"],
+    "verification_statuses": ["verified", "needs_review", "rejected"],
+    "confidence_levels": ["EXTRACTED", "INFERRED", "AMBIGUOUS"]
+  },
+  "template_count_policy": {
+    "scope": "existing_template_files",
+    "expected_existing_templates": 37,
+    "enforce_integration_count": true
   },
   "template_parser_rules": {
     "field_headings": ["字段", "字段说明", "核心字段", "输出字段"],
@@ -479,6 +571,43 @@ Expected: `FAIL` because `storygraph_lib.config` is not defined.
     "evidence_markers": ["证据", "原文", "引用", "依据"],
     "gap_markers": ["缺口", "待核验", "未见可靠证据"]
   },
+  "template_graph_mappings": {
+    "有限视角与叙事日志": {
+      "graph_node_mapping": ["perspective"],
+      "graph_event_mapping": ["narrative_view"],
+      "graph_relation_mapping": ["known_unknown"]
+    },
+    "角色AI行为参考": {
+      "graph_node_mapping": ["decision", "resource_constraint"],
+      "graph_event_mapping": ["action_chain"],
+      "graph_relation_mapping": ["constraint_outcome"]
+    },
+    "记忆情绪与执念": {
+      "graph_node_mapping": ["emotion_memory"],
+      "graph_event_mapping": ["emotion_trigger"],
+      "graph_relation_mapping": ["long_term_influence"]
+    },
+    "相遇剧情与对话设计": {
+      "graph_node_mapping": ["scene_dialogue"],
+      "graph_event_mapping": ["encounter"],
+      "graph_relation_mapping": ["attitude_change", "information_exchange"]
+    },
+    "动态事件与机会点": {
+      "graph_node_mapping": ["opportunity"],
+      "graph_event_mapping": ["time_causality"],
+      "graph_relation_mapping": ["trigger_effect"]
+    },
+    "事件因果链（长程因果图）": {
+      "graph_node_mapping": ["timepoint"],
+      "graph_event_mapping": ["time_causality"],
+      "graph_relation_mapping": ["precondition", "delayed_effect"]
+    },
+    "default_mapping": {
+      "graph_node_mapping": ["template_specific_node"],
+      "graph_event_mapping": ["template_specific_event"],
+      "graph_relation_mapping": ["template_specific_relation"]
+    }
+  },
   "supplemental_graph_policy": {
     "write_to_canonical_graph": true,
     "sidecar_dir": "template-graph",
@@ -486,18 +615,53 @@ Expected: `FAIL` because `storygraph_lib.config` is not defined.
   },
   "chunk_strategy": {
     "mode": "chapter-aware",
+    "allowed_modes": ["chapter-aware", "bounded-chars"],
+    "fallback_mode": "bounded-chars",
     "max_chars": 20000,
-    "overlap_chars": 1200
+    "overlap_chars": 1200,
+    "chapter_heading_patterns": ["^第.+章", "^Chapter\\s+\\d+"]
+  },
+  "evidence_matching_strategy": {
+    "mode": "substring",
+    "allowed_modes": ["substring", "regex", "external-reranker"],
+    "case_sensitive": false,
+    "minimum_confidence": "EXTRACTED"
   },
   "template_requirements_strategy": {
     "mode": "auto-from-templates",
     "allow_manual_overrides": true
   },
+  "stage2_categories": {
+    "facts": "原作事实",
+    "judgments": "我的判断",
+    "pending_verifications": "待核验",
+    "not_found_items": "未见可靠证据"
+  },
   "overwrite_policy": "draft",
   "stage2_output_policy": {
     "default_dir": "drafts",
     "allow_overwrite_existing_docs": false,
-    "existing_document_action": "write_versioned_draft"
+    "existing_document_action": "write_versioned_draft",
+    "allowed_policies": ["draft", "backup-and-overwrite", "merge"],
+    "draft_action": "write_draft"
+  },
+  "writer_policy": {
+    "mode": "single-writer",
+    "managed_outputs": [
+      "manifest.json",
+      "graphify-out/graph.json",
+      "graphify-out/GRAPH_REPORT.md",
+      "graphify-out/graph.html",
+      "requirements/template-requirements.json",
+      "coverage/chunk-ledger.json",
+      "coverage/evidence-index.json",
+      "coverage/template-readiness.json",
+      "coverage/agent-run-ledger.json",
+      "coverage/gap-report.md",
+      "coverage/template-run-ledger.json",
+      "coverage/template-evidence-usage.json",
+      "coverage/template-gap-report.md"
+    ]
   },
   "agent_policy": {
     "enabled": true,
@@ -508,10 +672,15 @@ Expected: `FAIL` because `storygraph_lib.config` is not defined.
     "require_all_templates": true,
     "require_all_chunks_scanned": true,
     "readiness_warning_threshold": 0.8,
-    "block_on_missing_requirement_mapping": true
+    "block_on_missing_requirement_mapping": true,
+    "block_on_low_readiness": true,
+    "block_on_template_without_reliable_evidence": true,
+    "block_on_unparsable_subagent_json": true
   }
 }
 ```
+
+真实 37 个模板的逐模板映射来自 `template_graph_mappings`、本地 override、或模板解析生成的配置化规则；不得把完整模板映射表写成 Python 常量。`default_mapping` 只允许作为临时配置 fallback，并且集成验证必须证明 37 个模板都有非空、非泛型、可配置 mapping。
 
 - [ ] **Step 4: Implement recursive config merge**
 
@@ -591,7 +760,7 @@ Expected: config merge and registered `config-check` tests pass; pytest reports 
 - [ ] **Step 6: Commit config layer**
 
 ```powershell
-$env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; git -c core.quotePath=false add skill-src\storygraph\config skill-src\storygraph\scripts\storygraph_lib tests\test_config.py .gitignore; git commit -m "feat: add portable storygraph config"
+$env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; git -c core.quotePath=false add skill-src\storygraph\config skill-src\storygraph\scripts\storygraph_lib tests\test_config.py .gitignore; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; git commit -m "feat: add portable storygraph config"; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
 
 ### Task 4: Phase 1 Path Parsing, Graph Directory, And Manifest
@@ -599,7 +768,6 @@ $env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UT
 **Files:**
 - Create: `E:\AI_Projects\StoryGraph\skill-src\storygraph\scripts\storygraph_lib\paths.py`
 - Create: `E:\AI_Projects\StoryGraph\skill-src\storygraph\scripts\storygraph_lib\manifest.py`
-- Modify: `E:\AI_Projects\StoryGraph\skill-src\storygraph\scripts\storygraph_lib\stage1.py`
 - Test: `E:\AI_Projects\StoryGraph\tests\fixtures\mini_novel.txt`
 - Test: `E:\AI_Projects\StoryGraph\tests\test_paths_manifest.py`
 
@@ -714,7 +882,7 @@ Expected: `2 passed`.
 - [ ] **Step 6: Commit path and manifest layer**
 
 ```powershell
-$env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; git -c core.quotePath=false add skill-src\storygraph\scripts\storygraph_lib tests\test_paths_manifest.py tests\fixtures; git commit -m "feat: add storygraph path context and manifest"
+$env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; git -c core.quotePath=false add skill-src\storygraph\scripts\storygraph_lib tests\test_paths_manifest.py tests\fixtures; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; git commit -m "feat: add storygraph path context and manifest"; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
 
 ### Task 5: Configurable Template Parsing And 37-Template Requirement Matrix
@@ -770,7 +938,10 @@ def test_parse_template_extracts_fields_tables_cards_cases_evidence_and_gap_rule
 
 ```python
 # tests/test_templates.py
+import json
+import os
 from pathlib import Path
+import pytest
 from storygraph_lib.templates import discover_templates, build_requirement_matrix
 
 def test_discover_templates_uses_existing_files_and_warns_missing_readme_items(tmp_path):
@@ -783,10 +954,52 @@ def test_discover_templates_uses_existing_files_and_warns_missing_readme_items(t
     assert [t.name for t in result.templates] == ["有限视角与叙事日志", "角色AI行为参考"]
     assert result.warnings == [{"code": "missing_template_file", "file": "缺失模板.md"}]
 
-def test_real_37_templates_matrix_has_non_empty_requirement_categories():
-    template_dir = Path(r"E:\AI_Projects\CultivationWorld\docs\世界观参考\模板")
+def test_build_requirement_matrix_uses_configured_non_generic_mappings(tmp_path):
+    template_dir = tmp_path / "templates"
+    template_dir.mkdir()
+    (template_dir / "法宝分析模板.md").write_text("# 法宝分析模板\n## 字段\n- 法宝\n## 证据要求\n- 原文位置", encoding="utf-8")
     discovery = discover_templates(template_dir, glob="*模板.md", readme_index_file="README.md")
-    matrix = build_requirement_matrix(discovery.templates, rules=None)
+    mappings = {
+        "法宝分析": {
+            "graph_node_mapping": ["artifact"],
+            "graph_event_mapping": ["artifact_transfer"],
+            "graph_relation_mapping": ["owner_artifact"]
+        },
+        "default_mapping": {
+            "graph_node_mapping": ["template_specific_node"],
+            "graph_event_mapping": ["template_specific_event"],
+            "graph_relation_mapping": ["template_specific_relation"]
+        }
+    }
+    matrix = build_requirement_matrix(discovery.templates, rules=None, mappings=mappings)
+    record = matrix["templates"][0]
+    assert record["graph_node_mapping"] == ["artifact"]
+    assert record["mapping_source"] == "configured"
+    assert record["required_card_headings"] == []
+    assert record["required_card_fields"] == []
+
+def test_build_requirement_matrix_derives_non_generic_mapping_from_template_parse_result(tmp_path):
+    template_dir = tmp_path / "templates"
+    template_dir.mkdir()
+    (template_dir / "丹药谱系模板.md").write_text("# 丹药谱系模板\n## 字段\n- 丹药\n## 案例\n- 筑基丹", encoding="utf-8")
+    discovery = discover_templates(template_dir, glob="*模板.md", readme_index_file="README.md")
+    matrix = build_requirement_matrix(discovery.templates, rules=None, mappings={"default_mapping": {"graph_node_mapping": ["template_specific_node"], "graph_event_mapping": ["template_specific_event"], "graph_relation_mapping": ["template_specific_relation"]}})
+    record = matrix["templates"][0]
+    assert record["mapping_source"] == "template_parse_result"
+    assert record["graph_node_mapping"] == ["丹药谱系.node"]
+    assert record["graph_event_mapping"] == ["丹药谱系.event"]
+    assert record["graph_relation_mapping"] == ["丹药谱系.relation"]
+
+def test_real_37_templates_matrix_is_optional_integration_not_hermetic_pytest():
+    template_root = os.environ.get("STORYGRAPH_REAL_TEMPLATE_DIR")
+    if not template_root:
+        pytest.skip("Set STORYGRAPH_REAL_TEMPLATE_DIR for local integration verification.")
+    mappings_json = os.environ.get("STORYGRAPH_TEMPLATE_MAPPINGS_JSON")
+    if not mappings_json:
+        pytest.skip("Set STORYGRAPH_TEMPLATE_MAPPINGS_JSON so the integration test does not hard-code mappings.")
+    template_dir = Path(template_root)
+    discovery = discover_templates(template_dir, glob="*模板.md", readme_index_file="README.md")
+    matrix = build_requirement_matrix(discovery.templates, rules=None, mappings=json.loads(mappings_json))
     assert matrix["template_count"] == 37
     for record in matrix["templates"]:
         assert record["required_fields"] or record["required_tables"] or record["required_cards"] or record["required_case_patterns"]
@@ -795,6 +1008,7 @@ def test_real_37_templates_matrix_has_non_empty_requirement_categories():
         assert record["graph_node_mapping"]
         assert record["graph_event_mapping"]
         assert record["graph_relation_mapping"]
+        assert record["mapping_source"] in {"configured", "template_parse_result"}
 ```
 
 - [ ] **Step 2: Run template tests and confirm they fail**
@@ -824,7 +1038,7 @@ def parse_template_requirements(template_name: str, text: str, rules: dict | Non
         "evidence_markers": ["证据", "原文", "引用", "依据"],
         "gap_markers": ["缺口", "待核验", "未见可靠证据"]
     }
-    parsed = {"required_sections": [], "required_fields": [], "required_tables": [], "required_cards": [], "required_case_patterns": [], "required_evidence_fields": [], "gap_rules": {"markers": [], "status_enum": ["covered", "needs_review", "not_found_in_source"]}}
+    parsed = {"required_sections": [], "required_fields": [], "required_tables": [], "required_card_headings": [], "required_card_fields": [], "required_cards": [], "required_case_patterns": [], "required_evidence_fields": [], "gap_rules": {"markers": [], "status_enum": ["covered", "needs_review", "not_found_in_source"]}}
     section = ""
     table_header = None
     for raw in text.splitlines():
@@ -834,6 +1048,7 @@ def parse_template_requirements(template_name: str, text: str, rules: dict | Non
             section = title
             parsed["required_sections"].append(title)
             if any(marker in title for marker in rules["card_markers"]):
+                parsed["required_card_headings"].append(title)
                 parsed["required_cards"].append(title)
             continue
         if line.startswith("|") and "|" in line.strip("|"):
@@ -854,7 +1069,7 @@ def parse_template_requirements(template_name: str, text: str, rules: dict | Non
             elif any(marker in section for marker in rules["field_headings"]):
                 parsed["required_fields"].append(item)
             elif any(marker in section for marker in rules["card_markers"]):
-                parsed["required_cards"].append(item)
+                parsed["required_card_fields"].append(item)
     if not parsed["required_evidence_fields"]:
         parsed["required_evidence_fields"] = ["source_path", "source_range", "fact_summary", "confidence", "verification_status"]
     if not (parsed["required_fields"] or parsed["required_tables"] or parsed["required_cards"] or parsed["required_case_patterns"]):
@@ -883,15 +1098,6 @@ class TemplateDiscovery:
     templates: list[TemplateFile]
     warnings: list[dict]
 
-SPECIAL_MAPPINGS = {
-    "有限视角与叙事日志": {"graph_node_mapping": ["perspective"], "graph_event_mapping": ["narrative_view"], "graph_relation_mapping": ["known_unknown"]},
-    "角色AI行为参考": {"graph_node_mapping": ["decision", "resource_constraint"], "graph_event_mapping": ["action_chain"], "graph_relation_mapping": ["constraint_outcome"]},
-    "记忆情绪与执念": {"graph_node_mapping": ["emotion_memory"], "graph_event_mapping": ["emotion_trigger"], "graph_relation_mapping": ["long_term_influence"]},
-    "相遇剧情与对话设计": {"graph_node_mapping": ["scene_dialogue"], "graph_event_mapping": ["encounter"], "graph_relation_mapping": ["attitude_change", "information_exchange"]},
-    "动态事件与机会点": {"graph_node_mapping": ["opportunity"], "graph_event_mapping": ["time_causality"], "graph_relation_mapping": ["trigger_effect"]},
-    "事件因果链（长程因果图）": {"graph_node_mapping": ["timepoint"], "graph_event_mapping": ["time_causality"], "graph_relation_mapping": ["precondition", "delayed_effect"]}
-}
-
 def _hash_text(text: str) -> str:
     return sha256(text.encode("utf-8")).hexdigest()
 
@@ -908,22 +1114,46 @@ def discover_templates(template_dir: Path, glob: str = "*模板.md", readme_inde
                 warnings.append({"code": "missing_template_file", "file": item})
     return TemplateDiscovery(templates, warnings)
 
-def build_requirement_matrix(templates: list[TemplateFile], rules: dict | None) -> dict:
+def _derive_mapping_from_template_parse(template_name: str, parsed: dict) -> dict | None:
+    if parsed.get("required_sections") or parsed.get("required_fields") or parsed.get("required_case_patterns"):
+        return {
+            "graph_node_mapping": [f"{template_name}.node"],
+            "graph_event_mapping": [f"{template_name}.event"],
+            "graph_relation_mapping": [f"{template_name}.relation"]
+        }
+    return None
+
+def _resolve_mapping(template_name: str, mappings: dict, parsed: dict) -> tuple[dict, str]:
+    if template_name in mappings:
+        return mappings[template_name], "configured"
+    derived = _derive_mapping_from_template_parse(template_name, parsed)
+    if derived:
+        return derived, "template_parse_result"
+    if "default_mapping" in mappings:
+        return mappings["default_mapping"], "default_mapping"
+    raise ValueError(f"missing_template_graph_mapping:{template_name}")
+
+def build_requirement_matrix(templates: list[TemplateFile], rules: dict | None, mappings: dict, status_enums: dict | None = None, output_language: str = "zh-CN") -> dict:
+    statuses = (status_enums or {}).get("requirement_statuses", ["covered", "needs_review", "not_found_in_source"])
     records = []
     for template in templates:
         parsed = parse_template_requirements(template.name, template.text, rules)
-        mapping = SPECIAL_MAPPINGS.get(template.name, {"graph_node_mapping": ["entity"], "graph_event_mapping": ["event"], "graph_relation_mapping": ["relation"]})
+        mapping, mapping_source = _resolve_mapping(template.name, mappings, parsed)
+        if not mapping.get("graph_node_mapping") or not mapping.get("graph_event_mapping") or not mapping.get("graph_relation_mapping"):
+            raise ValueError(f"empty_template_graph_mapping:{template.name}")
+        parsed["gap_rules"]["status_enum"] = statuses
         records.append({
             "template_name": template.name,
             "template_file": str(template.path),
             "template_file_hash": template.file_hash,
             "template_status": "available",
-            "output_language": "zh-CN",
+            "output_language": output_language,
             **parsed,
             "required_entity_types": mapping["graph_node_mapping"],
             "required_event_types": mapping["graph_event_mapping"],
             "required_relation_types": mapping["graph_relation_mapping"],
             **mapping,
+            "mapping_source": mapping_source,
             "output_sections": parsed["required_sections"],
             "coverage_rules": {"statuses": parsed["gap_rules"]["status_enum"]}
         })
@@ -969,27 +1199,39 @@ def main(argv=None):
     if args.command == "inspect-templates":
         config = load_config(_default_config_path())
         discovery = discover_templates(Path(args.template_dir), config["template_discovery"]["glob"], config["template_discovery"]["readme_index_file"])
-        matrix = build_requirement_matrix(discovery.templates, config["template_parser_rules"])
-        _print_json({"template_count": matrix["template_count"], "warnings": discovery.warnings, "templates": [t["template_name"] for t in matrix["templates"]]})
-        return 0
+        matrix = build_requirement_matrix(discovery.templates, config["template_parser_rules"], config["template_graph_mappings"], config["status_enums"], config["output_language"])
+        template_details = [
+            {
+                "template_name": t["template_name"],
+                "mapping_source": t["mapping_source"],
+                "uses_default_mapping": t["mapping_source"] == "default_mapping",
+                "graph_node_mapping": t["graph_node_mapping"],
+                "graph_event_mapping": t["graph_event_mapping"],
+                "graph_relation_mapping": t["graph_relation_mapping"],
+            }
+            for t in matrix["templates"]
+        ]
+        has_default_mapping = any(t["uses_default_mapping"] for t in template_details)
+        _print_json({"template_count": matrix["template_count"], "warnings": discovery.warnings, "templates": template_details, "has_default_mapping": has_default_mapping})
+        return 2 if matrix["template_count"] == 37 and has_default_mapping else 0
     return 2
 ```
 
 Run:
 
 ```powershell
-$env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; python skill-src\storygraph\scripts\storygraph.py inspect-templates --template-dir 'E:\AI_Projects\CultivationWorld\docs\世界观参考\模板'
+$env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; python skill-src\storygraph\scripts\storygraph.py inspect-templates --template-dir 'E:\AI_Projects\CultivationWorld\docs\世界观参考\模板'; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
 
-Expected: JSON output contains `"template_count": 37`; README-only missing files are warning objects with `code` equal to `missing_template_file`.
+Expected: JSON output contains `"template_count": 37`; README-only missing files are warning objects with `code` equal to `missing_template_file`; every template record includes `template_name`, `mapping_source`, `uses_default_mapping`, `graph_node_mapping`, `graph_event_mapping`, and `graph_relation_mapping`; every real template reports `mapping_source` as `configured` or `template_parse_result`, not `default_mapping`; the command exits nonzero if the real 37-template set uses any `default_mapping`.
 
 - [ ] **Step 6: Run tests and commit template matrix**
 
 ```powershell
-$env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; python -m pytest tests\test_template_rules.py tests\test_templates.py -v; git -c core.quotePath=false add skill-src\storygraph\scripts\storygraph_lib skill-src\storygraph\references tests\test_template_rules.py tests\test_templates.py; git commit -m "feat: add configurable template requirement matrix"
+$env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; python -m pytest tests\test_template_rules.py tests\test_templates.py -v; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; git -c core.quotePath=false add skill-src\storygraph\scripts\storygraph_lib skill-src\storygraph\references tests\test_template_rules.py tests\test_templates.py; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; git commit -m "feat: add configurable template requirement matrix"; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
 
-Expected: all tests in `test_template_rules.py` and `test_templates.py` pass, including the real 37-template completeness test.
+Expected: all hermetic tests in `test_template_rules.py` and `test_templates.py` pass. The real 37-template completeness check is run through `STORYGRAPH_REAL_TEMPLATE_DIR` or the Final Review Gate CLI, not as a normal local-path-dependent pytest.
 
 ### Task 6: Canonical Graph Schema, Deep Validation, And Graphify Adapter
 
@@ -1019,8 +1261,18 @@ def test_deep_validation_rejects_missing_evidence_and_bad_status():
     graph = {"nodes": [{"id": "node:person:abc", "label": "韩立", "node_type": "person", "evidence_ids": [], "supports_templates": [{"template_name": "法宝分析", "requirement_id": "法宝分析.required_fields.法宝", "status": "maybe"}], "confidence": "EXTRACTED", "verification_status": "verified"}], "edges": [], "hyperedges": [], "events": [], "evidence_index": [], "metadata": {}}
     result = validate_canonical_graph(graph)
     assert result.ok is False
+    assert "missing:schema_version" in result.errors
+    assert "missing:graphify_schema_version" in result.errors
+    assert "missing:storygraph_schema_version" in result.errors
     assert "bad_requirement_status:maybe" in result.errors
     assert "node_without_evidence:node:person:abc" in result.errors
+
+def test_deep_validation_requires_top_level_schema_versions():
+    graph = {"nodes": [], "edges": [], "hyperedges": [], "events": [], "evidence_index": [], "metadata": {"graphify_schema_version": "x"}}
+    errors = validate_canonical_graph(graph).errors
+    assert "missing:schema_version" in errors
+    assert "missing:graphify_schema_version" in errors
+    assert "missing:storygraph_schema_version" in errors
 
 def test_merge_template_supplements_preserves_graphify_fields_and_requires_non_empty_supports():
     base = {"nodes": [{"id": "node:person:abc", "label": "韩立"}], "edges": [], "hyperedges": [], "metadata": {"graphify_schema_version": "x"}}
@@ -1029,6 +1281,23 @@ def test_merge_template_supplements_preserves_graphify_fields_and_requires_non_e
     assert graph["nodes"][0]["label"] == "韩立"
     assert graph["metadata"]["graphify_schema_version"] == "x"
     assert validate_canonical_graph(graph).ok is True
+
+def test_deep_validation_rejects_bad_edges_events_evidence_and_unknown_evidence():
+    graph = {
+        "nodes": [{"id": "node:item:1", "label": "小瓶", "node_type": "artifact", "evidence_ids": ["evidence:missing"], "supports_templates": [{"template_name": "法宝分析", "requirement_id": "r1", "status": "covered"}], "confidence": "EXTRACTED", "verification_status": "verified"}],
+        "edges": [{"id": "edge:owns:1", "source": "node:item:1", "target": "node:missing", "edge_type": "owns", "evidence_ids": ["evidence:missing"], "supports_templates": [{"template_name": "法宝分析", "requirement_id": "r2", "status": "covered"}], "confidence": "CERTAIN", "verification_status": "verified"}],
+        "hyperedges": [],
+        "events": [{"id": "event:gain:1", "event_type": "gain", "participants": ["node:missing"], "evidence_ids": [], "supports_templates": [{"template_name": "法宝分析", "requirement_id": "r3", "status": "unknown"}], "confidence": "EXTRACTED", "verification_status": "bad"}],
+        "evidence_index": [{"evidence_id": "bad", "source_range": [], "fact_summary": "", "confidence": "EXTRACTED", "verification_status": "verified", "supports_templates": []}],
+        "metadata": {}
+    }
+    errors = validate_canonical_graph(graph).errors
+    assert "node_unknown_evidence:node:item:1" in errors
+    assert "edge_unknown_node:edge:owns:1" in errors
+    assert "bad_confidence:CERTAIN" in errors
+    assert "event_without_evidence:event:gain:1" in errors
+    assert "bad_requirement_status:unknown" in errors
+    assert "bad_evidence_id:bad" in errors
 ```
 
 - [ ] **Step 2: Write failing adapter tests for unavailable graphify, real external command contract, and failure ledger payload**
@@ -1041,7 +1310,13 @@ from pathlib import Path
 from storygraph_lib.graphify_adapter import GraphifyAdapter
 
 def test_adapter_reports_unavailable_graphify_without_modifying_repo(tmp_path):
-    adapter = GraphifyAdapter(graphify_repo=tmp_path / "missing", command=["python", "-c", "print('unused')"], timeout_seconds=5)
+    adapter = GraphifyAdapter(graphify_repo=tmp_path / "missing", command=["python", "-c", "print('unused')"], timeout_seconds=5, mode="local-repo")
+    result = adapter.build_graph(source_path=tmp_path / "novel.txt", output_dir=tmp_path / "out")
+    assert result.ok is False
+    assert result.error["code"] == "graphify_unavailable"
+
+def test_adapter_local_repo_or_cli_fails_when_explicit_repo_is_missing(tmp_path):
+    adapter = GraphifyAdapter(graphify_repo=tmp_path / "missing", command=["python", "-c", "print('would otherwise succeed')"], timeout_seconds=5, mode="local-repo-or-cli")
     result = adapter.build_graph(source_path=tmp_path / "novel.txt", output_dir=tmp_path / "out")
     assert result.ok is False
     assert result.error["code"] == "graphify_unavailable"
@@ -1053,10 +1328,28 @@ def test_adapter_invokes_configured_external_command_and_requires_graph_json(tmp
     script.write_text("import json, pathlib, sys\nout=pathlib.Path(sys.argv[2]); out.mkdir(parents=True, exist_ok=True); (out/'graph.json').write_text(json.dumps({'nodes': [], 'edges': [], 'hyperedges': [], 'metadata': {'fake': True}}), encoding='utf-8')\n", encoding="utf-8")
     source = tmp_path / "novel.txt"
     source.write_text("正文", encoding="utf-8")
-    adapter = GraphifyAdapter(graphify_repo=repo, command=[sys.executable, "fake_graphify.py", "{source}", "{output_dir}"], timeout_seconds=5)
+    adapter = GraphifyAdapter(graphify_repo=repo, command=[sys.executable, "fake_graphify.py", "{source}", "{output_dir}"], timeout_seconds=5, mode="local-repo-or-cli")
     result = adapter.build_graph(source, tmp_path / "out")
     assert result.ok is True
     assert json.loads(result.graph_path.read_text(encoding="utf-8"))["metadata"]["fake"] is True
+
+def test_adapter_cli_mode_does_not_require_local_repo(tmp_path):
+    source = tmp_path / "novel.txt"
+    source.write_text("正文", encoding="utf-8")
+    command = [sys.executable, "-c", "import json,pathlib,sys; out=pathlib.Path(sys.argv[2]); out.mkdir(parents=True, exist_ok=True); (out/'graph.json').write_text(json.dumps({'nodes': [], 'edges': [], 'hyperedges': [], 'metadata': {'cli': True}}), encoding='utf-8')", "{source}", "{output_dir}"]
+    adapter = GraphifyAdapter(graphify_repo=None, command=command, timeout_seconds=5, mode="cli")
+    result = adapter.build_graph(source, tmp_path / "out")
+    assert result.ok is True
+
+def test_adapter_command_exit_zero_but_missing_required_artifact_is_structured_error(tmp_path):
+    source = tmp_path / "novel.txt"
+    source.write_text("正文", encoding="utf-8")
+    command = [sys.executable, "-c", "import pathlib,sys; pathlib.Path(sys.argv[2]).mkdir(parents=True, exist_ok=True)", "{source}", "{output_dir}"]
+    adapter = GraphifyAdapter(graphify_repo=None, command=command, timeout_seconds=5, mode="cli")
+    result = adapter.build_graph(source, tmp_path / "out")
+    assert result.ok is False
+    assert result.error["code"] == "graphify_artifact_missing"
+    assert set(result.error["missing"]) == {"graph.json", "GRAPH_REPORT.md", "graph.html"}
 ```
 
 - [ ] **Step 3: Run schema and adapter tests and confirm they fail**
@@ -1095,9 +1388,11 @@ def stable_evidence_id(novel_name: str, chunk_id: str, source_range: list[int]) 
 # skill-src/storygraph/scripts/storygraph_lib/graph_schema.py
 from dataclasses import dataclass
 
-REQ_STATUSES = {"covered", "needs_review", "not_found_in_source"}
-VERIFY_STATUSES = {"verified", "needs_review", "rejected"}
-CONFIDENCES = {"EXTRACTED", "INFERRED", "AMBIGUOUS"}
+DEFAULT_STATUS_ENUMS = {
+    "requirement_statuses": ["covered", "needs_review", "not_found_in_source"],
+    "verification_statuses": ["verified", "needs_review", "rejected"],
+    "confidence_levels": ["EXTRACTED", "INFERRED", "AMBIGUOUS"]
+}
 
 @dataclass(frozen=True)
 class SchemaValidation:
@@ -1126,43 +1421,84 @@ def _check_supports(owner: str, item: dict, errors: list[str]) -> None:
         errors.append(f"{owner}_without_supports:{item.get('id') or item.get('evidence_id')}")
     for support in supports:
         status = support.get("status")
-        if status not in REQ_STATUSES:
+        if status not in _ACTIVE_ENUMS["requirement_statuses"]:
             errors.append(f"bad_requirement_status:{status}")
 
-def validate_canonical_graph(graph: dict) -> SchemaValidation:
-    errors = [f"missing:{key}" for key in ["nodes", "edges", "hyperedges", "events", "evidence_index", "metadata"] if key not in graph]
+def _is_storygraph_item(item: dict) -> bool:
+    return any(key in item for key in ["node_type", "edge_type", "event_type", "evidence_ids", "supports_templates", "confidence", "verification_status"])
+
+_ACTIVE_ENUMS = DEFAULT_STATUS_ENUMS
+
+def validate_canonical_graph(graph: dict, status_enums: dict | None = None) -> SchemaValidation:
+    global _ACTIVE_ENUMS
+    _ACTIVE_ENUMS = status_enums or DEFAULT_STATUS_ENUMS
+    errors = [f"missing:{key}" for key in ["schema_version", "graphify_schema_version", "storygraph_schema_version", "nodes", "edges", "hyperedges", "events", "evidence_index", "metadata"] if key not in graph]
     evidence_ids = {e.get("evidence_id") for e in graph.get("evidence_index", [])}
     node_ids = {n.get("id") for n in graph.get("nodes", [])}
     for node in graph.get("nodes", []):
+        if not _is_storygraph_item(node):
+            continue
         if not node.get("id", "").startswith("node:"):
             errors.append(f"bad_node_id:{node.get('id')}")
+        for key in ["node_type", "evidence_ids", "supports_templates", "confidence", "verification_status"]:
+            if key not in node:
+                errors.append(f"node_missing:{node.get('id')}:{key}")
         if not node.get("evidence_ids"):
             errors.append(f"node_without_evidence:{node.get('id')}")
         if any(eid not in evidence_ids for eid in node.get("evidence_ids", [])):
             errors.append(f"node_unknown_evidence:{node.get('id')}")
-        if node.get("verification_status") not in VERIFY_STATUSES:
+        if node.get("verification_status") not in _ACTIVE_ENUMS["verification_statuses"]:
             errors.append(f"bad_verification_status:{node.get('verification_status')}")
-        if node.get("confidence") not in CONFIDENCES:
+        if node.get("confidence") not in _ACTIVE_ENUMS["confidence_levels"]:
             errors.append(f"bad_confidence:{node.get('confidence')}")
         _check_supports("node", node, errors)
     for edge in graph.get("edges", []):
+        if not _is_storygraph_item(edge):
+            continue
+        for key in ["id", "source", "target", "edge_type", "evidence_ids", "supports_templates", "confidence", "verification_status"]:
+            if key not in edge:
+                errors.append(f"edge_missing:{edge.get('id')}:{key}")
         if edge.get("source") not in node_ids or edge.get("target") not in node_ids:
             errors.append(f"edge_unknown_node:{edge.get('id')}")
+        if any(eid not in evidence_ids for eid in edge.get("evidence_ids", [])):
+            errors.append(f"edge_unknown_evidence:{edge.get('id')}")
+        if edge.get("verification_status") not in _ACTIVE_ENUMS["verification_statuses"]:
+            errors.append(f"bad_verification_status:{edge.get('verification_status')}")
+        if edge.get("confidence") not in _ACTIVE_ENUMS["confidence_levels"]:
+            errors.append(f"bad_confidence:{edge.get('confidence')}")
         _check_supports("edge", edge, errors)
     for event in graph.get("events", []):
+        for key in ["id", "event_type", "participants", "evidence_ids", "supports_templates", "confidence", "verification_status"]:
+            if key not in event:
+                errors.append(f"event_missing:{event.get('id')}:{key}")
         if not event.get("id", "").startswith("event:"):
             errors.append(f"bad_event_id:{event.get('id')}")
         if not event.get("evidence_ids"):
             errors.append(f"event_without_evidence:{event.get('id')}")
+        if any(eid not in evidence_ids for eid in event.get("evidence_ids", [])):
+            errors.append(f"event_unknown_evidence:{event.get('id')}")
+        if any(pid not in node_ids for pid in event.get("participants", [])):
+            errors.append(f"event_unknown_node:{event.get('id')}")
+        if event.get("verification_status") not in _ACTIVE_ENUMS["verification_statuses"]:
+            errors.append(f"bad_verification_status:{event.get('verification_status')}")
+        if event.get("confidence") not in _ACTIVE_ENUMS["confidence_levels"]:
+            errors.append(f"bad_confidence:{event.get('confidence')}")
         _check_supports("event", event, errors)
     for evidence in graph.get("evidence_index", []):
         if not evidence.get("evidence_id", "").startswith("evidence:"):
             errors.append(f"bad_evidence_id:{evidence.get('evidence_id')}")
-        if evidence.get("verification_status") not in VERIFY_STATUSES:
+        for key in ["source_range", "fact_summary", "confidence", "verification_status", "supports_templates"]:
+            if key not in evidence:
+                errors.append(f"evidence_missing:{evidence.get('evidence_id')}:{key}")
+        if evidence.get("verification_status") not in _ACTIVE_ENUMS["verification_statuses"]:
             errors.append(f"bad_evidence_verification:{evidence.get('verification_status')}")
+        if evidence.get("confidence") not in _ACTIVE_ENUMS["confidence_levels"]:
+            errors.append(f"bad_confidence:{evidence.get('confidence')}")
         _check_supports("evidence", evidence, errors)
     return SchemaValidation(ok=not errors, errors=errors)
 ```
+
+Graphify 原生节点、边和 metadata 可以保留原始字段，不强制补齐 StoryGraph 扩展字段。边界规则是：任何由 StoryGraph 创建、合并、或带有 `supports_templates`、`evidence_ids`、`confidence`、`verification_status` 的节点/边/事件/证据，都必须通过上述 StoryGraph 深度校验；如果 merge 阶段补齐原生节点，也必须在写入前补齐字段。
 
 - [ ] **Step 5: Implement graphify adapter as a verifiable external command wrapper**
 
@@ -1180,29 +1516,37 @@ class GraphifyResult:
     command: list[str]
 
 class GraphifyAdapter:
-    def __init__(self, graphify_repo: Path | None, command: list[str], timeout_seconds: int):
+    def __init__(self, graphify_repo: Path | None, command: list[str], timeout_seconds: int, mode: str = "local-repo-or-cli"):
         self.graphify_repo = graphify_repo
         self.command = command
         self.timeout_seconds = timeout_seconds
+        self.mode = mode
 
     def build_graph(self, source_path: Path, output_dir: Path) -> GraphifyResult:
-        if not self.graphify_repo or not self.graphify_repo.exists():
+        if self.mode not in {"local-repo", "cli", "local-repo-or-cli"}:
+            return GraphifyResult(False, None, {"code": "graphify_bad_mode", "mode": self.mode}, self.command)
+        cwd = None
+        if self.mode in {"local-repo", "local-repo-or-cli"} and self.graphify_repo and self.graphify_repo.exists():
+            cwd = self.graphify_repo
+        elif self.mode == "local-repo" or (self.mode == "local-repo-or-cli" and self.graphify_repo is not None):
             return GraphifyResult(False, None, {"code": "graphify_unavailable", "path": str(self.graphify_repo)}, self.command)
         output_dir.mkdir(parents=True, exist_ok=True)
         command = [part.format(source=str(source_path), output_dir=str(output_dir)) for part in self.command]
-        completed = subprocess.run(command, cwd=self.graphify_repo, capture_output=True, text=True, timeout=self.timeout_seconds)
-        graph_path = output_dir / "graph.json"
+        completed = subprocess.run(command, cwd=cwd, capture_output=True, text=True, timeout=self.timeout_seconds)
+        required = ["graph.json", "GRAPH_REPORT.md", "graph.html"]
+        missing = [name for name in required if not (output_dir / name).exists()]
         if completed.returncode != 0:
             return GraphifyResult(False, None, {"code": "graphify_failed", "returncode": completed.returncode, "stderr": completed.stderr[-4000:]}, command)
-        if not graph_path.exists():
-            return GraphifyResult(False, None, {"code": "graphify_missing_graph_json", "stdout": completed.stdout[-4000:]}, command)
+        if missing:
+            return GraphifyResult(False, None, {"code": "graphify_artifact_missing", "missing": missing, "stdout": completed.stdout[-4000:]}, command)
+        graph_path = output_dir / "graph.json"
         return GraphifyResult(True, graph_path, None, command)
 ```
 
 - [ ] **Step 6: Run tests and commit graph layer**
 
 ```powershell
-$env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; python -m pytest tests\test_graph_schema.py tests\test_graphify_adapter.py -v; git -c core.quotePath=false add skill-src\storygraph\scripts\storygraph_lib skill-src\storygraph\references tests\test_graph_schema.py tests\test_graphify_adapter.py; git commit -m "feat: add deep graph validation and graphify adapter"
+$env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; python -m pytest tests\test_graph_schema.py tests\test_graphify_adapter.py -v; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; git -c core.quotePath=false add skill-src\storygraph\scripts\storygraph_lib skill-src\storygraph\references tests\test_graph_schema.py tests\test_graphify_adapter.py; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; git commit -m "feat: add deep graph validation and graphify adapter"; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
 
 Expected: schema tests reject bad statuses and missing evidence; adapter tests prove an external command is invoked and graphify failures return structured ledger-ready errors.
@@ -1213,16 +1557,17 @@ Expected: schema tests reject bad statuses and missing evidence; adapter tests p
 - Create: `E:\AI_Projects\StoryGraph\skill-src\storygraph\scripts\storygraph_lib\coverage.py`
 - Create: `E:\AI_Projects\StoryGraph\skill-src\storygraph\scripts\storygraph_lib\template_aware.py`
 - Create: `E:\AI_Projects\StoryGraph\skill-src\storygraph\scripts\storygraph_lib\agent_ledger.py`
+- Create: `E:\AI_Projects\StoryGraph\skill-src\storygraph\scripts\storygraph_lib\output_writer.py`
 - Modify: `E:\AI_Projects\StoryGraph\skill-src\storygraph\references\workflow.md`
 - Test: `E:\AI_Projects\StoryGraph\tests\test_agent_ledger.py`
 - Test: `E:\AI_Projects\StoryGraph\tests\test_template_aware.py`
-- Test: `E:\AI_Projects\StoryGraph\tests\test_stage1.py`
 
 - [ ] **Step 1: Write failing tests for agent ledger, chunks, and real template-aware supplements**
 
 ```python
 # tests/test_agent_ledger.py
-from storygraph_lib.agent_ledger import make_agent_run_record, validate_single_writer
+from storygraph_lib.agent_ledger import make_agent_run_record, make_stage_agent_records, validate_single_writer
+from storygraph_lib.output_writer import OutputWriter
 
 def test_agent_run_record_contains_required_contract_fields():
     record = make_agent_run_record("run-1", "模板需求分析", "stage1", ["chunk-0001"], ["法宝分析"], ["novel.txt"], ["requirements.json"], "requirements/template-requirements.json")
@@ -1232,8 +1577,25 @@ def test_agent_run_record_contains_required_contract_fields():
 
 def test_single_writer_detects_conflicting_outputs():
     a = make_agent_run_record("run-1", "A", "stage1", [], [], [], ["manifest.json"], "manifest.json")
-    b = make_agent_run_record("run-2", "B", "stage1", [], [], [], ["manifest.json"], "manifest.json")
+    b = make_agent_run_record("run-2", "B", "stage1", [], [], [], ["manifest.json"], "other-scope")
     assert validate_single_writer([a, b]).ok is False
+
+def test_agent_ledger_includes_all_stage1_roles():
+    records = make_stage_agent_records(["chunk-0001"], ["法宝分析"])
+    assert [r["agent_role"] for r in records] == ["模板需求分析", "图抽取", "覆盖审查", "质量审查"]
+    assert all(r["input_paths"] for r in records)
+    assert all(r["output_paths"] for r in records)
+    assert all(r["write_scope"] for r in records)
+
+def test_output_writer_registry_blocks_unmanaged_outputs(tmp_path):
+    writer = OutputWriter(tmp_path, managed_outputs=["manifest.json", "coverage/agent-run-ledger.json"])
+    writer.write_json("manifest.json", {"ok": True})
+    try:
+        writer.write_json("graphify-out/graph.json", {})
+    except ValueError as exc:
+        assert "unmanaged_output" in str(exc)
+    else:
+        raise AssertionError("unmanaged output should be rejected")
 ```
 
 ```python
@@ -1244,9 +1606,9 @@ from storygraph_lib.template_aware import extract_template_aware_supplements
 def test_template_aware_extraction_creates_nodes_edges_events_evidence_and_requirement_statuses(tmp_path):
     source = tmp_path / "novel.txt"
     source.write_text("第一章\n韩立获得小瓶。小瓶影响法宝资源获取。", encoding="utf-8")
-    chunks = make_chunk_ledger(source, max_chars=200, overlap_chars=0)
+    chunks = make_chunk_ledger(source, {"mode": "chapter-aware", "fallback_mode": "bounded-chars", "max_chars": 200, "overlap_chars": 0}, processor="test")
     matrix = {"templates": [{"template_name": "法宝分析", "required_fields": ["法宝"], "required_tables": ["名称|能力"], "required_cards": ["法宝卡片"], "required_case_patterns": ["小瓶"], "required_entity_types": ["item"], "required_event_types": ["resource_gain"], "required_relation_types": ["influences"], "required_evidence_fields": ["source_range", "fact_summary"], "graph_node_mapping": ["item"], "graph_event_mapping": ["resource_gain"], "graph_relation_mapping": ["influences"], "gap_rules": {"status_enum": ["covered", "needs_review", "not_found_in_source"]}}]}
-    supplement, readiness = extract_template_aware_supplements("凡人修仙传", source, chunks, matrix)
+    supplement, readiness = extract_template_aware_supplements("凡人修仙传", source, chunks, matrix, {"mode": "substring"})
     assert supplement["nodes"]
     assert supplement["edges"]
     assert supplement["events"]
@@ -1280,37 +1642,85 @@ class LedgerValidation:
     errors: list[str]
 
 def make_agent_run_record(run_id, agent_role, stage, chunk_ids, template_names, input_paths, output_paths, write_scope):
-    return {"run_id": run_id, "agent_role": agent_role, "stage": stage, "assigned_chunk_ids": chunk_ids, "assigned_template_names": template_names, "input_paths": input_paths, "output_paths": output_paths, "write_scope": write_scope, "status": "pending", "errors": [], "merge_owner": "single-writer", "reviewer_status": "not_reviewed"}
+    return {"run_id": run_id, "agent_role": agent_role, "stage": stage, "assigned_chunk_ids": chunk_ids, "assigned_template_names": template_names, "input_paths": input_paths, "output_paths": output_paths, "write_scope": write_scope, "status": "pending", "errors": [], "merge_owner": "single-writer", "reviewer_status": "not_reviewed", "started_at": None, "finished_at": None}
+
+def make_stage_agent_records(chunk_ids, template_names):
+    return [
+        make_agent_run_record("stage1-template-requirements", "模板需求分析", "stage1", [], template_names, ["source-novel", "template-dir"], ["requirements/template-requirements.json"], "requirements/template-requirements.json"),
+        make_agent_run_record("stage1-graph-extraction", "图抽取", "stage1", chunk_ids, template_names, ["source-novel", "coverage/chunk-ledger.json", "requirements/template-requirements.json"], ["graphify-out/graph.json", "coverage/evidence-index.json"], "graphify-out/graph.json"),
+        make_agent_run_record("stage1-coverage-review", "覆盖审查", "stage1", chunk_ids, template_names, ["requirements/template-requirements.json", "coverage/chunk-ledger.json", "coverage/evidence-index.json", "graphify-out/graph.json"], ["coverage/template-readiness.json", "coverage/gap-report.md"], "coverage/template-readiness.json"),
+        make_agent_run_record("stage1-quality-review", "质量审查", "stage1", chunk_ids, template_names, ["manifest.json", "requirements/template-requirements.json", "coverage/chunk-ledger.json", "coverage/template-readiness.json", "coverage/gap-report.md"], ["coverage/agent-run-ledger.json"], "coverage/agent-run-ledger.json")
+    ]
 
 def validate_single_writer(records):
-    counts = Counter(record["write_scope"] for record in records if record["write_scope"])
-    conflicts = [scope for scope, count in counts.items() if count > 1]
+    scopes = Counter(record["write_scope"] for record in records if record["write_scope"])
+    outputs = Counter(path for record in records for path in record.get("output_paths", []))
+    conflicts = [f"write_scope:{scope}" for scope, count in scopes.items() if count > 1]
+    conflicts.extend(f"output_path:{path}" for path, count in outputs.items() if count > 1)
     return LedgerValidation(ok=not conflicts, errors=[f"write_conflict:{scope}" for scope in conflicts])
 ```
 
 ```python
 # skill-src/storygraph/scripts/storygraph_lib/coverage.py
 import json
+from datetime import datetime, timezone
 from hashlib import sha256
 
-def make_chunk_ledger(source_path, max_chars: int, overlap_chars: int) -> list[dict]:
-    text = source_path.read_text(encoding="utf-8")
-    chunks, start, index = [], 0, 1
+def _chunk_ranges_chapter_aware(text: str, max_chars: int, overlap_chars: int) -> list[tuple[int, int]]:
+    # Minimal default strategy: split on bounded chars, but preserve chapter heading hints in ledger.
+    ranges, start = [], 0
     while start < len(text):
         end = min(len(text), start + max_chars)
-        body = text[start:end]
-        chunks.append({"chunk_id": f"chunk-{index:04d}", "source_range": [start, end], "chapter_hint": body.splitlines()[0] if body else None, "hash": sha256(body.encode("utf-8")).hexdigest(), "scanned_at": None, "extraction_status": "pending", "failed_reason": None, "retry_count": 0})
+        ranges.append((start, end))
         if end == len(text):
             break
-        start, index = max(0, end - overlap_chars), index + 1
+        start = max(0, end - overlap_chars)
+    return ranges
+
+def make_chunk_ledger(source_path, strategy: dict, processor: str) -> list[dict]:
+    text = source_path.read_text(encoding="utf-8")
+    if strategy.get("mode") not in {"chapter-aware", "bounded-chars"}:
+        raise ValueError(f"unsupported_chunk_strategy:{strategy.get('mode')}")
+    ranges = _chunk_ranges_chapter_aware(text, strategy["max_chars"], strategy.get("overlap_chars", 0))
+    chunks = []
+    for index, (start, end) in enumerate(ranges, 1):
+        body = text[start:end]
+        chunks.append({"chunk_id": f"chunk-{index:04d}", "source_range": [start, end], "chapter_hint": body.splitlines()[0] if body else None, "hash": sha256(body.encode("utf-8")).hexdigest(), "scanned_at": datetime.now(timezone.utc).isoformat(), "processor": processor, "extraction_status": "pending", "failure": {"code": None, "message": None, "retryable": False}, "retry_count": 0})
     return chunks
 
-def write_coverage_outputs(graph_dir, chunks, evidences, readiness, agent_runs, gap_lines):
-    coverage_dir = graph_dir / "coverage"
-    coverage_dir.mkdir(parents=True, exist_ok=True)
-    for name, data in {"chunk-ledger.json": chunks, "evidence-index.json": evidences, "template-readiness.json": readiness, "agent-run-ledger.json": agent_runs}.items():
-        (coverage_dir / name).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    (coverage_dir / "gap-report.md").write_text("# StoryGraph Gap Report\n\n" + "\n".join(gap_lines) + "\n", encoding="utf-8")
+def write_coverage_outputs(writer, chunks, evidences, readiness, agent_runs, gap_lines):
+    writer.write_json("coverage/chunk-ledger.json", chunks)
+    writer.write_json("coverage/evidence-index.json", evidences)
+    writer.write_json("coverage/template-readiness.json", readiness)
+    writer.write_json("coverage/agent-run-ledger.json", agent_runs)
+    writer.write_text("coverage/gap-report.md", "# StoryGraph Gap Report\n\n" + "\n".join(gap_lines) + "\n")
+```
+
+```python
+# skill-src/storygraph/scripts/storygraph_lib/output_writer.py
+import json
+
+class OutputWriter:
+    def __init__(self, graph_dir, managed_outputs):
+        self.graph_dir = graph_dir
+        self.managed_outputs = set(managed_outputs)
+        self.written = set()
+
+    def _resolve(self, relative_path: str):
+        if relative_path not in self.managed_outputs:
+            raise ValueError(f"unmanaged_output:{relative_path}")
+        if relative_path in self.written:
+            raise ValueError(f"duplicate_output_write:{relative_path}")
+        path = self.graph_dir / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.written.add(relative_path)
+        return path
+
+    def write_json(self, relative_path: str, data) -> None:
+        self._resolve(relative_path).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def write_text(self, relative_path: str, text: str) -> None:
+        self._resolve(relative_path).write_text(text, encoding="utf-8")
 ```
 
 - [ ] **Step 4: Implement template-aware supplement extraction with per-requirement statuses**
@@ -1327,7 +1737,12 @@ def _requirements(record):
 def _support(template_name, requirement_id, status):
     return {"template_name": template_name, "requirement_id": requirement_id, "status": status}
 
-def extract_template_aware_supplements(novel_name, source_path, chunks, matrix):
+def _find_evidence_chunk(requirement, chunks, text, strategy):
+    if strategy.get("mode", "substring") == "substring":
+        return next((chunk for chunk in chunks if requirement and requirement in text[chunk["source_range"][0]:chunk["source_range"][1]]), None)
+    raise ValueError(f"unsupported_evidence_matching_strategy:{strategy.get('mode')}")
+
+def extract_template_aware_supplements(novel_name, source_path, chunks, matrix, evidence_strategy):
     text = source_path.read_text(encoding="utf-8")
     nodes, edges, events, evidences, readiness = [], [], [], [], []
     for template in matrix["templates"]:
@@ -1335,7 +1750,7 @@ def extract_template_aware_supplements(novel_name, source_path, chunks, matrix):
         template_nodes, template_edges, template_events, template_evidence = 0, 0, 0, 0
         for kind, requirement in _requirements(template):
             requirement_id = f"{template['template_name']}.{kind}.{requirement}"
-            match_chunk = next((chunk for chunk in chunks if requirement and requirement in text[chunk["source_range"][0]:chunk["source_range"][1]]), None)
+            match_chunk = _find_evidence_chunk(requirement, chunks, text, evidence_strategy)
             if match_chunk:
                 status = "covered"
                 evidence_id = stable_evidence_id(novel_name, match_chunk["chunk_id"], match_chunk["source_range"])
@@ -1365,9 +1780,9 @@ def extract_template_aware_supplements(novel_name, source_path, chunks, matrix):
 def test_readiness_has_one_record_per_template_and_each_requirement_has_status(tmp_path):
     source = tmp_path / "novel.txt"
     source.write_text("法宝 丹药 阵法", encoding="utf-8")
-    chunks = make_chunk_ledger(source, max_chars=200, overlap_chars=0)
+    chunks = make_chunk_ledger(source, {"mode": "chapter-aware", "fallback_mode": "bounded-chars", "max_chars": 200, "overlap_chars": 0}, processor="test")
     matrix = {"templates": [{"template_name": f"模板{i}", "required_fields": ["法宝"], "required_tables": [], "required_cards": [], "required_case_patterns": [], "required_entity_types": ["entity"], "required_event_types": ["event"], "required_relation_types": ["relation"], "graph_node_mapping": ["entity"], "graph_event_mapping": ["event"], "graph_relation_mapping": ["relation"], "required_evidence_fields": ["source_range"], "gap_rules": {"status_enum": ["covered", "needs_review", "not_found_in_source"]}} for i in range(37)]}
-    supplement, readiness = extract_template_aware_supplements("凡人修仙传", source, chunks, matrix)
+    supplement, readiness = extract_template_aware_supplements("凡人修仙传", source, chunks, matrix, {"mode": "substring"})
     assert len(readiness) == 37
     assert all(record["requirement_statuses"] for record in readiness)
     assert supplement["nodes"] and supplement["events"] and supplement["evidence_index"]
@@ -1376,7 +1791,7 @@ def test_readiness_has_one_record_per_template_and_each_requirement_has_status(t
 - [ ] **Step 6: Run tests and commit template-aware coverage layer**
 
 ```powershell
-$env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; python -m pytest tests\test_agent_ledger.py tests\test_template_aware.py -v; git -c core.quotePath=false add skill-src\storygraph\scripts\storygraph_lib skill-src\storygraph\references tests\test_agent_ledger.py tests\test_template_aware.py; git commit -m "feat: add template-aware graph supplements and coverage"
+$env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; python -m pytest tests\test_agent_ledger.py tests\test_template_aware.py -v; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; git -c core.quotePath=false add skill-src\storygraph\scripts\storygraph_lib skill-src\storygraph\references tests\test_agent_ledger.py tests\test_template_aware.py; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; git commit -m "feat: add template-aware graph supplements and coverage"; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
 
 Expected: template-aware tests prove non-empty nodes, edges, events, evidence, `supports_templates`, and one readiness record per template.
@@ -1401,9 +1816,10 @@ import json
 import sys
 from pathlib import Path
 from storygraph_lib.stage1 import build_stage1_graph
+from storygraph_lib.validation import validate_graph_dir
 
 def _config(template_dir, graphify_repo=None):
-    return {"graph_dir_suffix": ".storygraph", "paths": {"template_dir": str(template_dir), "graphify_repo": str(graphify_repo) if graphify_repo else None}, "template_discovery": {"glob": "*模板.md", "readme_index_file": "README.md"}, "template_parser_rules": {"field_headings": ["字段"], "table_markers": ["|", "表格"], "card_markers": ["卡片"], "case_markers": ["案例"], "evidence_markers": ["证据", "原文"], "gap_markers": ["缺口", "待核验"]}, "graphify_adapter": {"command": [sys.executable, "-c", "import json,pathlib,sys; out=pathlib.Path(sys.argv[2]); out.mkdir(parents=True, exist_ok=True); (out/'graph.json').write_text(json.dumps({'nodes': [], 'edges': [], 'hyperedges': [], 'metadata': {'graphify_schema_version': 'test'}}), encoding='utf-8')", "{source}", "{output_dir}"], "timeout_seconds": 5}, "chunk_strategy": {"max_chars": 100, "overlap_chars": 0}}
+    return {"graph_dir_suffix": ".storygraph", "output_language": "zh-CN", "paths": {"template_dir": str(template_dir), "graphify_repo": str(graphify_repo) if graphify_repo else None}, "template_discovery": {"glob": "*模板.md", "readme_index_file": "README.md"}, "template_parser_rules": {"field_headings": ["字段"], "table_markers": ["|", "表格"], "card_markers": ["卡片"], "case_markers": ["案例"], "evidence_markers": ["证据", "原文"], "gap_markers": ["缺口", "待核验"]}, "template_graph_mappings": {"法宝分析": {"graph_node_mapping": ["artifact"], "graph_event_mapping": ["artifact_gain"], "graph_relation_mapping": ["artifact_influence"]}, "default_mapping": {"graph_node_mapping": ["template_specific_node"], "graph_event_mapping": ["template_specific_event"], "graph_relation_mapping": ["template_specific_relation"]}}, "status_enums": {"requirement_statuses": ["covered", "needs_review", "not_found_in_source"], "verification_statuses": ["verified", "needs_review", "rejected"], "confidence_levels": ["EXTRACTED", "INFERRED", "AMBIGUOUS"]}, "graphify_adapter": {"mode": "local-repo-or-cli", "command": [sys.executable, "-c", "import json,pathlib,sys; out=pathlib.Path(sys.argv[2]); out.mkdir(parents=True, exist_ok=True); (out/'graph.json').write_text(json.dumps({'schema_version': '1.0', 'graphify_schema_version': 'test', 'storygraph_schema_version': '1.0', 'nodes': [], 'edges': [], 'hyperedges': [], 'events': [], 'evidence_index': [], 'metadata': {'graphify_schema_version': 'test'}}), encoding='utf-8'); (out/'GRAPH_REPORT.md').write_text('# Graph Report\\n', encoding='utf-8'); (out/'graph.html').write_text('<!doctype html><title>graph</title>', encoding='utf-8')", "{source}", "{output_dir}"], "timeout_seconds": 5}, "chunk_strategy": {"mode": "chapter-aware", "fallback_mode": "bounded-chars", "max_chars": 100, "overlap_chars": 0}, "evidence_matching_strategy": {"mode": "substring"}, "coverage_thresholds": {"require_all_chunks_scanned": True, "readiness_warning_threshold": 0.8, "block_on_low_readiness": True, "block_on_template_without_reliable_evidence": True, "block_on_unparsable_subagent_json": True}, "agent_policy": {"sub_agent_json_payloads": []}, "writer_policy": {"managed_outputs": ["manifest.json", "graphify-out/graph.json", "graphify-out/GRAPH_REPORT.md", "graphify-out/graph.html", "requirements/template-requirements.json", "coverage/chunk-ledger.json", "coverage/evidence-index.json", "coverage/template-readiness.json", "coverage/agent-run-ledger.json", "coverage/gap-report.md"]}}
 
 def test_stage1_build_merges_real_template_aware_supplements(tmp_path):
     novel = tmp_path / "mini_novel.txt"
@@ -1417,9 +1833,11 @@ def test_stage1_build_merges_real_template_aware_supplements(tmp_path):
     graph_dir = tmp_path / "mini_novel.storygraph"
     graph = json.loads((graph_dir / "graphify-out" / "graph.json").read_text(encoding="utf-8"))
     readiness = json.loads((graph_dir / "coverage" / "template-readiness.json").read_text(encoding="utf-8"))
+    ledger = json.loads((graph_dir / "coverage" / "agent-run-ledger.json").read_text(encoding="utf-8"))
     assert result["status"] == "success"
     assert graph["nodes"] and graph["edges"] and graph["events"] and graph["evidence_index"]
     assert readiness[0]["requirement_statuses"]
+    assert {record["status"] for record in ledger} == {"completed"}
 
 def test_stage1_graphify_unavailable_is_blocking_failed(tmp_path):
     novel = tmp_path / "mini_novel.txt"
@@ -1432,8 +1850,156 @@ def test_stage1_graphify_unavailable_is_blocking_failed(tmp_path):
     ledger = json.loads((tmp_path / "mini_novel.storygraph" / "coverage" / "agent-run-ledger.json").read_text(encoding="utf-8"))
     assert result["status"] == "failed"
     assert second["status"] == "failed"
-    assert ledger[0]["status"] == "failed"
-    assert ledger[0]["errors"][0]["code"] == "graphify_unavailable"
+    assert not (tmp_path / "mini_novel.storygraph" / "graphify-out" / "graph.json").exists()
+    failed = next(record for record in ledger if record["status"] == "failed")
+    assert failed["agent_role"] == "图抽取"
+    assert failed["errors"][0]["code"] == "graphify_unavailable"
+
+def test_stage1_readiness_below_threshold_and_template_without_reliable_evidence_fail(tmp_path):
+    novel = tmp_path / "mini_novel.txt"
+    novel.write_text("完全无关正文", encoding="utf-8")
+    template_dir = tmp_path / "templates"
+    template_dir.mkdir()
+    graphify_repo = tmp_path / "graphify"
+    graphify_repo.mkdir()
+    (template_dir / "法宝分析模板.md").write_text("# 法宝分析模板\n## 字段\n- 法宝", encoding="utf-8")
+    result = build_stage1_graph(novel, _config(template_dir, graphify_repo))
+    graph_dir = tmp_path / "mini_novel.storygraph"
+    manifest = json.loads((graph_dir / "manifest.json").read_text(encoding="utf-8"))
+    gap = (graph_dir / "coverage" / "gap-report.md").read_text(encoding="utf-8")
+    ledger = json.loads((graph_dir / "coverage" / "agent-run-ledger.json").read_text(encoding="utf-8"))
+    assert result["status"] == "failed"
+    assert manifest["stage_status"]["stage1"] == "failed"
+    assert "readiness_below_threshold" in gap
+    assert "template_without_reliable_evidence" in gap
+    assert any(error["code"] == "readiness_below_threshold" for record in ledger for error in record["errors"])
+
+def test_stage1_chunk_extraction_failure_writes_failed_chunk_ledger(tmp_path, monkeypatch):
+    import storygraph_lib.stage1 as stage1_mod
+    novel = tmp_path / "mini_novel.txt"
+    novel.write_text("法宝", encoding="utf-8")
+    template_dir = tmp_path / "templates"
+    template_dir.mkdir()
+    graphify_repo = tmp_path / "graphify"
+    graphify_repo.mkdir()
+    (template_dir / "法宝分析模板.md").write_text("# 法宝分析模板\n## 字段\n- 法宝", encoding="utf-8")
+    monkeypatch.setattr(stage1_mod, "make_chunk_ledger", lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("chunk boom")))
+    result = build_stage1_graph(novel, _config(template_dir, graphify_repo))
+    graph_dir = tmp_path / "mini_novel.storygraph"
+    chunks = json.loads((graph_dir / "coverage" / "chunk-ledger.json").read_text(encoding="utf-8"))
+    manifest = json.loads((graph_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert result["status"] == "failed"
+    assert manifest["stage_status"]["stage1"] == "failed"
+    assert chunks[0]["extraction_status"] == "failed"
+    assert chunks[0]["failure"]["code"] == "chunk_extraction_failure"
+
+def test_stage1_unparsable_subagent_json_fails_and_records_ledger(tmp_path):
+    novel = tmp_path / "mini_novel.txt"
+    novel.write_text("法宝", encoding="utf-8")
+    template_dir = tmp_path / "templates"
+    template_dir.mkdir()
+    graphify_repo = tmp_path / "graphify"
+    graphify_repo.mkdir()
+    (template_dir / "法宝分析模板.md").write_text("# 法宝分析模板\n## 字段\n- 法宝", encoding="utf-8")
+    config = _config(template_dir, graphify_repo)
+    config["agent_policy"]["sub_agent_json_payloads"] = ["{not json"]
+    result = build_stage1_graph(novel, config)
+    graph_dir = tmp_path / "mini_novel.storygraph"
+    ledger = json.loads((graph_dir / "coverage" / "agent-run-ledger.json").read_text(encoding="utf-8"))
+    gap = (graph_dir / "coverage" / "gap-report.md").read_text(encoding="utf-8")
+    assert result["status"] == "failed"
+    assert any(error["code"] == "unparsable_subagent_json" for record in ledger for error in record["errors"])
+    assert "unparsable_subagent_json" in gap
+
+def test_stage1_single_writer_conflict_fails_before_success_outputs(tmp_path, monkeypatch):
+    import storygraph_lib.stage1 as stage1_mod
+    from storygraph_lib.agent_ledger import make_agent_run_record
+    novel = tmp_path / "mini_novel.txt"
+    novel.write_text("法宝", encoding="utf-8")
+    template_dir = tmp_path / "templates"
+    template_dir.mkdir()
+    graphify_repo = tmp_path / "graphify"
+    graphify_repo.mkdir()
+    (template_dir / "法宝分析模板.md").write_text("# 法宝分析模板\n## 字段\n- 法宝", encoding="utf-8")
+    def conflicting_records(chunk_ids, template_names):
+        return [
+            make_agent_run_record("run-a", "模板需求分析", "stage1", [], template_names, ["source-novel"], ["manifest.json"], "manifest.json"),
+            make_agent_run_record("run-b", "图抽取", "stage1", chunk_ids, template_names, ["source-novel"], ["manifest.json"], "graphify-out/graph.json"),
+        ]
+    monkeypatch.setattr(stage1_mod, "make_stage_agent_records", conflicting_records)
+    result = build_stage1_graph(novel, _config(template_dir, graphify_repo))
+    graph_dir = tmp_path / "mini_novel.storygraph"
+    manifest = json.loads((graph_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert result["status"] == "failed"
+    assert manifest["stage_status"]["stage1"] == "failed"
+    assert not (graph_dir / "graphify-out" / "graph.json").exists()
+
+def test_stage1_missing_source_returns_structured_error_and_writes_failure_outputs_when_graph_dir_is_known(tmp_path):
+    source = tmp_path / "missing_novel.txt"
+    template_dir = tmp_path / "templates"
+    template_dir.mkdir()
+    (template_dir / "法宝分析模板.md").write_text("# 法宝分析模板\n## 字段\n- 法宝", encoding="utf-8")
+    result = build_stage1_graph(source, _config(template_dir, tmp_path / "graphify"))
+    graph_dir = tmp_path / "missing_novel.storygraph"
+    manifest = json.loads((graph_dir / "manifest.json").read_text(encoding="utf-8"))
+    ledger = json.loads((graph_dir / "coverage" / "agent-run-ledger.json").read_text(encoding="utf-8"))
+    gap = (graph_dir / "coverage" / "gap-report.md").read_text(encoding="utf-8")
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "source_unreadable"
+    assert manifest["stage_status"]["stage1"] == "failed"
+    assert any(error["code"] == "source_unreadable" for record in ledger for error in record.get("errors", []))
+    assert "source_unreadable" in gap
+
+def test_stage1_cli_source_unreadable_returns_json_even_when_graph_dir_cannot_be_inferred(tmp_path, capsys, monkeypatch):
+    import storygraph_lib.cli as cli_mod
+    import storygraph_lib.stage1 as stage1_mod
+    template_dir = tmp_path / "templates"
+    template_dir.mkdir()
+    (template_dir / "法宝分析模板.md").write_text("# 法宝分析模板\n## 字段\n- 法宝", encoding="utf-8")
+    monkeypatch.setattr(stage1_mod, "_infer_novel_context_without_reading", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("bad source path")))
+    exit_code = cli_mod.main(["build-stage1", "--source", "<bad-source>", "--template-dir", str(template_dir)])
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 2
+    assert payload["status"] == "failed"
+    assert payload["error"]["code"] == "source_unreadable"
+    assert payload["graph_dir"] is None
+    assert payload["manifest_written"] is False
+
+def test_stage1_invalid_utf8_source_uses_stable_encoding_error_code(tmp_path):
+    novel = tmp_path / "bad_encoding.txt"
+    novel.write_bytes(b"\xff\xfe\xfa")
+    template_dir = tmp_path / "templates"
+    template_dir.mkdir()
+    graphify_repo = tmp_path / "graphify"
+    graphify_repo.mkdir()
+    (template_dir / "法宝分析模板.md").write_text("# 法宝分析模板\n## 字段\n- 法宝", encoding="utf-8")
+    result = build_stage1_graph(novel, _config(template_dir, graphify_repo))
+    graph_dir = tmp_path / "bad_encoding.storygraph"
+    manifest = json.loads((graph_dir / "manifest.json").read_text(encoding="utf-8"))
+    ledger = json.loads((graph_dir / "coverage" / "agent-run-ledger.json").read_text(encoding="utf-8"))
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "source_encoding_error"
+    assert manifest["stage_status"]["stage1"] == "failed"
+    assert any(error["code"] == "source_encoding_error" for record in ledger for error in record.get("errors", []))
+
+def test_stage1_graphify_exit_zero_missing_artifacts_fails_manifest_and_validate_graph_blocks(tmp_path):
+    novel = tmp_path / "mini_novel.txt"
+    novel.write_text("法宝", encoding="utf-8")
+    template_dir = tmp_path / "templates"
+    template_dir.mkdir()
+    (template_dir / "法宝分析模板.md").write_text("# 法宝分析模板\n## 字段\n- 法宝", encoding="utf-8")
+    config = _config(template_dir, graphify_repo=None)
+    config["graphify_adapter"] = {"mode": "cli", "command": [sys.executable, "-c", "import pathlib,sys; pathlib.Path(sys.argv[2]).mkdir(parents=True, exist_ok=True)", "{source}", "{output_dir}"], "timeout_seconds": 5}
+    result = build_stage1_graph(novel, config)
+    graph_dir = tmp_path / "mini_novel.storygraph"
+    manifest = json.loads((graph_dir / "manifest.json").read_text(encoding="utf-8"))
+    ledger = json.loads((graph_dir / "coverage" / "agent-run-ledger.json").read_text(encoding="utf-8"))
+    validation = validate_graph_dir(graph_dir)
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "graphify_artifact_missing"
+    assert manifest["stage_status"]["stage1"] == "failed"
+    assert any(error["code"] == "graphify_artifact_missing" for record in ledger for error in record.get("errors", []))
+    assert "blocking_ledger:graphify_artifact_missing" in validation.errors
 ```
 
 ```python
@@ -1447,13 +2013,30 @@ def _write_37_templates(template_dir: Path):
     for index in range(37):
         (template_dir / f"模板{index:02d}模板.md").write_text(f"# 模板{index:02d}模板\n## 字段\n- 法宝\n## 证据要求\n- 原文位置", encoding="utf-8")
 
+def _config(template_dir: Path, graphify_repo: Path):
+    mappings = {f"模板{index:02d}": {"graph_node_mapping": [f"template_{index:02d}_node"], "graph_event_mapping": [f"template_{index:02d}_event"], "graph_relation_mapping": [f"template_{index:02d}_relation"]} for index in range(37)}
+    mappings["default_mapping"] = {"graph_node_mapping": ["template_specific_node"], "graph_event_mapping": ["template_specific_event"], "graph_relation_mapping": ["template_specific_relation"]}
+    return {
+        "graph_dir_suffix": ".storygraph",
+        "output_language": "zh-CN",
+        "paths": {"template_dir": str(template_dir), "graphify_repo": str(graphify_repo)},
+        "template_discovery": {"glob": "*模板.md", "readme_index_file": "README.md"},
+        "template_parser_rules": None,
+        "template_graph_mappings": mappings,
+        "status_enums": {"requirement_statuses": ["covered", "needs_review", "not_found_in_source"], "verification_statuses": ["verified", "needs_review", "rejected"], "confidence_levels": ["EXTRACTED", "INFERRED", "AMBIGUOUS"]},
+        "graphify_adapter": {"mode": "local-repo-or-cli", "command": [sys.executable, "-c", "import json,pathlib,sys; out=pathlib.Path(sys.argv[2]); out.mkdir(parents=True, exist_ok=True); (out/'graph.json').write_text(json.dumps({'schema_version': '1.0', 'graphify_schema_version': 'test', 'storygraph_schema_version': '1.0', 'nodes': [], 'edges': [], 'hyperedges': [], 'events': [], 'evidence_index': [], 'metadata': {'graphify_schema_version': 'test'}}), encoding='utf-8'); (out/'GRAPH_REPORT.md').write_text('# Graph Report\\n', encoding='utf-8'); (out/'graph.html').write_text('<!doctype html><title>graph</title>', encoding='utf-8')", "{source}", "{output_dir}"], "timeout_seconds": 5},
+        "chunk_strategy": {"mode": "chapter-aware", "fallback_mode": "bounded-chars", "max_chars": 100, "overlap_chars": 0},
+        "evidence_matching_strategy": {"mode": "substring"},
+        "writer_policy": {"managed_outputs": ["manifest.json", "graphify-out/graph.json", "graphify-out/GRAPH_REPORT.md", "graphify-out/graph.html", "requirements/template-requirements.json", "coverage/chunk-ledger.json", "coverage/evidence-index.json", "coverage/template-readiness.json", "coverage/agent-run-ledger.json", "coverage/gap-report.md"]}
+    }
+
 def test_stage1_reuses_graph_when_source_hash_is_unchanged(tmp_path):
     novel = tmp_path / "mini.txt"
     novel.write_text("法宝 小瓶", encoding="utf-8")
     template_dir = tmp_path / "templates"; template_dir.mkdir()
     _write_37_templates(template_dir)
     graphify_repo = tmp_path / "graphify"; graphify_repo.mkdir()
-    config = {"graph_dir_suffix": ".storygraph", "paths": {"template_dir": str(template_dir), "graphify_repo": str(graphify_repo)}, "template_discovery": {"glob": "*模板.md", "readme_index_file": "README.md"}, "template_parser_rules": None, "graphify_adapter": {"command": [sys.executable, "-c", "import json,pathlib,sys; out=pathlib.Path(sys.argv[2]); out.mkdir(parents=True, exist_ok=True); (out/'graph.json').write_text(json.dumps({'nodes': [], 'edges': [], 'hyperedges': [], 'metadata': {'graphify_schema_version': 'test'}}), encoding='utf-8')", "{source}", "{output_dir}"], "timeout_seconds": 5}, "chunk_strategy": {"max_chars": 100, "overlap_chars": 0}}
+    config = _config(template_dir, graphify_repo)
     first = build_stage1_graph(novel, config)
     second = build_stage1_graph(novel, config)
     assert first["status"] == "success"
@@ -1465,7 +2048,7 @@ def test_stage1_marks_source_changed_when_hash_changes(tmp_path):
     template_dir = tmp_path / "templates"; template_dir.mkdir()
     _write_37_templates(template_dir)
     graphify_repo = tmp_path / "graphify"; graphify_repo.mkdir()
-    config = {"graph_dir_suffix": ".storygraph", "paths": {"template_dir": str(template_dir), "graphify_repo": str(graphify_repo)}, "template_discovery": {"glob": "*模板.md", "readme_index_file": "README.md"}, "template_parser_rules": None, "graphify_adapter": {"command": [sys.executable, "-c", "import json,pathlib,sys; out=pathlib.Path(sys.argv[2]); out.mkdir(parents=True, exist_ok=True); (out/'graph.json').write_text(json.dumps({'nodes': [], 'edges': [], 'hyperedges': [], 'metadata': {'graphify_schema_version': 'test'}}), encoding='utf-8')", "{source}", "{output_dir}"], "timeout_seconds": 5}, "chunk_strategy": {"max_chars": 100, "overlap_chars": 0}}
+    config = _config(template_dir, graphify_repo)
     build_stage1_graph(novel, config)
     novel.write_text("法宝 小瓶", encoding="utf-8")
     result = build_stage1_graph(novel, config)
@@ -1477,7 +2060,7 @@ def test_stage1_marks_changed_when_template_file_hash_changes(tmp_path):
     template_dir = tmp_path / "templates"; template_dir.mkdir()
     _write_37_templates(template_dir)
     graphify_repo = tmp_path / "graphify"; graphify_repo.mkdir()
-    config = {"graph_dir_suffix": ".storygraph", "paths": {"template_dir": str(template_dir), "graphify_repo": str(graphify_repo)}, "template_discovery": {"glob": "*模板.md", "readme_index_file": "README.md"}, "template_parser_rules": None, "graphify_adapter": {"command": [sys.executable, "-c", "import json,pathlib,sys; out=pathlib.Path(sys.argv[2]); out.mkdir(parents=True, exist_ok=True); (out/'graph.json').write_text(json.dumps({'nodes': [], 'edges': [], 'hyperedges': [], 'metadata': {'graphify_schema_version': 'test'}}), encoding='utf-8')", "{source}", "{output_dir}"], "timeout_seconds": 5}, "chunk_strategy": {"max_chars": 100, "overlap_chars": 0}}
+    config = _config(template_dir, graphify_repo)
     build_stage1_graph(novel, config)
     (template_dir / "模板00模板.md").write_text("# 模板00模板\n## 字段\n- 丹药\n## 证据要求\n- 原文位置", encoding="utf-8")
     result = build_stage1_graph(novel, config)
@@ -1490,7 +2073,7 @@ def test_stage1_marks_changed_when_graphify_source_changes(tmp_path):
     _write_37_templates(template_dir)
     graphify_a = tmp_path / "graphify-a"; graphify_a.mkdir()
     graphify_b = tmp_path / "graphify-b"; graphify_b.mkdir()
-    config = {"graph_dir_suffix": ".storygraph", "paths": {"template_dir": str(template_dir), "graphify_repo": str(graphify_a)}, "template_discovery": {"glob": "*模板.md", "readme_index_file": "README.md"}, "template_parser_rules": None, "graphify_adapter": {"command": [sys.executable, "-c", "import json,pathlib,sys; out=pathlib.Path(sys.argv[2]); out.mkdir(parents=True, exist_ok=True); (out/'graph.json').write_text(json.dumps({'nodes': [], 'edges': [], 'hyperedges': [], 'metadata': {'graphify_schema_version': 'test'}}), encoding='utf-8')", "{source}", "{output_dir}"], "timeout_seconds": 5}, "chunk_strategy": {"max_chars": 100, "overlap_chars": 0}}
+    config = _config(template_dir, graphify_a)
     build_stage1_graph(novel, config)
     config["paths"]["graphify_repo"] = str(graphify_b)
     result = build_stage1_graph(novel, config)
@@ -1513,7 +2096,7 @@ Expected: `FAIL` because `build_stage1_graph` and idempotency state logic are no
 # skill-src/storygraph/scripts/storygraph_lib/state.py
 import json
 
-REQUIRED_STAGE1_FILES = ["manifest.json", "graphify-out/graph.json", "requirements/template-requirements.json", "coverage/chunk-ledger.json", "coverage/evidence-index.json", "coverage/template-readiness.json", "coverage/agent-run-ledger.json"]
+REQUIRED_STAGE1_FILES = ["manifest.json", "graphify-out/graph.json", "graphify-out/GRAPH_REPORT.md", "graphify-out/graph.html", "requirements/template-requirements.json", "coverage/chunk-ledger.json", "coverage/evidence-index.json", "coverage/template-readiness.json", "coverage/agent-run-ledger.json", "coverage/gap-report.md"]
 
 def _has_blocking_failure(graph_dir):
     ledger_path = graph_dir / "coverage" / "agent-run-ledger.json"
@@ -1541,18 +2124,130 @@ def stage1_state(ctx, config_hash: str, graph_validator):
 # skill-src/storygraph/scripts/storygraph_lib/stage1.py
 import json
 import subprocess
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
-from .agent_ledger import make_agent_run_record
+from .agent_ledger import make_stage_agent_records, validate_single_writer
 from .coverage import make_chunk_ledger, write_coverage_outputs
 from .graph_schema import merge_template_supplements, validate_canonical_graph
 from .graphify_adapter import GraphifyAdapter
 from .manifest import write_manifest
+from .output_writer import OutputWriter
 from .paths import resolve_novel_context
 from .state import stage1_state
 from .template_aware import extract_template_aware_supplements
 from .templates import build_requirement_matrix, discover_templates
 from .validation import validate_graph_dir
+
+@dataclass(frozen=True)
+class PreflightNovelContext:
+    source_path: Path
+    source_hash: str | None
+    source_size: int
+    novel_name: str
+    novel_dir: Path
+    graph_dir: Path
+
+def _infer_novel_context_without_reading(source_path: Path, graph_dir_suffix: str, create: bool = False) -> PreflightNovelContext:
+    source = source_path.expanduser().resolve(strict=False)
+    if not source.name or source.name in {".", ".."}:
+        raise OSError("cannot_infer_graph_dir")
+    graph_dir = source.parent / f"{source.stem}{graph_dir_suffix}"
+    if create:
+        graph_dir.mkdir(parents=True, exist_ok=True)
+    return PreflightNovelContext(source, None, 0, source.stem, source.parent, graph_dir)
+
+def _failed_chunk(ctx, error: Exception) -> list[dict]:
+    return [{"chunk_id": "chunk-0001", "source_range": [0, ctx.source_size], "chapter_hint": None, "hash": None, "scanned_at": None, "processor": "storygraph-stage1", "extraction_status": "failed", "failure": {"code": "chunk_extraction_failure", "message": str(error), "retryable": True}, "retry_count": 0}]
+
+def _append_error(agent_runs, role, error):
+    target = next((record for record in agent_runs if record["agent_role"] == role), agent_runs[-1])
+    target["status"] = "failed"
+    target.setdefault("errors", []).append(error)
+
+def _mark_completed(agent_runs):
+    for record in agent_runs:
+        if record["status"] == "pending":
+            record["status"] = "completed"
+            record["reviewer_status"] = "passed"
+
+def _parse_subagent_payloads(config, agent_runs, gap_lines):
+    errors = []
+    warnings = []
+    blocking = config.get("coverage_thresholds", {}).get("block_on_unparsable_subagent_json", True)
+    for index, payload in enumerate(config.get("agent_policy", {}).get("sub_agent_json_payloads", []), 1):
+        try:
+            json.loads(payload)
+        except json.JSONDecodeError as exc:
+            error = {"code": "unparsable_subagent_json", "payload_index": index, "message": str(exc)}
+            if blocking:
+                errors.append(error)
+                _append_error(agent_runs, "质量审查", error)
+            else:
+                warnings.append(error)
+            gap_lines.append(f"- unparsable_subagent_json: payload {index}")
+    return {"errors": errors, "warnings": warnings}
+
+def _evaluate_coverage_failures(readiness, chunks, config, agent_runs, gap_lines):
+    errors = []
+    warnings = []
+    thresholds = config.get("coverage_thresholds", {})
+    readiness_threshold = thresholds.get("readiness_warning_threshold", 0)
+    for record in readiness:
+        if record.get("readiness_score", 0) < readiness_threshold:
+            error = {"code": "readiness_below_threshold", "template_name": record["template_name"], "readiness_score": record.get("readiness_score", 0), "threshold": readiness_threshold}
+            gap_lines.append(f"- readiness_below_threshold: {record['template_name']} {record.get('readiness_score', 0)} < {readiness_threshold}")
+            if thresholds.get("block_on_low_readiness", True):
+                errors.append(error)
+                _append_error(agent_runs, "覆盖审查", error)
+            else:
+                warnings.append(error)
+        if thresholds.get("block_on_template_without_reliable_evidence", True) and record.get("evidence_count", 0) == 0:
+            error = {"code": "template_without_reliable_evidence", "template_name": record["template_name"]}
+            errors.append(error)
+            gap_lines.append(f"- template_without_reliable_evidence: {record['template_name']}")
+            _append_error(agent_runs, "覆盖审查", error)
+        elif record.get("evidence_count", 0) == 0:
+            error = {"code": "template_without_reliable_evidence", "template_name": record["template_name"]}
+            warnings.append(error)
+            gap_lines.append(f"- template_without_reliable_evidence: {record['template_name']}")
+    if thresholds.get("require_all_chunks_scanned", True):
+        for chunk in chunks:
+            if chunk.get("extraction_status") != "completed":
+                error = {"code": "chunk_extraction_failure", "chunk_id": chunk.get("chunk_id"), "failure": chunk.get("failure")}
+                errors.append(error)
+                gap_lines.append(f"- chunk_extraction_failure: {chunk.get('chunk_id')}")
+                _append_error(agent_runs, "图抽取", error)
+    return {"errors": errors, "warnings": warnings}
+
+def _write_failure_manifest(manifest_path, status):
+    manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest_data["stage_status"]["stage1"] = status
+    manifest_path.write_text(json.dumps(manifest_data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def _write_preflight_failure(ctx, config, error, role="图抽取") -> None:
+    writer = OutputWriter(ctx.graph_dir, config["writer_policy"]["managed_outputs"])
+    manifest = {
+        "schema": "storygraph-manifest.v1",
+        "source_path": str(ctx.source_path),
+        "source_hash": ctx.source_hash,
+        "source_size": ctx.source_size,
+        "novel_name": ctx.novel_name,
+        "graph_dir": str(ctx.graph_dir),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "config_hash": None,
+        "graphify_source": str(config.get("paths", {}).get("graphify_repo")),
+        "stage_status": {"stage1": "failed", "stage2": "not_started"}
+    }
+    chunks = [{"chunk_id": "chunk-0001", "source_range": [0, ctx.source_size], "chapter_hint": None, "hash": None, "scanned_at": None, "processor": "storygraph-stage1", "extraction_status": "failed", "failure": error, "retry_count": 0}]
+    agent_runs = make_stage_agent_records([chunks[0]["chunk_id"]], [])
+    _append_error(agent_runs, role, error)
+    writer.write_json("manifest.json", manifest)
+    write_coverage_outputs(writer, chunks, [], [], agent_runs, [f"- {error['code']}: {error.get('message', '')}"])
+
+def _source_failure_response(source_path, graph_dir, error, manifest_written):
+    return {"status": "failed", "source_state": "unknown", "graph_dir": str(graph_dir) if graph_dir else None, "manifest_written": manifest_written, "error": error, "validation_errors": [error["code"]]}
 
 def graphify_source_fingerprint(config: dict) -> dict:
     repo = Path(config["paths"]["graphify_repo"]) if config["paths"].get("graphify_repo") else None
@@ -1575,44 +2270,134 @@ def stable_stage_input_hash(config: dict, templates: list) -> str:
         "graphify_source": graphify_source_fingerprint(config),
         "templates": [{"template_name": template.name, "template_file": str(template.path), "template_file_hash": template.file_hash} for template in templates],
         "chunk_strategy": config["chunk_strategy"],
+        "template_count_policy": config.get("template_count_policy"),
         "supplemental_graph_policy": config.get("supplemental_graph_policy")
     }
     return sha256(json.dumps(relevant, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
 def build_stage1_graph(source_path: Path, config: dict) -> dict:
-    ctx = resolve_novel_context(Path(source_path), config["graph_dir_suffix"], create=True)
+    # Error contract: unreadable source, UnicodeDecodeError, graphify artifact loss,
+    # chunk extraction failure, readiness below threshold, missing reliable evidence,
+    # and unparsable sub-agent JSON all mark manifest stage1 as failed.
+    try:
+        preflight_ctx = _infer_novel_context_without_reading(Path(source_path), config["graph_dir_suffix"], create=True)
+    except (OSError, ValueError) as exc:
+        error = {"code": "source_unreadable", "message": str(exc), "source_path": str(source_path)}
+        return _source_failure_response(source_path, None, error, manifest_written=False)
+    try:
+        ctx = resolve_novel_context(Path(source_path), config["graph_dir_suffix"], create=True)
+    except (FileNotFoundError, PermissionError) as exc:
+        error = {"code": "source_unreadable", "message": str(exc), "source_path": str(preflight_ctx.source_path)}
+        _write_preflight_failure(preflight_ctx, config, error)
+        return _source_failure_response(source_path, preflight_ctx.graph_dir, error, manifest_written=True)
+    except UnicodeDecodeError as exc:
+        error = {"code": "source_encoding_error", "message": str(exc), "source_path": str(preflight_ctx.source_path)}
+        _write_preflight_failure(preflight_ctx, config, error)
+        return _source_failure_response(source_path, preflight_ctx.graph_dir, error, manifest_written=True)
     discovery = discover_templates(Path(config["paths"]["template_dir"]), config["template_discovery"]["glob"], config["template_discovery"]["readme_index_file"])
     config_hash = stable_stage_input_hash(config, discovery.templates)
     current_state = stage1_state(ctx, config_hash, validate_graph_dir)
     if current_state["action"] == "reuse":
         return {"status": "reused", "source_state": "unchanged", "graph_dir": str(ctx.graph_dir)}
     manifest_path = write_manifest(ctx, config_hash=config_hash, graphify_source=str(config.get("paths", {}).get("graphify_repo")))
-    matrix = build_requirement_matrix(discovery.templates, config.get("template_parser_rules"))
-    requirements_dir = ctx.graph_dir / "requirements"; requirements_dir.mkdir(parents=True, exist_ok=True)
-    (requirements_dir / "template-requirements.json").write_text(json.dumps(matrix, ensure_ascii=False, indent=2), encoding="utf-8")
-    chunks = make_chunk_ledger(ctx.source_path, config["chunk_strategy"]["max_chars"], config["chunk_strategy"]["overlap_chars"])
-    supplement, readiness = extract_template_aware_supplements(ctx.novel_name, ctx.source_path, chunks, matrix)
+    writer = OutputWriter(ctx.graph_dir, config["writer_policy"]["managed_outputs"])
+    matrix = build_requirement_matrix(discovery.templates, config.get("template_parser_rules"), config["template_graph_mappings"], config["status_enums"], config["output_language"])
+    count_policy = config.get("template_count_policy", {})
+    if count_policy.get("enforce_integration_count") and matrix["template_count"] != count_policy.get("expected_existing_templates"):
+        raise ValueError(f"template_count_mismatch:{matrix['template_count']}:{count_policy.get('expected_existing_templates')}")
+    writer.write_json("requirements/template-requirements.json", matrix)
+    try:
+        chunks = make_chunk_ledger(ctx.source_path, config["chunk_strategy"], processor="storygraph-stage1")
+    except UnicodeDecodeError as exc:
+        error = {"code": "source_encoding_error", "message": str(exc), "source_path": str(ctx.source_path)}
+        _write_preflight_failure(ctx, config, error)
+        return _source_failure_response(source_path, ctx.graph_dir, error, manifest_written=True)
+    except Exception as exc:
+        chunks = _failed_chunk(ctx, exc)
+        readiness = [{"template_name": t["template_name"], "readiness_score": 0, "supporting_node_count": 0, "supporting_edge_count": 0, "supporting_event_count": 0, "evidence_count": 0, "missing_requirement_types": ["chunk_extraction"], "requirement_statuses": [], "notes": ["chunk_extraction_failure"]} for t in matrix["templates"]]
+        agent_runs = make_stage_agent_records([c["chunk_id"] for c in chunks], [t["template_name"] for t in matrix["templates"]])
+        gap_lines = [f"- chunk_extraction_failure: {exc}"]
+        _append_error(agent_runs, "图抽取", {"code": "chunk_extraction_failure", "message": str(exc)})
+        write_coverage_outputs(writer, chunks, [], readiness, agent_runs, gap_lines)
+        _write_failure_manifest(manifest_path, "failed")
+        return {"status": "failed", "source_state": current_state["source_state"], "graph_dir": str(ctx.graph_dir), "warnings": discovery.warnings, "validation_errors": ["chunk_extraction_failure"]}
+    agent_runs = make_stage_agent_records([c["chunk_id"] for c in chunks], [t["template_name"] for t in matrix["templates"]])
+    single_writer = validate_single_writer(agent_runs)
+    if not single_writer.ok:
+        for error in single_writer.errors:
+            _append_error(agent_runs, "质量审查", {"code": "single_writer_conflict", "detail": error})
+        write_coverage_outputs(writer, chunks, [], [], agent_runs, [f"- single_writer_conflict: {error}" for error in single_writer.errors])
+        _write_failure_manifest(manifest_path, "failed")
+        return {"status": "failed", "source_state": current_state["source_state"], "graph_dir": str(ctx.graph_dir), "warnings": discovery.warnings, "validation_errors": single_writer.errors}
+    try:
+        supplement, readiness = extract_template_aware_supplements(ctx.novel_name, ctx.source_path, chunks, matrix, config["evidence_matching_strategy"])
+    except UnicodeDecodeError as exc:
+        error = {"code": "source_encoding_error", "message": str(exc), "source_path": str(ctx.source_path)}
+        _write_preflight_failure(ctx, config, error)
+        _write_failure_manifest(manifest_path, "failed")
+        return _source_failure_response(source_path, ctx.graph_dir, error, manifest_written=True)
     for chunk in chunks:
-        chunk["extraction_status"] = "completed"
+        if chunk.get("extraction_status") == "pending":
+            chunk["extraction_status"] = "completed"
+    gap_lines = [f"- warning: {w['code']} {w['file']}" for w in discovery.warnings]
+    coverage_contract = _evaluate_coverage_failures(readiness, chunks, config, agent_runs, gap_lines)
+    contract_errors = coverage_contract["errors"]
+    contract_warnings = coverage_contract["warnings"]
+    subagent_contract = _parse_subagent_payloads(config, agent_runs, gap_lines)
+    contract_errors.extend(subagent_contract["errors"])
+    contract_warnings.extend(subagent_contract["warnings"])
     graphify_out = ctx.graph_dir / "graphify-out"; graphify_out.mkdir(parents=True, exist_ok=True)
-    adapter = GraphifyAdapter(Path(config["paths"]["graphify_repo"]) if config["paths"].get("graphify_repo") else None, config["graphify_adapter"]["command"], config["graphify_adapter"]["timeout_seconds"])
+    adapter = GraphifyAdapter(Path(config["paths"]["graphify_repo"]) if config["paths"].get("graphify_repo") else None, config["graphify_adapter"]["command"], config["graphify_adapter"]["timeout_seconds"], config["graphify_adapter"]["mode"])
     adapter_result = adapter.build_graph(ctx.source_path, graphify_out)
-    base = json.loads(adapter_result.graph_path.read_text(encoding="utf-8")) if adapter_result.ok else {"nodes": [], "edges": [], "hyperedges": [], "metadata": {"graphify_error": adapter_result.error}}
-    graph = merge_template_supplements(base, supplement)
-    validation = validate_canonical_graph(graph)
-    (graphify_out / "graph.json").write_text(json.dumps(graph, ensure_ascii=False, indent=2), encoding="utf-8")
-    agent_runs = [make_agent_run_record("graphify-0001", "graphify_adapter", "stage1", [], [], [str(ctx.source_path)], [str(graphify_out / "graph.json")], "graphify-out/graph.json")]
     if not adapter_result.ok:
-        agent_runs[0]["status"] = "failed"
-        agent_runs[0]["errors"] = [adapter_result.error]
-    gap_lines = [f"- validation error: {error}" for error in validation.errors] + [f"- warning: {w['code']} {w['file']}" for w in discovery.warnings]
-    write_coverage_outputs(ctx.graph_dir, chunks, supplement["evidence_index"], readiness, agent_runs, gap_lines)
-    status = "success" if adapter_result.ok and validation.ok else "failed"
+        agent_runs[1]["status"] = "failed"
+        agent_runs[1]["errors"] = [adapter_result.error]
+        validation = type("Validation", (), {"ok": False, "errors": [adapter_result.error["code"]]})()
+        gap_lines.append(f"- graphify error: {adapter_result.error['code']}")
+        write_coverage_outputs(writer, chunks, [], readiness, agent_runs, gap_lines)
+        status = "failed"
+    else:
+        required_graphify = ["graph.json", "GRAPH_REPORT.md", "graph.html"]
+        missing_graphify = [name for name in required_graphify if not (graphify_out / name).exists()]
+        if missing_graphify:
+            agent_runs[1]["status"] = "failed"
+            agent_runs[1]["errors"] = [{"code": "graphify_artifact_missing", "missing": missing_graphify}]
+            validation = type("Validation", (), {"ok": False, "errors": ["graphify_artifact_missing"]})()
+            gap_lines.append(f"- graphify_artifact_missing: {missing_graphify}")
+            status = "failed"
+        else:
+            base = json.loads(adapter_result.graph_path.read_text(encoding="utf-8"))
+            graph = merge_template_supplements(base, supplement)
+            validation = validate_canonical_graph(graph, config["status_enums"])
+            writer.write_json("graphify-out/graph.json", graph)
+            writer.write_text("graphify-out/GRAPH_REPORT.md", (graphify_out / "GRAPH_REPORT.md").read_text(encoding="utf-8"))
+            writer.write_text("graphify-out/graph.html", (graphify_out / "graph.html").read_text(encoding="utf-8"))
+            status = "success" if validation.ok and not contract_errors and not contract_warnings else ("warning" if validation.ok and not contract_errors else "failed")
+        gap_lines = [f"- validation error: {error}" for error in validation.errors] + gap_lines
+        if status in {"success", "warning"}:
+            _mark_completed(agent_runs)
+        write_coverage_outputs(writer, chunks, supplement["evidence_index"], readiness, agent_runs, gap_lines)
     manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest_data["stage_status"]["stage1"] = status
     manifest_path.write_text(json.dumps(manifest_data, ensure_ascii=False, indent=2), encoding="utf-8")
-    return {"status": status, "source_state": current_state["source_state"], "graph_dir": str(ctx.graph_dir), "warnings": discovery.warnings, "validation_errors": validation.errors}
+    result = {"status": status, "source_state": current_state["source_state"], "graph_dir": str(ctx.graph_dir), "warnings": discovery.warnings, "validation_errors": validation.errors}
+    if status == "failed" and validation.errors:
+        result["error"] = {"code": validation.errors[0]}
+    return result
 ```
+
+Stage 1 failure handling is part of the implementation contract:
+- Before the formal `resolve_novel_context` call, infer `graph_dir` and `novel_name` without reading source contents. If that preflight inference fails, CLI must still return structured JSON with `status: failed`, `error.code: source_unreadable`, `graph_dir: null`, and `manifest_written: false`.
+- If the source file is missing or unreadable after `graph_dir` can be inferred, return nonzero from CLI, write `manifest.json`, `coverage\agent-run-ledger.json`, and `coverage\gap-report.md` when possible, set `manifest.stage_status.stage1` to `failed`, and use stable error code `source_unreadable`.
+- If the source raises `UnicodeDecodeError`, do not collapse it into a generic chunk or pipeline exception; return/write stable error code `source_encoding_error`, failed manifest, blocking ledger, and gap report.
+- If graphify exits nonzero or exits zero while omitting `graph.json`, `GRAPH_REPORT.md`, or `graph.html`, do not write a merged `graphify-out\graph.json` that appears successful; record `graphify_failed` or `graphify_artifact_missing` in `agent-run-ledger.json`.
+- If a chunk extraction fails, preserve its `chunk_id`, `source_range`, `scanned_at`, `processor`, and `failure` fields in `chunk-ledger.json`.
+- If `validate_single_writer(agent_runs)` reports duplicate `write_scope` or `output_paths`, record `single_writer_conflict`, write failure ledgers, set `manifest.stage_status.stage1` to `failed`, and stop before graphify or any success graph output is written.
+- `validate-graph` / `validate_graph_dir` must treat any `coverage\agent-run-ledger.json` record with `status: failed` as blocking by adding `blocking_ledger:<error_code>` to validation errors.
+- `coverage_thresholds.require_all_chunks_scanned` controls whether failed chunks are blocking.
+- `coverage_thresholds.readiness_warning_threshold` defines the minimum readiness score; `block_on_low_readiness` controls whether below-threshold readiness marks Stage 1 `failed` or `warning`.
+- `coverage_thresholds.block_on_template_without_reliable_evidence` controls whether a template with zero reliable evidence marks Stage 1 `failed` or `warning`.
+- `coverage_thresholds.block_on_unparsable_subagent_json` defaults to blocking; any unparsable sub-agent JSON payload records `unparsable_subagent_json` in `gap-report.md` and `agent-run-ledger.json`.
 
 - [ ] **Step 5: Replace CLI with fully registered build, inspect, and deep validate commands**
 
@@ -1636,27 +2421,42 @@ def main(argv=None):
     import argparse
     parser = argparse.ArgumentParser(prog="storygraph")
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("config-check").add_argument("--local-override")
+    config_check = sub.add_parser("config-check"); config_check.add_argument("--config"); config_check.add_argument("--local-override")
     validate = sub.add_parser("validate-skill"); validate.add_argument("--skill-root", default=str(Path(__file__).resolve().parents[2]))
-    inspect = sub.add_parser("inspect-templates"); inspect.add_argument("--template-dir", required=True)
-    build = sub.add_parser("build-stage1"); build.add_argument("--source", required=True); build.add_argument("--template-dir", required=True); build.add_argument("--graphify-repo")
+    inspect = sub.add_parser("inspect-templates"); inspect.add_argument("--config"); inspect.add_argument("--local-override"); inspect.add_argument("--template-dir", required=True)
+    build = sub.add_parser("build-stage1"); build.add_argument("--config"); build.add_argument("--local-override"); build.add_argument("--source", required=True); build.add_argument("--template-dir", required=True); build.add_argument("--graphify-repo")
     graph = sub.add_parser("validate-graph"); graph.add_argument("--graph-dir", required=True)
     args = parser.parse_args(argv)
-    config = load_config(_default_config_path())
+    default_config = Path(getattr(args, "config", None)) if getattr(args, "config", None) else _default_config_path()
+    local_override = Path(args.local_override) if getattr(args, "local_override", None) else None
+    config = load_config(default_config, local_override=local_override)
     if args.command == "config-check":
         _print_json({"ok": True, "graph_dir_suffix": config["graph_dir_suffix"]}); return 0
     if args.command == "validate-skill":
         result = validate_skill_tree(Path(args.skill_root)); _print_json({"ok": result.ok, "missing": result.missing}); return 0 if result.ok else 2
     if args.command == "inspect-templates":
         discovery = discover_templates(Path(args.template_dir), config["template_discovery"]["glob"], config["template_discovery"]["readme_index_file"])
-        matrix = build_requirement_matrix(discovery.templates, config["template_parser_rules"])
-        _print_json({"template_count": matrix["template_count"], "warnings": discovery.warnings}); return 0
+        matrix = build_requirement_matrix(discovery.templates, config["template_parser_rules"], config["template_graph_mappings"], config["status_enums"], config["output_language"])
+        template_details = [
+            {
+                "template_name": t["template_name"],
+                "mapping_source": t["mapping_source"],
+                "uses_default_mapping": t["mapping_source"] == "default_mapping",
+                "graph_node_mapping": t["graph_node_mapping"],
+                "graph_event_mapping": t["graph_event_mapping"],
+                "graph_relation_mapping": t["graph_relation_mapping"],
+            }
+            for t in matrix["templates"]
+        ]
+        has_default_mapping = any(t["uses_default_mapping"] for t in template_details)
+        _print_json({"template_count": matrix["template_count"], "warnings": discovery.warnings, "templates": template_details, "has_default_mapping": has_default_mapping})
+        return 2 if matrix["template_count"] == 37 and has_default_mapping else 0
     if args.command == "build-stage1":
         config["paths"]["template_dir"] = args.template_dir
         config["paths"]["graphify_repo"] = args.graphify_repo
         result = build_stage1_graph(Path(args.source), config)
         _print_json(result)
-        return 0 if result["status"] in {"success", "reused"} else 2
+        return 0 if result["status"] in {"success", "warning", "reused"} else 2
     if args.command == "validate-graph":
         result = validate_graph_dir(Path(args.graph_dir))
         _print_json({"ok": result.ok, "errors": result.errors}); return 0 if result.ok else 2
@@ -1668,6 +2468,7 @@ def main(argv=None):
 import json
 from pathlib import Path
 from dataclasses import dataclass
+from .agent_ledger import validate_single_writer
 from .graph_schema import validate_canonical_graph
 
 @dataclass(frozen=True)
@@ -1676,8 +2477,14 @@ class GraphDirValidation:
     errors: list[str]
 
 def validate_graph_dir(graph_dir: Path) -> GraphDirValidation:
-    required = ["manifest.json", "graphify-out/graph.json", "requirements/template-requirements.json", "coverage/chunk-ledger.json", "coverage/evidence-index.json", "coverage/template-readiness.json", "coverage/agent-run-ledger.json"]
+    required = ["manifest.json", "graphify-out/graph.json", "graphify-out/GRAPH_REPORT.md", "graphify-out/graph.html", "requirements/template-requirements.json", "coverage/chunk-ledger.json", "coverage/evidence-index.json", "coverage/template-readiness.json", "coverage/agent-run-ledger.json", "coverage/gap-report.md"]
     errors = [f"missing:{item}" for item in required if not (graph_dir / item).exists()]
+    agent_ledger_path = graph_dir / "coverage" / "agent-run-ledger.json"
+    agent_ledger = json.loads(agent_ledger_path.read_text(encoding="utf-8")) if agent_ledger_path.exists() else []
+    for record in agent_ledger:
+        if record.get("status") == "failed":
+            for error in record.get("errors", []):
+                errors.append(f"blocking_ledger:{error.get('code', 'unknown')}")
     if errors:
         return GraphDirValidation(False, errors)
     manifest = json.loads((graph_dir / "manifest.json").read_text(encoding="utf-8"))
@@ -1687,7 +2494,9 @@ def validate_graph_dir(graph_dir: Path) -> GraphDirValidation:
     coverage_evidence = json.loads((graph_dir / "coverage" / "evidence-index.json").read_text(encoding="utf-8"))
     schema = validate_canonical_graph(graph)
     readiness = json.loads((graph_dir / "coverage" / "template-readiness.json").read_text(encoding="utf-8"))
-    agent_ledger = json.loads((graph_dir / "coverage" / "agent-run-ledger.json").read_text(encoding="utf-8"))
+    single_writer = validate_single_writer(agent_ledger)
+    if not single_writer.ok:
+        errors.extend(single_writer.errors)
     allowed_statuses = {"covered", "needs_review", "not_found_in_source"}
     requirement_templates = {record["template_name"] for record in requirements["templates"]}
     readiness_templates = {record["template_name"] for record in readiness}
@@ -1732,6 +2541,8 @@ def validate_graph_dir(graph_dir: Path) -> GraphDirValidation:
         errors.append("blocking_failure_ledger")
     if manifest.get("stage_status", {}).get("stage1") != "success":
         errors.append(f"stage1_not_success:{manifest.get('stage_status', {}).get('stage1')}")
+    if manifest.get("stage_status", {}).get("stage1") == "success" and any(record.get("status") != "completed" for record in agent_ledger):
+        errors.append("agent_run_not_completed")
     errors.extend(schema.errors)
     return GraphDirValidation(ok=not errors, errors=errors)
 ```
@@ -1749,7 +2560,7 @@ Expected: tests pass, including idempotent reuse and source hash change detectio
 Run:
 
 ```powershell
-$env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; python skill-src\storygraph\scripts\storygraph.py build-stage1 --source 'E:\AI_Projects\CultivationWorld\docs\世界观参考\凡人修仙传\凡人修仙传.txt' --template-dir 'E:\AI_Projects\CultivationWorld\docs\世界观参考\模板' --graphify-repo 'E:\Github_Projects\graphify'; python skill-src\storygraph\scripts\storygraph.py validate-graph --graph-dir 'E:\AI_Projects\CultivationWorld\docs\世界观参考\凡人修仙传\凡人修仙传.storygraph'
+$env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; python skill-src\storygraph\scripts\storygraph.py build-stage1 --source 'E:\AI_Projects\CultivationWorld\docs\世界观参考\凡人修仙传\凡人修仙传.txt' --template-dir 'E:\AI_Projects\CultivationWorld\docs\世界观参考\模板' --graphify-repo 'E:\Github_Projects\graphify'; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; python skill-src\storygraph\scripts\storygraph.py validate-graph --graph-dir 'E:\AI_Projects\CultivationWorld\docs\世界观参考\凡人修仙传\凡人修仙传.storygraph'; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
 
 Expected: this intentionally creates or reuses the external `.storygraph` directory beside the novel. Re-running the same command without changing the novel reports `"status": "reused"`; `validate-graph` performs deep schema/readiness/evidence validation and exits `0`.
@@ -1757,10 +2568,12 @@ Expected: this intentionally creates or reuses the external `.storygraph` direct
 Commit:
 
 ```powershell
-$env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; git -c core.quotePath=false add skill-src\storygraph\scripts\storygraph_lib skill-src\storygraph\scripts\storygraph.py docs\storygraph-cli.md tests; git commit -m "feat: add storygraph stage1 pipeline and validation"
+$env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; git -c core.quotePath=false add skill-src\storygraph\scripts\storygraph_lib skill-src\storygraph\scripts\storygraph.py docs\storygraph-cli.md tests; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; git commit -m "feat: add storygraph stage1 pipeline and validation"; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
 
 ### Task 9: Stage 2 Extraction Schema, No-Overwrite Draft Policy, Docs, And Final Verification
+
+This task is a Stage 2 schema scaffold only. It defines executable contracts for future extraction, ledgers, evidence usage, output policy, and validation; it does not implement full template rendering or content generation.
 
 **Files:**
 - Create: `E:\AI_Projects\StoryGraph\skill-src\storygraph\scripts\storygraph_lib\stage2_schema.py`
@@ -1774,22 +2587,40 @@ $env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UT
 
 ```python
 # tests/test_stage2_schema.py
-from storygraph_lib.stage2_schema import make_extraction_record, validate_extraction_record
+from storygraph_lib.stage2_schema import make_extraction_record, make_template_evidence_usage, make_template_gap_report, make_template_run_ledger, validate_extraction_record
 
 def test_stage2_extraction_record_requires_evidence_categories():
+    config = {"output_language": "zh-CN", "stage2_categories": {"facts": "原作事实", "judgments": "我的判断", "pending_verifications": "待核验", "not_found_items": "未见可靠证据"}, "stage2_output_policy": {"default_dir": "drafts", "allowed_policies": ["draft", "backup-and-overwrite", "merge"], "draft_action": "write_draft"}}
     record = make_extraction_record(
         template_name="法宝分析",
         template_file="法宝分析模板.md",
         source_graph="凡人修仙传.storygraph/graphify-out/graph.json",
         source_novel="凡人修仙传.txt",
         requirement_id="法宝分析.required_fields.法宝",
-        evidence_id="evidence:abc"
+        evidence_id="evidence:abc",
+        policy=config
     )
     assert record["facts"][0]["category"] == "原作事实"
     assert record["judgments"][0]["category"] == "我的判断"
     assert record["pending_verifications"][0]["category"] == "待核验"
     assert record["not_found_items"][0]["category"] == "未见可靠证据"
+    assert record["coverage_scope"]["stage1_chunk_ledger"] == "coverage/chunk-ledger.json"
+    assert record["coverage_scope"]["chunk_ranges"] == []
     assert validate_extraction_record(record).ok is True
+
+def test_stage2_scaffold_ledgers_cover_37_templates_and_evidence_usage():
+    templates = [f"模板{i:02d}" for i in range(37)]
+    ledger = make_template_run_ledger(templates, chunk_ranges=[{"chunk_id": "chunk-0001", "source_range": [0, 100]}])
+    usage = make_template_evidence_usage("模板00", "evidence:abc", "chunk-0001", [0, 100])
+    gap = make_template_gap_report("模板00", "模板00.required_fields.法宝", "not_found_in_source")
+    assert len(ledger["template_tasks"]) == 37
+    assert ledger["artifact_paths"]["template_run_ledger"] == "coverage/template-run-ledger.json"
+    assert ledger["artifact_paths"]["template_evidence_usage"] == "coverage/template-evidence-usage.json"
+    assert ledger["artifact_paths"]["template_gap_report"] == "coverage/template-gap-report.md"
+    assert ledger["coverage_scope"]["stage1_chunk_ledger"] == "coverage/chunk-ledger.json"
+    assert ledger["coverage_scope"]["chunk_ranges"][0]["source_range"] == [0, 100]
+    assert usage["evidence_id"] == "evidence:abc"
+    assert gap["gaps"][0]["status"] == "not_found_in_source"
 ```
 
 ```python
@@ -1797,13 +2628,15 @@ def test_stage2_extraction_record_requires_evidence_categories():
 from pathlib import Path
 from storygraph_lib.stage2_schema import resolve_render_target
 
+POLICY = {"default_dir": "drafts", "allowed_policies": ["draft", "backup-and-overwrite", "merge"], "draft_action": "write_draft", "existing_document_action": "write_versioned_draft"}
+
 def test_default_policy_writes_draft_and_does_not_overwrite_existing_formal_doc(tmp_path):
     graph_dir = tmp_path / "凡人修仙传.storygraph"
     novel_dir = tmp_path
     graph_dir.mkdir()
     formal = novel_dir / "法宝分析.md"
     formal.write_text("用户已有文档", encoding="utf-8")
-    decision = resolve_render_target(graph_dir, novel_dir, "法宝分析", overwrite_policy="draft")
+    decision = resolve_render_target(graph_dir, novel_dir, "法宝分析", POLICY, overwrite_policy="draft")
     assert decision["target_path"] == str(graph_dir / "drafts" / "法宝分析.md")
     assert decision["action"] == "write_draft"
     assert decision["will_overwrite"] is False
@@ -1815,8 +2648,8 @@ def test_formal_target_can_only_be_used_by_backup_overwrite_or_merge_policy(tmp_
     graph_dir.mkdir()
     formal = novel_dir / "法宝分析.md"
     formal.write_text("用户已有文档", encoding="utf-8")
-    backup = resolve_render_target(graph_dir, novel_dir, "法宝分析", overwrite_policy="backup-and-overwrite")
-    merge = resolve_render_target(graph_dir, novel_dir, "法宝分析", overwrite_policy="merge")
+    backup = resolve_render_target(graph_dir, novel_dir, "法宝分析", POLICY, overwrite_policy="backup-and-overwrite")
+    merge = resolve_render_target(graph_dir, novel_dir, "法宝分析", POLICY, overwrite_policy="merge")
     assert backup["target_path"] == str(formal)
     assert backup["backup_path"].endswith("法宝分析.md.bak")
     assert backup["will_overwrite"] is True
@@ -1847,33 +2680,50 @@ class ExtractionValidation:
     ok: bool
     errors: list[str]
 
-def make_extraction_record(template_name, template_file, source_graph, source_novel, requirement_id, evidence_id):
+def make_extraction_record(template_name, template_file, source_graph, source_novel, requirement_id, evidence_id, policy):
+    categories = policy["stage2_categories"]
     fulfilled = {"requirement_id": requirement_id, "requirement_kind": "field", "status": "covered", "linked_node_ids": [], "linked_edge_ids": [], "linked_event_ids": [], "evidence_ids": [evidence_id], "notes": []}
     return {
         "template_name": template_name,
         "template_file": template_file,
         "source_graph": source_graph,
         "source_novel": source_novel,
-        "output_language": "zh-CN",
-        "coverage_scope": "whole_novel",
+        "output_language": policy["output_language"],
+        "coverage_scope": {"scope": "whole_novel", "stage1_chunk_ledger": "coverage/chunk-ledger.json", "chunk_ranges": [], "ledger_path": "coverage/template-run-ledger.json"},
         "fulfilled_sections": [fulfilled],
         "fulfilled_fields": [fulfilled],
         "fulfilled_tables": [],
         "fulfilled_cards": [],
         "fulfilled_cases": [],
-        "facts": [{"content": "原作事实需引用证据", "category": "原作事实", "evidence_ids": [evidence_id], "source_locations": [], "confidence": "EXTRACTED"}],
-        "judgments": [{"content": "基于证据的分析判断", "category": "我的判断", "evidence_ids": [evidence_id], "source_locations": [], "confidence": "INFERRED"}],
-        "pending_verifications": [{"content": "证据不足的条目", "category": "待核验", "evidence_ids": [], "source_locations": [], "confidence": "AMBIGUOUS"}],
-        "not_found_items": [{"content": "全文图和分块账本未见可靠证据", "category": "未见可靠证据", "evidence_ids": [], "source_locations": [], "confidence": "AMBIGUOUS"}],
+        "facts": [{"content": "原作事实需引用证据", "category": categories["facts"], "evidence_ids": [evidence_id], "source_locations": [], "confidence": "EXTRACTED"}],
+        "judgments": [{"content": "基于证据的分析判断", "category": categories["judgments"], "evidence_ids": [evidence_id], "source_locations": [], "confidence": "INFERRED"}],
+        "pending_verifications": [{"content": "证据不足的条目", "category": categories["pending_verifications"], "evidence_ids": [], "source_locations": [], "confidence": "AMBIGUOUS"}],
+        "not_found_items": [{"content": "全文图和分块账本未见可靠证据", "category": categories["not_found_items"], "evidence_ids": [], "source_locations": [], "confidence": "AMBIGUOUS"}],
         "evidence_citations": [evidence_id],
         "gap_items": [],
-        "render_target": "drafts",
+        "render_target": policy["stage2_output_policy"]["default_dir"],
         "overwrite_policy": "draft"
     }
 
-def resolve_render_target(graph_dir: Path, novel_dir: Path, template_name: str, overwrite_policy: str = "draft") -> dict:
+def make_template_run_ledger(template_names, chunk_ranges):
+    return {
+        "schema": "template-run-ledger.json",
+        "artifact_paths": {"template_run_ledger": "coverage/template-run-ledger.json", "template_evidence_usage": "coverage/template-evidence-usage.json", "template_gap_report": "coverage/template-gap-report.md"},
+        "coverage_scope": {"scope": "whole_novel", "stage1_chunk_ledger": "coverage/chunk-ledger.json", "chunk_ranges": chunk_ranges},
+        "template_tasks": [{"template_name": name, "status": "pending", "assigned_chunks": [c["chunk_id"] for c in chunk_ranges], "output_record": None, "errors": []} for name in template_names]
+    }
+
+def make_template_evidence_usage(template_name, evidence_id, chunk_id, source_range):
+    return {"schema": "template-evidence-usage.json", "template_name": template_name, "evidence_id": evidence_id, "chunk_id": chunk_id, "source_range": source_range, "used_by_fields": [], "used_by_sections": []}
+
+def make_template_gap_report(template_name, requirement_id, status):
+    return {"schema": "template-gap-report.md", "artifact_path": "coverage/template-gap-report.md", "gaps": [{"template_name": template_name, "requirement_id": requirement_id, "status": status, "evidence_ids": [], "notes": []}]}
+
+def resolve_render_target(graph_dir: Path, novel_dir: Path, template_name: str, output_policy: dict, overwrite_policy: str = "draft") -> dict:
+    if overwrite_policy not in output_policy["allowed_policies"]:
+        raise ValueError(f"unsupported overwrite_policy: {overwrite_policy}")
     formal = novel_dir / f"{template_name}.md"
-    draft = graph_dir / "drafts" / f"{template_name}.md"
+    draft = graph_dir / output_policy["default_dir"] / f"{template_name}.md"
     if overwrite_policy == "draft":
         return {"target_path": str(draft), "backup_path": None, "action": "write_draft", "will_overwrite": False}
     if overwrite_policy == "backup-and-overwrite":
@@ -1883,8 +2733,11 @@ def resolve_render_target(graph_dir: Path, novel_dir: Path, template_name: str, 
     raise ValueError(f"unsupported overwrite_policy: {overwrite_policy}")
 
 def validate_extraction_record(record):
-    required = ["template_name", "source_graph", "coverage_scope", "facts", "evidence_citations", "overwrite_policy"]
+    required = ["template_name", "source_graph", "coverage_scope", "fulfilled_sections", "facts", "judgments", "pending_verifications", "not_found_items", "evidence_citations", "overwrite_policy"]
     errors = [f"missing:{key}" for key in required if key not in record]
+    scope = record.get("coverage_scope")
+    if not isinstance(scope, dict) or scope.get("stage1_chunk_ledger") != "coverage/chunk-ledger.json":
+        errors.append("invalid_coverage_scope")
     for fact in record.get("facts", []):
         if fact.get("category") == "原作事实" and not fact.get("evidence_ids"):
             errors.append("fact_without_evidence")
@@ -1900,13 +2753,13 @@ def validate_extraction_record(record):
 ## Validate skill
 
 ```powershell
-$env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; python skill-src\storygraph\scripts\storygraph.py validate-skill --skill-root skill-src\storygraph
+$env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; python skill-src\storygraph\scripts\storygraph.py validate-skill --skill-root skill-src\storygraph; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
 
 ## Build stage 1 graph
 
 ```powershell
-$env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; python skill-src\storygraph\scripts\storygraph.py build-stage1 --source '<novel.txt>' --template-dir '<template-dir>' --graphify-repo '<graphify-repo>'
+$env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; python skill-src\storygraph\scripts\storygraph.py build-stage1 --source '<novel.txt>' --template-dir '<template-dir>' --graphify-repo '<graphify-repo>'; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
 
 ## Stage 2 output policy
@@ -1927,7 +2780,7 @@ Expected: every test file in `tests\` passes.
 Run:
 
 ```powershell
-$env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; python -m pytest tests\test_stage2_schema.py tests\test_stage2_policy.py -v; python skill-src\storygraph\scripts\storygraph.py validate-skill --skill-root skill-src\storygraph
+$env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; python -m pytest tests\test_stage2_schema.py tests\test_stage2_policy.py -v; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; python skill-src\storygraph\scripts\storygraph.py validate-skill --skill-root skill-src\storygraph; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
 
 Expected: stage 2 tests pass; `validate-skill` prints `{'ok': True, 'missing': []}` and exits `0`.
@@ -1935,7 +2788,7 @@ Expected: stage 2 tests pass; `validate-skill` prints `{'ok': True, 'missing': [
 - [ ] **Step 6: Commit docs and stage 2 schema scaffolding**
 
 ```powershell
-$env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; git -c core.quotePath=false add skill-src docs tests\test_stage2_schema.py tests\test_stage2_policy.py; git commit -m "feat: add stage2 extraction schema and output policy"
+$env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; git -c core.quotePath=false add skill-src docs tests\test_stage2_schema.py tests\test_stage2_policy.py; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; git commit -m "feat: add stage2 extraction schema and output policy"; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
 
 ## Final Review Gate For Implementers
@@ -1947,23 +2800,23 @@ $env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UT
 ```
 
 ```powershell
-$env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; python skill-src\storygraph\scripts\storygraph.py validate-skill --skill-root skill-src\storygraph
+$env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; python skill-src\storygraph\scripts\storygraph.py validate-skill --skill-root skill-src\storygraph; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
 
 ```powershell
-$env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; python skill-src\storygraph\scripts\storygraph.py inspect-templates --template-dir 'E:\AI_Projects\CultivationWorld\docs\世界观参考\模板'
+$env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; python skill-src\storygraph\scripts\storygraph.py inspect-templates --template-dir 'E:\AI_Projects\CultivationWorld\docs\世界观参考\模板'; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
 
 ```powershell
-$env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; python skill-src\storygraph\scripts\storygraph.py build-stage1 --source 'E:\AI_Projects\CultivationWorld\docs\世界观参考\凡人修仙传\凡人修仙传.txt' --template-dir 'E:\AI_Projects\CultivationWorld\docs\世界观参考\模板' --graphify-repo 'E:\Github_Projects\graphify'; python skill-src\storygraph\scripts\storygraph.py validate-graph --graph-dir 'E:\AI_Projects\CultivationWorld\docs\世界观参考\凡人修仙传\凡人修仙传.storygraph'
+$env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; python skill-src\storygraph\scripts\storygraph.py build-stage1 --source 'E:\AI_Projects\CultivationWorld\docs\世界观参考\凡人修仙传\凡人修仙传.txt' --template-dir 'E:\AI_Projects\CultivationWorld\docs\世界观参考\模板' --graphify-repo 'E:\Github_Projects\graphify'; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; python skill-src\storygraph\scripts\storygraph.py validate-graph --graph-dir 'E:\AI_Projects\CultivationWorld\docs\世界观参考\凡人修仙传\凡人修仙传.storygraph'; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
 
 ```powershell
-$env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; python skill-src\storygraph\scripts\storygraph.py build-stage1 --source 'E:\AI_Projects\CultivationWorld\docs\世界观参考\凡人修仙传\凡人修仙传.txt' --template-dir 'E:\AI_Projects\CultivationWorld\docs\世界观参考\模板' --graphify-repo 'E:\Github_Projects\graphify'
+$env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; python skill-src\storygraph\scripts\storygraph.py build-stage1 --source 'E:\AI_Projects\CultivationWorld\docs\世界观参考\凡人修仙传\凡人修仙传.txt' --template-dir 'E:\AI_Projects\CultivationWorld\docs\世界观参考\模板' --graphify-repo 'E:\Github_Projects\graphify'; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
 
 ```powershell
-$env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; Copy-Item -LiteralPath 'E:\AI_Projects\CultivationWorld\docs\世界观参考\凡人修仙传\凡人修仙传.txt' -Destination "$env:TEMP\storygraph-hash-change.txt" -Force; Add-Content -LiteralPath "$env:TEMP\storygraph-hash-change.txt" -Value "`n临时hash变化验证" -Encoding UTF8; python skill-src\storygraph\scripts\storygraph.py build-stage1 --source "$env:TEMP\storygraph-hash-change.txt" --template-dir 'E:\AI_Projects\CultivationWorld\docs\世界观参考\模板' --graphify-repo 'E:\Github_Projects\graphify'; Add-Content -LiteralPath "$env:TEMP\storygraph-hash-change.txt" -Value "`n第二次变化" -Encoding UTF8; python skill-src\storygraph\scripts\storygraph.py build-stage1 --source "$env:TEMP\storygraph-hash-change.txt" --template-dir 'E:\AI_Projects\CultivationWorld\docs\世界观参考\模板' --graphify-repo 'E:\Github_Projects\graphify'
+$env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; Copy-Item -LiteralPath 'E:\AI_Projects\CultivationWorld\docs\世界观参考\凡人修仙传\凡人修仙传.txt' -Destination "$env:TEMP\storygraph-hash-change.txt" -Force; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; Add-Content -LiteralPath "$env:TEMP\storygraph-hash-change.txt" -Value "`n临时hash变化验证" -Encoding UTF8; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; python skill-src\storygraph\scripts\storygraph.py build-stage1 --source "$env:TEMP\storygraph-hash-change.txt" --template-dir 'E:\AI_Projects\CultivationWorld\docs\世界观参考\模板' --graphify-repo 'E:\Github_Projects\graphify'; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; Add-Content -LiteralPath "$env:TEMP\storygraph-hash-change.txt" -Value "`n第二次变化" -Encoding UTF8; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; python skill-src\storygraph\scripts\storygraph.py build-stage1 --source "$env:TEMP\storygraph-hash-change.txt" --template-dir 'E:\AI_Projects\CultivationWorld\docs\世界观参考\模板' --graphify-repo 'E:\Github_Projects\graphify'; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
 
 ```powershell
@@ -1977,13 +2830,16 @@ $env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UT
 Expected review evidence:
 
 - `validate-skill` exits `0` and reports no missing skill structure.
-- `inspect-templates` reports `template_count` as `37` for existing `*模板.md` files and records README-only missing template files as `missing_template_file` warnings.
-- `build-stage1` creates or reuses the intentional external `.storygraph` directory beside the CultivationWorld source novel and writes `manifest.json`, `graphify-out\graph.json`, `requirements\template-requirements.json`, `coverage\chunk-ledger.json`, `coverage\evidence-index.json`, `coverage\template-readiness.json`, `coverage\agent-run-ledger.json`, and `coverage\gap-report.md`.
+- `inspect-templates` reports `template_count` as `37` for existing `*模板.md` files, records README-only missing template files as `missing_template_file` warnings, and proves all 37 templates use non-empty, non-generic graph mappings from config or template parsing rules rather than Python constants or `default_mapping`.
+- `build-stage1` creates or reuses the intentional external `.storygraph` directory beside the CultivationWorld source novel and writes `manifest.json`, `graphify-out\graph.json`, `graphify-out\GRAPH_REPORT.md`, `graphify-out\graph.html`, `requirements\template-requirements.json`, `coverage\chunk-ledger.json`, `coverage\evidence-index.json`, `coverage\template-readiness.json`, `coverage\agent-run-ledger.json`, and `coverage\gap-report.md`.
 - `validate-graph` performs deep canonical validation for nodes, edges, events, evidence, `supports_templates`, status enums, stable ID prefixes, graphify-compatible fields, and 37-template readiness completeness.
+- Error handling evidence covers unreadable source with `source_unreadable`, invalid UTF-8 source with `source_encoding_error`, missing graphify artifacts with `graphify_artifact_missing`, chunk extraction failure, readiness below threshold, template without reliable evidence, and unparsable sub-agent JSON; failures must set `manifest.stage_status.stage1` to `failed` and must not write a `graphify-out\graph.json` that appears successful after graphify failure.
 - The immediate second `build-stage1` run with unchanged source reports `"status": "reused"`, proving idempotent no-rebuild behavior.
 - The hash-change command reports `"source_state": "changed"` after the temporary source text is modified.
-- The missing graphify command exits nonzero, returns `"status": "failed"`, writes a failed graphify adapter record into `coverage\agent-run-ledger.json` with `graphify_unavailable` or `graphify_failed`, and `validate-graph` treats that ledger record as blocking.
+- The missing graphify command exits nonzero, returns `"status": "failed"`, writes a failed graphify adapter record into `coverage\agent-run-ledger.json` with `graphify_unavailable`, `graphify_failed`, or `graphify_artifact_missing`, and `validate-graph` treats that ledger record as blocking via `blocking_ledger:<error_code>`.
+- `coverage\agent-run-ledger.json` includes at least the key Stage 1 roles: 模板需求分析、图抽取、覆盖审查、质量审查, with input paths, output paths, assigned chunks/templates, status, errors, and single-writer ownership.
 - `test_stage2_policy.py` proves default output goes to `drafts\`, existing formal Markdown is not overwritten, and formal overwrites happen only under `backup-and-overwrite` or `merge`.
+- Stage 2 scaffold evidence includes schemas or tests for `coverage\template-run-ledger.json`, `coverage\template-evidence-usage.json`, 37 template task records, chunk-ledger full-range references, and `coverage\template-gap-report.md`.
 - `template-readiness.json` contains 37 records, one per discovered template, and every requirement status is one of `covered`, `needs_review`, or `not_found_in_source`.
 - No implementation step modifies `E:\Github_Projects\graphify`; graphify is only read or invoked through adapter configuration.
 - No committed config file contains the local absolute template path, local graphify path, test novel path, repository name, or install destination as a global default.

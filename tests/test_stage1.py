@@ -4,781 +4,592 @@ from pathlib import Path
 
 import pytest
 
-from storygraph_lib.stage1 import _graphify_adapter, _read_graphify_artifacts, build_stage1_graph
-from storygraph_lib.validation import validate_graph_dir
 
-
-MANAGED_OUTPUTS = [
-    "manifest.json",
-    "graphify-out/graph.json",
-    "graphify-out/GRAPH_REPORT.md",
-    "graphify-out/graph.html",
-    "requirements/template-requirements.json",
-    "coverage/chunk-ledger.json",
-    "coverage/evidence-index.json",
-    "coverage/template-readiness.json",
-    "coverage/agent-run-ledger.json",
-    "coverage/gap-report.md",
-]
-
-
-def _graphify_command():
-    script = (
-        "import json,pathlib,sys; "
-        "out=pathlib.Path(sys.argv[2]); out.mkdir(parents=True, exist_ok=True); "
-        "graph={'schema_version':'1.0','graphify_schema_version':'test',"
-        "'storygraph_schema_version':'1.0','nodes':[],'edges':[],'hyperedges':[],"
-        "'events':[],'evidence_index':[],'metadata':{'graphify_schema_version':'test'}}; "
-        "(out/'graph.json').write_text(json.dumps(graph, ensure_ascii=False), encoding='utf-8'); "
-        "(out/'GRAPH_REPORT.md').write_text('# Graph Report\\n', encoding='utf-8'); "
-        "(out/'graph.html').write_text('<!doctype html><title>graph</title>', encoding='utf-8')"
-    )
-    return [sys.executable, "-c", script, "{source}", "{output_dir}"]
-
-
-def _graphify_command_with(script_body: str):
-    return [sys.executable, "-c", script_body, "{source}", "{output_dir}"]
-
-
-def _config(template_dir: Path, graphify_repo: Path | None = None) -> dict:
-    return {
-        "graph_dir_suffix": ".storygraph",
-        "output_language": "zh-CN",
-        "paths": {
-            "template_dir": str(template_dir),
-            "graphify_repo": str(graphify_repo) if graphify_repo else None,
-        },
-        "template_discovery": {
-            "glob": "*模板.md",
-            "readme_index_file": "README.md",
-            "exclude_files": ["README.md"],
-            "readme_missing_policy": "warn",
-        },
-        "template_parser_rules": {
-            "field_headings": ["字段"],
-            "table_markers": ["|", "表格"],
-            "card_markers": ["卡片"],
-            "case_markers": ["案例"],
-            "evidence_markers": ["证据", "原文"],
-            "gap_markers": ["缺口", "待核验"],
-        },
-        "template_graph_mappings": {
-            "法宝分析": {
-                "graph_node_mapping": ["artifact"],
-                "graph_event_mapping": ["artifact_gain"],
-                "graph_relation_mapping": ["artifact_influence"],
-            },
-            "default_mapping": {
-                "graph_node_mapping": ["template_specific_node"],
-                "graph_event_mapping": ["template_specific_event"],
-                "graph_relation_mapping": ["template_specific_relation"],
-            },
-        },
-        "status_enums": {
-            "requirement_statuses": ["covered", "needs_review", "not_found_in_source"],
-            "verification_statuses": ["verified", "needs_review", "rejected"],
-            "confidence_levels": ["EXTRACTED", "INFERRED", "AMBIGUOUS"],
-        },
-        "template_count_policy": {
-            "expected_existing_templates": 1,
-            "enforce_integration_count": False,
-        },
-        "graphify_adapter": {
-            "mode": "local-repo-or-cli",
-            "command": _graphify_command(),
-            "timeout_seconds": 5,
-        },
-        "chunk_strategy": {
-            "mode": "chapter-aware",
-            "fallback_mode": "bounded-chars",
-            "max_chars": 100,
-            "overlap_chars": 0,
-            "chapter_heading_patterns": ["^第.+章"],
-        },
-        "evidence_matching_strategy": {"mode": "substring", "case_sensitive": False},
-        "coverage_thresholds": {
-            "require_all_chunks_scanned": True,
-            "readiness_warning_threshold": 0.8,
-            "block_on_low_readiness": True,
-            "block_on_template_without_reliable_evidence": True,
-            "block_on_unparsable_subagent_json": True,
-        },
-        "agent_policy": {"sub_agent_json_payloads": []},
-        "writer_policy": {"managed_outputs": MANAGED_OUTPUTS},
+def _valid_embedded_lane_output(**overrides):
+    payload = {
+        "run_id": "run-001",
+        "task_packet_id": "chunk-0001:entities_resources:attempt-001",
+        "chunk_id": "chunk-0001",
+        "lane_id": "entities_resources",
+        "agent_role": "stage1 lane extraction agent",
+        "model_or_agent_identity": "codex-subagent",
+        "extracted_nodes": [],
+        "extracted_edges": [],
+        "extracted_events": [],
+        "extracted_evidence": [],
+        "supports_templates": [],
+        "uncertainties": [],
+        "rejected_candidates": [],
+        "structured_failures": [],
+        "output_status": "completed",
+        "produced_at": "2026-06-20T00:00:00Z",
     }
+    payload.update(overrides)
+    return payload
 
 
-def _write_template(template_dir: Path, body: str | None = None) -> None:
-    template_dir.mkdir(exist_ok=True)
-    (template_dir / "法宝分析模板.md").write_text(
-        body or "# 法宝分析模板\n## 字段\n- 法宝\n## 法宝卡片\n- 小瓶\n## 证据要求\n- 原文位置",
+def _write_merge_ready_bundle(
+    graph_dir: Path,
+    *,
+    queue_status: str = "ready",
+    required_lane_ids: list[str] | None = None,
+    lane_outputs: list[dict] | None = None,
+    bundle_paths: list[str] | None = None,
+) -> None:
+    queue = graph_dir / "intermediate" / "merge-queue.json"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    paths = bundle_paths or ["intermediate/reviewed-bundles/chunk-0001.json"]
+    queue.write_text(
+        json.dumps(
+            {
+                "status": queue_status,
+                "bundle_paths": paths,
+                "required_lane_ids": required_lane_ids
+                if required_lane_ids is not None
+                else ["entities_resources"],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    bundle = graph_dir / "intermediate" / "reviewed-bundles" / "chunk-0001.json"
+    bundle.parent.mkdir(parents=True, exist_ok=True)
+    bundle.write_text(
+        json.dumps(
+            {
+                "chunk_id": "chunk-0001",
+                "source_range": [0, 12],
+                "lane_outputs": lane_outputs
+                if lane_outputs is not None
+                else [_valid_embedded_lane_output()],
+                "review_findings": [],
+                "errors": [],
+                "ready_for_merge": True,
+                "reviewer_status": "passed",
+                "lane_output_paths": [
+                    "intermediate/lane-outputs/chunk-0001/entities_resources/run-001.json"
+                ],
+                "normalized_nodes": [],
+                "normalized_edges": [],
+                "normalized_events": [],
+                "normalized_evidence": [],
+            },
+            ensure_ascii=False,
+        ),
         encoding="utf-8",
     )
 
 
-def test_stage1_build_merges_real_template_aware_supplements(tmp_path):
-    novel = tmp_path / "mini_novel.txt"
-    novel.write_text("第一章\n韩立获得小瓶。法宝卡片记载小瓶影响法宝资源获取。", encoding="utf-8")
-    template_dir = tmp_path / "templates"
-    graphify_repo = tmp_path / "graphify"
-    graphify_repo.mkdir()
-    _write_template(template_dir)
-
-    result = build_stage1_graph(novel, _config(template_dir, graphify_repo))
-
-    graph_dir = tmp_path / "mini_novel.storygraph"
-    graph = json.loads((graph_dir / "graphify-out" / "graph.json").read_text(encoding="utf-8"))
-    readiness = json.loads(
-        (graph_dir / "coverage" / "template-readiness.json").read_text(encoding="utf-8")
-    )
-    ledger = json.loads(
-        (graph_dir / "coverage" / "agent-run-ledger.json").read_text(encoding="utf-8")
-    )
-    manifest = json.loads((graph_dir / "manifest.json").read_text(encoding="utf-8"))
-    requirements = json.loads(
-        (graph_dir / "requirements" / "template-requirements.json").read_text(encoding="utf-8")
-    )
-
-    assert result["status"] == "success"
-    assert result["manifest_written"] is True
-    assert graph["nodes"] and graph["edges"] and graph["events"] and graph["evidence_index"]
-    assert readiness[0]["requirement_statuses"]
-    assert {record["status"] for record in ledger} == {"completed"}
-    assert manifest["stage_status"]["stage1"] == "success"
-    assert requirements["templates"][0]["template_name"] == "法宝分析"
-    assert validate_graph_dir(graph_dir).ok is True
+@pytest.fixture
+def graph_dir_without_agent_outputs(graph_dir):
+    return graph_dir
 
 
-def test_stage1_graphify_unavailable_is_blocking_failed(tmp_path):
-    novel = tmp_path / "mini_novel.txt"
-    novel.write_text("法宝", encoding="utf-8")
-    template_dir = tmp_path / "templates"
-    _write_template(template_dir, "# 法宝分析模板\n## 字段\n- 法宝")
-
-    result = build_stage1_graph(novel, _config(template_dir, tmp_path / "missing-graphify"))
-    second = build_stage1_graph(novel, _config(template_dir, tmp_path / "missing-graphify"))
-
-    graph_dir = tmp_path / "mini_novel.storygraph"
-    ledger = json.loads((graph_dir / "coverage" / "agent-run-ledger.json").read_text(encoding="utf-8"))
-    assert result["status"] == "failed"
-    assert second["status"] == "failed"
-    assert not (graph_dir / "graphify-out" / "graph.json").exists()
-    failed = next(record for record in ledger if record["status"] == "failed")
-    assert failed["agent_role"] == "图抽取"
-    assert failed["errors"][0]["code"] == "graphify_unavailable"
+@pytest.fixture
+def graph_dir_with_reviewed_outputs(graph_dir):
+    _write_merge_ready_bundle(graph_dir)
+    return graph_dir
 
 
-def test_stage1_empty_graphify_command_is_structured_failure_and_writes_outputs(tmp_path):
-    novel = tmp_path / "mini_novel.txt"
-    novel.write_text("法宝", encoding="utf-8")
-    template_dir = tmp_path / "templates"
-    _write_template(template_dir, "# 法宝分析模板\n## 字段\n- 法宝")
-    config = _config(template_dir, graphify_repo=None)
+@pytest.fixture
+def config_with_graphify_success(config):
     config["graphify_adapter"] = {
         "mode": "cli",
-        "command": [],
-        "timeout_seconds": 5,
-    }
-
-    graph_dir = tmp_path / "mini_novel.storygraph"
-    stale_out = graph_dir / "graphify-out"
-    stale_out.mkdir(parents=True)
-    (stale_out / "graph.json").write_text("{}", encoding="utf-8")
-    (stale_out / "GRAPH_REPORT.md").write_text("# stale\n", encoding="utf-8")
-    (stale_out / "graph.html").write_text("<!doctype html>", encoding="utf-8")
-
-    result = build_stage1_graph(novel, config)
-
-    manifest = json.loads((graph_dir / "manifest.json").read_text(encoding="utf-8"))
-    ledger = json.loads((graph_dir / "coverage" / "agent-run-ledger.json").read_text(encoding="utf-8"))
-    gap = (graph_dir / "coverage" / "gap-report.md").read_text(encoding="utf-8")
-    validation = validate_graph_dir(graph_dir)
-    assert result["status"] == "failed"
-    assert result["error"]["code"] == "graphify_bad_command"
-    assert "graphify_bad_command" in result["validation_errors"]
-    assert manifest["stage_status"]["stage1"] == "failed"
-    assert any(
-        error["code"] == "graphify_bad_command"
-        for record in ledger
-        for error in record.get("errors", [])
-    )
-    assert "graphify_bad_command" in gap
-    assert "blocking_ledger:graphify_bad_command" in validation.errors
-    assert not (graph_dir / "graphify-out" / "graph.json").exists()
-    assert not (graph_dir / "graphify-out" / "GRAPH_REPORT.md").exists()
-    assert not (graph_dir / "graphify-out" / "graph.html").exists()
-
-
-def test_stage1_bad_graphify_timeout_is_structured_failure_and_writes_outputs(tmp_path):
-    novel = tmp_path / "mini_novel.txt"
-    novel.write_text("法宝", encoding="utf-8")
-    template_dir = tmp_path / "templates"
-    _write_template(template_dir, "# 法宝分析模板\n## 字段\n- 法宝")
-    config = _config(template_dir, graphify_repo=None)
-    config["graphify_adapter"] = {
-        "mode": "cli",
-        "command": _graphify_command(),
-        "timeout_seconds": "not-an-int",
-    }
-
-    adapter_result = _graphify_adapter(config).build_graph(novel, tmp_path / "direct-out")
-    result = build_stage1_graph(novel, config)
-
-    graph_dir = tmp_path / "mini_novel.storygraph"
-    manifest = json.loads((graph_dir / "manifest.json").read_text(encoding="utf-8"))
-    ledger = json.loads((graph_dir / "coverage" / "agent-run-ledger.json").read_text(encoding="utf-8"))
-    gap = (graph_dir / "coverage" / "gap-report.md").read_text(encoding="utf-8")
-    validation = validate_graph_dir(graph_dir)
-    assert adapter_result.ok is False
-    assert adapter_result.error["code"] == "graphify_bad_command"
-    assert result["status"] == "failed"
-    assert result["error"]["code"] == "graphify_bad_command"
-    assert manifest["stage_status"]["stage1"] == "failed"
-    assert any(
-        error["code"] == "graphify_bad_command"
-        for record in ledger
-        for error in record.get("errors", [])
-    )
-    assert "graphify_bad_command" in gap
-    assert "blocking_ledger:graphify_bad_command" in validation.errors
-
-
-def test_stage1_bad_graphify_mode_is_structured_failure_and_writes_outputs(tmp_path):
-    novel = tmp_path / "mini_novel.txt"
-    novel.write_text("法宝", encoding="utf-8")
-    template_dir = tmp_path / "templates"
-    _write_template(template_dir, "# 法宝分析模板\n## 字段\n- 法宝")
-    config = _config(template_dir, graphify_repo=None)
-    config["graphify_adapter"] = {
-        "mode": "bad-mode",
-        "command": _graphify_command(),
-        "timeout_seconds": 5,
-    }
-
-    result = build_stage1_graph(novel, config)
-
-    graph_dir = tmp_path / "mini_novel.storygraph"
-    manifest = json.loads((graph_dir / "manifest.json").read_text(encoding="utf-8"))
-    ledger = json.loads((graph_dir / "coverage" / "agent-run-ledger.json").read_text(encoding="utf-8"))
-    assert result["status"] == "failed"
-    assert result["error"]["code"] == "graphify_bad_command"
-    assert result["error"]["mode"] == "bad-mode"
-    assert manifest["stage_status"]["stage1"] == "failed"
-    assert any(
-        error["code"] == "graphify_bad_command"
-        for record in ledger
-        for error in record.get("errors", [])
-    )
-
-
-def test_stage1_readiness_below_threshold_and_template_without_reliable_evidence_fail(tmp_path):
-    novel = tmp_path / "mini_novel.txt"
-    novel.write_text("完全无关正文", encoding="utf-8")
-    template_dir = tmp_path / "templates"
-    graphify_repo = tmp_path / "graphify"
-    graphify_repo.mkdir()
-    _write_template(template_dir, "# 法宝分析模板\n## 字段\n- 法宝")
-
-    result = build_stage1_graph(novel, _config(template_dir, graphify_repo))
-
-    graph_dir = tmp_path / "mini_novel.storygraph"
-    manifest = json.loads((graph_dir / "manifest.json").read_text(encoding="utf-8"))
-    gap = (graph_dir / "coverage" / "gap-report.md").read_text(encoding="utf-8")
-    ledger = json.loads((graph_dir / "coverage" / "agent-run-ledger.json").read_text(encoding="utf-8"))
-    assert result["status"] == "failed"
-    assert manifest["stage_status"]["stage1"] == "failed"
-    assert "readiness_below_threshold" in gap
-    assert "template_without_reliable_evidence" in gap
-    assert any(
-        error["code"] == "readiness_below_threshold"
-        for record in ledger
-        for error in record["errors"]
-    )
-
-
-def test_stage1_chunk_extraction_failure_writes_failed_chunk_ledger(tmp_path, monkeypatch):
-    import storygraph_lib.stage1 as stage1_mod
-
-    novel = tmp_path / "mini_novel.txt"
-    novel.write_text("法宝", encoding="utf-8")
-    template_dir = tmp_path / "templates"
-    graphify_repo = tmp_path / "graphify"
-    graphify_repo.mkdir()
-    _write_template(template_dir, "# 法宝分析模板\n## 字段\n- 法宝")
-
-    def fail_chunks(*args, **kwargs):
-        raise ValueError("chunk boom")
-
-    monkeypatch.setattr(stage1_mod, "make_chunk_ledger", fail_chunks)
-
-    result = build_stage1_graph(novel, _config(template_dir, graphify_repo))
-
-    graph_dir = tmp_path / "mini_novel.storygraph"
-    chunks = json.loads((graph_dir / "coverage" / "chunk-ledger.json").read_text(encoding="utf-8"))
-    manifest = json.loads((graph_dir / "manifest.json").read_text(encoding="utf-8"))
-    assert result["status"] == "failed"
-    assert manifest["stage_status"]["stage1"] == "failed"
-    assert chunks[0]["extraction_status"] == "failed"
-    assert chunks[0]["failure"]["code"] == "chunk_extraction_failure"
-    assert chunks[0]["processor"] == "storygraph-stage1"
-
-
-def test_stage1_unparsable_subagent_json_fails_and_records_ledger(tmp_path):
-    novel = tmp_path / "mini_novel.txt"
-    novel.write_text("法宝", encoding="utf-8")
-    template_dir = tmp_path / "templates"
-    graphify_repo = tmp_path / "graphify"
-    graphify_repo.mkdir()
-    _write_template(template_dir, "# 法宝分析模板\n## 字段\n- 法宝")
-    config = _config(template_dir, graphify_repo)
-    config["agent_policy"]["sub_agent_json_payloads"] = ["{not json"]
-
-    result = build_stage1_graph(novel, config)
-
-    graph_dir = tmp_path / "mini_novel.storygraph"
-    ledger = json.loads((graph_dir / "coverage" / "agent-run-ledger.json").read_text(encoding="utf-8"))
-    gap = (graph_dir / "coverage" / "gap-report.md").read_text(encoding="utf-8")
-    assert result["status"] == "failed"
-    assert any(
-        error["code"] == "unparsable_subagent_json"
-        for record in ledger
-        for error in record["errors"]
-    )
-    assert "unparsable_subagent_json" in gap
-
-
-def test_stage1_deep_subagent_payload_is_structured_failure(tmp_path):
-    novel = tmp_path / "mini_novel.txt"
-    novel.write_text("法宝", encoding="utf-8")
-    template_dir = tmp_path / "templates"
-    _write_template(template_dir, "# 法宝分析模板\n## 字段\n- 法宝")
-    graphify_repo = tmp_path / "graphify"
-    graphify_repo.mkdir()
-    config = _config(template_dir, graphify_repo)
-    config["agent_policy"]["sub_agent_json_payloads"] = [
-        "[" * 20000 + "0" + "]" * 20000
-    ]
-
-    result = build_stage1_graph(novel, config)
-
-    assert result["status"] == "failed"
-    assert "unparsable_subagent_json" in result["validation_errors"]
-    assert result["error"]["code"] == "unparsable_subagent_json"
-
-
-def test_stage1_single_writer_conflict_fails_before_success_outputs(tmp_path, monkeypatch):
-    import storygraph_lib.stage1 as stage1_mod
-    from storygraph_lib.agent_ledger import make_agent_run_record
-
-    novel = tmp_path / "mini_novel.txt"
-    novel.write_text("法宝", encoding="utf-8")
-    template_dir = tmp_path / "templates"
-    graphify_repo = tmp_path / "graphify"
-    graphify_repo.mkdir()
-    _write_template(template_dir, "# 法宝分析模板\n## 字段\n- 法宝")
-
-    def conflicting_records(chunk_ids, template_names):
-        return [
-            make_agent_run_record(
-                "run-a",
-                "模板需求分析",
-                "stage1",
-                [],
-                template_names,
-                ["source"],
-                ["manifest.json"],
-                ["manifest.json"],
-            ),
-            make_agent_run_record(
-                "run-b",
-                "图抽取",
-                "stage1",
-                chunk_ids,
-                template_names,
-                ["source"],
-                ["manifest.json"],
-                ["graphify-out/graph.json"],
-            ),
-        ]
-
-    monkeypatch.setattr(stage1_mod, "make_stage_agent_records", conflicting_records)
-
-    result = build_stage1_graph(novel, _config(template_dir, graphify_repo))
-
-    graph_dir = tmp_path / "mini_novel.storygraph"
-    manifest = json.loads((graph_dir / "manifest.json").read_text(encoding="utf-8"))
-    assert result["status"] == "failed"
-    assert result["error"]["code"] == "single_writer_conflict"
-    assert manifest["stage_status"]["stage1"] == "failed"
-    assert not (graph_dir / "graphify-out" / "graph.json").exists()
-
-
-def test_stage1_missing_source_returns_structured_error_and_writes_failure_outputs_when_graph_dir_is_known(
-    tmp_path,
-):
-    source = tmp_path / "missing_novel.txt"
-    template_dir = tmp_path / "templates"
-    _write_template(template_dir, "# 法宝分析模板\n## 字段\n- 法宝")
-
-    result = build_stage1_graph(source, _config(template_dir, tmp_path / "graphify"))
-
-    graph_dir = tmp_path / "missing_novel.storygraph"
-    manifest = json.loads((graph_dir / "manifest.json").read_text(encoding="utf-8"))
-    ledger = json.loads((graph_dir / "coverage" / "agent-run-ledger.json").read_text(encoding="utf-8"))
-    gap = (graph_dir / "coverage" / "gap-report.md").read_text(encoding="utf-8")
-    assert result["status"] == "failed"
-    assert result["error"]["code"] == "source_unreadable"
-    assert result["graph_dir"] == str(graph_dir)
-    assert result["manifest_written"] is True
-    assert manifest["stage_status"]["stage1"] == "failed"
-    assert any(
-        error["code"] == "source_unreadable"
-        for record in ledger
-        for error in record.get("errors", [])
-    )
-    assert "source_unreadable" in gap
-
-
-def test_stage1_cli_source_unreadable_returns_json_even_when_graph_dir_cannot_be_inferred(
-    tmp_path, capsys, monkeypatch
-):
-    import storygraph_lib.cli as cli_mod
-    import storygraph_lib.stage1 as stage1_mod
-
-    template_dir = tmp_path / "templates"
-    _write_template(template_dir, "# 法宝分析模板\n## 字段\n- 法宝")
-
-    def fail_preflight(*args, **kwargs):
-        raise OSError("bad source path")
-
-    monkeypatch.setattr(stage1_mod, "_infer_novel_context_without_reading", fail_preflight)
-
-    exit_code = cli_mod.main(
-        ["build-stage1", "--source", "<bad-source>", "--template-dir", str(template_dir)]
-    )
-
-    payload = json.loads(capsys.readouterr().out)
-    assert exit_code == 2
-    assert payload["status"] == "failed"
-    assert payload["error"]["code"] == "source_unreadable"
-    assert payload["graph_dir"] is None
-    assert payload["manifest_written"] is False
-
-
-def test_stage1_invalid_utf8_source_uses_stable_encoding_error_code(tmp_path):
-    novel = tmp_path / "bad_encoding.txt"
-    novel.write_bytes(b"\xff\xfe\xfa")
-    template_dir = tmp_path / "templates"
-    graphify_repo = tmp_path / "graphify"
-    graphify_repo.mkdir()
-    _write_template(template_dir, "# 法宝分析模板\n## 字段\n- 法宝")
-
-    result = build_stage1_graph(novel, _config(template_dir, graphify_repo))
-
-    graph_dir = tmp_path / "bad_encoding.storygraph"
-    manifest = json.loads((graph_dir / "manifest.json").read_text(encoding="utf-8"))
-    ledger = json.loads((graph_dir / "coverage" / "agent-run-ledger.json").read_text(encoding="utf-8"))
-    assert result["status"] == "failed"
-    assert result["error"]["code"] == "source_encoding_error"
-    assert manifest["stage_status"]["stage1"] == "failed"
-    assert any(
-        error["code"] == "source_encoding_error"
-        for record in ledger
-        for error in record.get("errors", [])
-    )
-
-
-def test_stage1_graphify_exit_zero_missing_artifacts_fails_manifest_and_validate_graph_blocks(
-    tmp_path,
-):
-    novel = tmp_path / "mini_novel.txt"
-    novel.write_text("法宝", encoding="utf-8")
-    template_dir = tmp_path / "templates"
-    _write_template(template_dir, "# 法宝分析模板\n## 字段\n- 法宝")
-    config = _config(template_dir, graphify_repo=None)
-    config["graphify_adapter"] = {
-        "mode": "cli",
+        "input_strategy": "canonical-graph-or-graph-dir-only",
+        "failure_policy": "blocking",
         "command": [
             sys.executable,
             "-c",
-            "import pathlib,sys; pathlib.Path(sys.argv[2]).mkdir(parents=True, exist_ok=True)",
-            "{source}",
+            (
+                "import pathlib,sys; "
+                "canonical=pathlib.Path(sys.argv[1]); "
+                "out=pathlib.Path(sys.argv[2]); "
+                "out.mkdir(parents=True, exist_ok=True); "
+                "(out/'GRAPH_REPORT.md').write_text('# Graph Report\\n' + canonical.read_text(encoding='utf-8')[:1], encoding='utf-8'); "
+                "(out/'graph.html').write_text('<!doctype html><title>graph</title>', encoding='utf-8')"
+            ),
+            "{canonical_graph}",
             "{output_dir}",
         ],
         "timeout_seconds": 5,
     }
-
-    result = build_stage1_graph(novel, config)
-
-    graph_dir = tmp_path / "mini_novel.storygraph"
-    manifest = json.loads((graph_dir / "manifest.json").read_text(encoding="utf-8"))
-    ledger = json.loads((graph_dir / "coverage" / "agent-run-ledger.json").read_text(encoding="utf-8"))
-    validation = validate_graph_dir(graph_dir)
-    assert result["status"] == "failed"
-    assert result["error"]["code"] == "graphify_artifact_missing"
-    assert not (graph_dir / "graphify-out" / "graph.json").exists()
-    assert manifest["stage_status"]["stage1"] == "failed"
-    assert any(
-        error["code"] == "graphify_artifact_missing"
-        for record in ledger
-        for error in record.get("errors", [])
-    )
-    assert "blocking_ledger:graphify_artifact_missing" in validation.errors
+    return config
 
 
-def test_stage1_graphify_malformed_graph_json_is_structured_failure(tmp_path):
-    novel = tmp_path / "mini_novel.txt"
-    novel.write_text("第一章\n法宝卡片记载法宝。小瓶出现。", encoding="utf-8")
-    template_dir = tmp_path / "templates"
-    _write_template(template_dir)
-    config = _config(template_dir, graphify_repo=None)
-    config["graphify_adapter"] = {
-        "mode": "cli",
-        "command": _graphify_command_with(
-            "import pathlib,sys; "
-            "out=pathlib.Path(sys.argv[2]); out.mkdir(parents=True, exist_ok=True); "
-            "(out/'graph.json').write_text('{bad json', encoding='utf-8'); "
-            "(out/'GRAPH_REPORT.md').write_text('# Graph Report\\n', encoding='utf-8'); "
-            "(out/'graph.html').write_text('<!doctype html><title>graph</title>', encoding='utf-8')"
-        ),
-        "timeout_seconds": 5,
-    }
+def test_stage1_does_not_import_template_aware_semantic_extractor():
+    import inspect
+    import storygraph_lib.stage1 as stage1
 
-    result = build_stage1_graph(novel, config)
-
-    graph_dir = tmp_path / "mini_novel.storygraph"
-    manifest = json.loads((graph_dir / "manifest.json").read_text(encoding="utf-8"))
-    ledger = json.loads((graph_dir / "coverage" / "agent-run-ledger.json").read_text(encoding="utf-8"))
-    gap = (graph_dir / "coverage" / "gap-report.md").read_text(encoding="utf-8")
-    assert result["status"] == "failed"
-    assert result["error"]["code"] == "graphify_failed"
-    assert "graphify_failed" in result["validation_errors"]
-    assert manifest["stage_status"]["stage1"] == "failed"
-    assert any(
-        error["code"] == "graphify_failed"
-        for record in ledger
-        for error in record.get("errors", [])
-    )
-    assert "graphify_failed" in gap
-    assert not (graph_dir / "graphify-out" / "graph.json").exists()
+    source = inspect.getsource(stage1)
+    assert "extract_template_aware_supplements" not in source
+    assert "template_aware" not in source
 
 
-@pytest.mark.parametrize(
-    ("artifact_name", "bad_write"),
-    [
-        ("graph.json", "(out/'graph.json').write_bytes(b'\\xff'); "),
-        ("GRAPH_REPORT.md", "(out/'GRAPH_REPORT.md').write_bytes(b'\\xff'); "),
-        ("graph.html", "(out/'graph.html').write_bytes(b'\\xff'); "),
-    ],
-)
-def test_stage1_graphify_invalid_utf8_artifacts_are_structured_failure(
-    tmp_path, artifact_name, bad_write
+def test_prepare_stage1_writes_task_packets_but_no_canonical_graph(
+    novel, template_dir, graph_dir, config
 ):
-    novel = tmp_path / "mini_novel.txt"
-    novel.write_text("第一章\n法宝卡片记载法宝。小瓶出现。", encoding="utf-8")
-    template_dir = tmp_path / "templates"
-    _write_template(template_dir)
-    config = _config(template_dir, graphify_repo=None)
-    writes = {
-        "graph.json": (
-            "graph={'schema_version':'1.0','graphify_schema_version':'test',"
-            "'storygraph_schema_version':'1.0','nodes':[],'edges':[],'hyperedges':[],"
-            "'events':[],'evidence_index':[],'metadata':{'graphify_schema_version':'test'}}; "
-            "(out/'graph.json').write_text(json.dumps(graph), encoding='utf-8'); "
-        ),
-        "GRAPH_REPORT.md": "(out/'GRAPH_REPORT.md').write_text('# Graph Report\\n', encoding='utf-8'); ",
-        "graph.html": "(out/'graph.html').write_text('<!doctype html><title>graph</title>', encoding='utf-8'); ",
-    }
-    writes[artifact_name] = bad_write
-    config["graphify_adapter"] = {
-        "mode": "cli",
-        "command": _graphify_command_with(
-            "import json,pathlib,sys; "
-            "out=pathlib.Path(sys.argv[2]); out.mkdir(parents=True, exist_ok=True); "
-            f"{writes['graph.json']}"
-            f"{writes['GRAPH_REPORT.md']}"
-            f"{writes['graph.html']}"
-        ),
-        "timeout_seconds": 5,
-    }
+    from storygraph_lib.stage1 import prepare_stage1
 
-    result = build_stage1_graph(novel, config)
-
-    graph_dir = tmp_path / "mini_novel.storygraph"
-    manifest = json.loads((graph_dir / "manifest.json").read_text(encoding="utf-8"))
-    ledger = json.loads((graph_dir / "coverage" / "agent-run-ledger.json").read_text(encoding="utf-8"))
-    gap = (graph_dir / "coverage" / "gap-report.md").read_text(encoding="utf-8")
-    assert result["status"] == "failed"
-    assert result["error"]["code"] == "graphify_failed"
-    assert result["error"]["artifact"] == artifact_name
-    assert "utf-8" in result["error"]["message"]
-    assert "graphify_failed" in result["validation_errors"]
-    assert manifest["stage_status"]["stage1"] == "failed"
-    assert any(
-        error["code"] == "graphify_failed"
-        for record in ledger
-        for error in record.get("errors", [])
+    result = prepare_stage1(
+        source_path=novel,
+        template_dir=template_dir,
+        graph_dir=graph_dir,
+        config=config,
     )
-    assert "graphify_failed" in gap
+
+    assert result["status"] == "prepared"
+    assert (graph_dir / "intermediate" / "task-packets").exists()
+    assert (graph_dir / "coverage" / "chunk-ledger.json").exists()
+    assert (graph_dir / "coverage" / "agent-run-ledger.json").exists()
     assert not (graph_dir / "graphify-out" / "graph.json").exists()
-    assert not (graph_dir / "graphify-out" / "GRAPH_REPORT.md").exists()
-    assert not (graph_dir / "graphify-out" / "graph.html").exists()
 
 
-def test_read_graphify_artifacts_deep_json_is_structured_failure(tmp_path):
-    out = tmp_path / "graphify-out"
-    out.mkdir()
-    (out / "graph.json").write_text(
-        "[" * 20000 + "0" + "]" * 20000,
+def test_ingest_stage1_requires_agent_template_requirements_before_lane_merge(
+    graph_dir, config
+):
+    from storygraph_lib.stage1 import ingest_stage1
+
+    result = ingest_stage1(graph_dir=graph_dir, config=config)
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "template_requirements_missing"
+
+
+def test_ingest_stage1_writes_reviewed_chunk_bundle_from_reviewed_agent_artifacts(
+    graph_dir,
+    config,
+    write_agent_template_requirements,
+    write_lane_output,
+    write_review_finding,
+):
+    from storygraph_lib.stage1 import ingest_stage1
+
+    write_agent_template_requirements(graph_dir)
+    write_lane_output(
+        graph_dir,
+        chunk_id="chunk-0001",
+        lane_id="entities_resources",
+        status="completed",
+    )
+    write_review_finding(graph_dir, status="passed")
+
+    result = ingest_stage1(graph_dir=graph_dir, config=config)
+
+    assert result["status"] == "ingested"
+    assert (graph_dir / "intermediate" / "reviewed-bundles" / "chunk-0001.json").exists()
+    assert (graph_dir / "intermediate" / "merge-queue.json").exists()
+    assert not (graph_dir / "graphify-out" / "graph.json").exists()
+
+
+def test_ingest_stage1_rejects_reviewer_status_outside_config(
+    graph_dir, config, write_agent_template_requirements, write_lane_output, write_review_finding
+):
+    import json
+    from storygraph_lib.stage1 import ingest_stage1
+
+    assert "closed" not in config["status_enums"]["reviewer_statuses"]
+    write_agent_template_requirements(graph_dir)
+    write_lane_output(graph_dir, status="completed")
+    write_review_finding(graph_dir, status="closed")
+
+    result = ingest_stage1(graph_dir=graph_dir, config=config)
+
+    assert result["status"] == "failed"
+    assert "closed" in json.dumps(result, ensure_ascii=False)
+    assert not (graph_dir / "intermediate" / "merge-queue.json").exists()
+
+
+def test_ingest_stage1_keeps_chunk_validation_errors_local_to_each_chunk(
+    graph_dir,
+    config,
+    write_agent_template_requirements,
+    write_lane_output,
+    write_review_finding,
+):
+    from storygraph_lib.stage1 import ingest_stage1
+
+    write_agent_template_requirements(graph_dir)
+    chunk_ledger = graph_dir / "coverage" / "chunk-ledger.json"
+    chunk_ledger.parent.mkdir(parents=True, exist_ok=True)
+    chunk_ledger.write_text(
+        json.dumps(
+            [
+                {
+                    "chunk_id": "chunk-0001",
+                    "source_path": "mini_novel.txt",
+                    "source_range": [0, 6],
+                    "chapter_hint": "第一章",
+                    "hash": "chunk-1",
+                    "scanned_at": None,
+                    "processor": "storygraph-stage1",
+                    "extraction_status": "pending_agent_outputs",
+                    "failure": None,
+                    "retry_count": 0,
+                    "target_lane_ids": ["entities_resources"],
+                    "required_lane_ids": ["entities_resources"],
+                    "lane_statuses": {"entities_resources": "pending_agent_outputs"},
+                },
+                {
+                    "chunk_id": "chunk-0002",
+                    "source_path": "mini_novel.txt",
+                    "source_range": [6, 12],
+                    "chapter_hint": "第一章",
+                    "hash": "chunk-2",
+                    "scanned_at": None,
+                    "processor": "storygraph-stage1",
+                    "extraction_status": "pending_agent_outputs",
+                    "failure": None,
+                    "retry_count": 0,
+                    "target_lane_ids": ["entities_resources"],
+                    "required_lane_ids": ["entities_resources"],
+                    "lane_statuses": {"entities_resources": "pending_agent_outputs"},
+                },
+            ],
+            ensure_ascii=False,
+            indent=2,
+        ),
         encoding="utf-8",
     )
-    (out / "GRAPH_REPORT.md").write_text("# Graph Report\n", encoding="utf-8")
-    (out / "graph.html").write_text(
-        "<!doctype html><title>graph</title>",
-        encoding="utf-8",
+    write_lane_output(
+        graph_dir,
+        chunk_id="chunk-0002",
+        lane_id="entities_resources",
+        status="completed",
+    )
+    write_review_finding(
+        graph_dir,
+        chunk_id="chunk-0002",
+        lane_id="entities_resources",
+        status="passed",
     )
 
-    artifacts, error = _read_graphify_artifacts(out / "graph.json", out)
+    result = ingest_stage1(graph_dir=graph_dir, config=config)
 
-    assert artifacts is None
-    assert error["code"] == "graphify_failed"
-    assert error["artifact"] == "graph.json"
-    assert "recursion" in error["message"].lower()
+    assert result["status"] == "failed"
+    assert "required_lane_missing" in result["validation_errors"]
+    assert (graph_dir / "intermediate" / "reviewed-bundles" / "chunk-0002.json").exists()
 
 
-def test_stage1_graphify_deep_json_artifact_is_structured_failure(tmp_path):
-    novel = tmp_path / "mini_novel.txt"
-    novel.write_text("第一章\n法宝卡片记载法宝。小瓶出现。", encoding="utf-8")
-    template_dir = tmp_path / "templates"
-    _write_template(template_dir)
-    config = _config(template_dir, graphify_repo=None)
+def test_merge_stage1_fails_when_required_lane_output_missing(graph_dir, config):
+    from storygraph_lib.stage1 import merge_stage1
+
+    result = merge_stage1(graph_dir=graph_dir, config=config)
+
+    assert result["status"] == "failed"
+    assert "required_lane_missing" in result["validation_errors"]
+
+
+def test_graphify_adapter_does_not_produce_semantic_success_without_agent_outputs(
+    graph_dir_without_agent_outputs,
+    config_with_graphify_success,
+):
+    from storygraph_lib.stage1 import merge_stage1
+
+    result = merge_stage1(
+        graph_dir=graph_dir_without_agent_outputs,
+        config=config_with_graphify_success,
+    )
+
+    assert result["status"] == "failed"
+    assert "missing_reviewed_agent_outputs" in result["validation_errors"]
+
+
+def test_graphify_failure_degrades_visualization_when_policy_allows(
+    graph_dir_with_reviewed_outputs, config
+):
+    from storygraph_lib.stage1 import merge_stage1
+
     config["graphify_adapter"] = {
         "mode": "cli",
-        "command": _graphify_command_with(
-            "import pathlib,sys; "
-            "out=pathlib.Path(sys.argv[2]); out.mkdir(parents=True, exist_ok=True); "
-            "(out/'graph.json').write_text('[' * 20000 + '0' + ']' * 20000, encoding='utf-8'); "
-            "(out/'GRAPH_REPORT.md').write_text('# Graph Report\\n', encoding='utf-8'); "
-            "(out/'graph.html').write_text('<!doctype html><title>graph</title>', encoding='utf-8')"
-        ),
+        "input_strategy": "canonical-graph-or-graph-dir-only",
+        "failure_policy": "degrade-visualization-and-query",
+        "command": [sys.executable, "-c", "raise SystemExit(7)", "{canonical_graph}", "{output_dir}"],
         "timeout_seconds": 5,
     }
 
-    result = build_stage1_graph(novel, config)
+    result = merge_stage1(graph_dir=graph_dir_with_reviewed_outputs, config=config)
 
-    graph_dir = tmp_path / "mini_novel.storygraph"
-    manifest = json.loads((graph_dir / "manifest.json").read_text(encoding="utf-8"))
-    ledger = json.loads((graph_dir / "coverage" / "agent-run-ledger.json").read_text(encoding="utf-8"))
-    gap = (graph_dir / "coverage" / "gap-report.md").read_text(encoding="utf-8")
-    assert result["status"] == "failed"
-    assert result["error"]["code"] == "graphify_failed"
-    assert result["error"]["artifact"] == "graph.json"
-    assert "recursion" in result["error"]["message"].lower()
-    assert "graphify_failed" in result["validation_errors"]
-    assert manifest["stage_status"]["stage1"] == "failed"
-    assert any(
-        error["code"] == "graphify_failed"
-        for record in ledger
-        for error in record.get("errors", [])
+    assert result["status"] in {"success", "warning"}
+    assert "graphify_degraded" in result["warnings"]
+    ledger = json.loads(
+        (graph_dir_with_reviewed_outputs / "coverage" / "agent-run-ledger.json").read_text(
+            encoding="utf-8"
+        )
     )
-    assert "graphify_failed" in gap
-    assert not (graph_dir / "graphify-out" / "graph.json").exists()
-    assert not (graph_dir / "graphify-out" / "GRAPH_REPORT.md").exists()
-    assert not (graph_dir / "graphify-out" / "graph.html").exists()
-
-
-def test_stage1_bad_graphify_adapter_shape_is_structured_failure(tmp_path):
-    novel = tmp_path / "mini_novel.txt"
-    novel.write_text("法宝", encoding="utf-8")
-    template_dir = tmp_path / "templates"
-    _write_template(template_dir, "# 法宝分析模板\n## 字段\n- 法宝")
-    config = _config(template_dir, graphify_repo=None)
-    config["graphify_adapter"] = "not-an-object"
-
-    result = build_stage1_graph(novel, config)
-
-    graph_dir = tmp_path / "mini_novel.storygraph"
-    manifest = json.loads((graph_dir / "manifest.json").read_text(encoding="utf-8"))
-    ledger = json.loads((graph_dir / "coverage" / "agent-run-ledger.json").read_text(encoding="utf-8"))
-    gap = (graph_dir / "coverage" / "gap-report.md").read_text(encoding="utf-8")
-    validation = validate_graph_dir(graph_dir)
-    assert result["status"] == "failed"
-    assert result["error"]["code"] == "graphify_bad_command"
-    assert result["error"]["field"] == "graphify_adapter"
-    assert "graphify_bad_command" in result["validation_errors"]
-    assert manifest["stage_status"]["stage1"] == "failed"
-    assert any(
-        error["code"] == "graphify_bad_command"
-        for record in ledger
-        for error in record.get("errors", [])
+    adapter_records = [
+        record for record in ledger if record.get("run_id") == "stage1-graphify-adapter"
+    ]
+    assert adapter_records
+    adapter_record = adapter_records[-1]
+    assert not (
+        adapter_record["status"] == "completed"
+        and adapter_record["warnings"] == []
+        and adapter_record["errors"] == []
     )
-    assert "graphify_bad_command" in gap
-    assert "blocking_ledger:graphify_bad_command" in validation.errors
-
-
-def test_stage1_graphify_unreadable_report_is_structured_failure(tmp_path):
-    novel = tmp_path / "mini_novel.txt"
-    novel.write_text("第一章\n法宝卡片记载法宝。小瓶出现。", encoding="utf-8")
-    template_dir = tmp_path / "templates"
-    _write_template(template_dir)
-    config = _config(template_dir, graphify_repo=None)
-    config["graphify_adapter"] = {
-        "mode": "cli",
-        "command": _graphify_command_with(
-            "import json,pathlib,sys; "
-            "out=pathlib.Path(sys.argv[2]); out.mkdir(parents=True, exist_ok=True); "
-            "graph={'schema_version':'1.0','graphify_schema_version':'test',"
-            "'storygraph_schema_version':'1.0','nodes':[],'edges':[],'hyperedges':[],"
-            "'events':[],'evidence_index':[],'metadata':{'graphify_schema_version':'test'}}; "
-            "(out/'graph.json').write_text(json.dumps(graph), encoding='utf-8'); "
-            "(out/'GRAPH_REPORT.md').mkdir(); "
-            "(out/'graph.html').write_text('<!doctype html><title>graph</title>', encoding='utf-8')"
-        ),
-        "timeout_seconds": 5,
-    }
-
-    result = build_stage1_graph(novel, config)
-
-    graph_dir = tmp_path / "mini_novel.storygraph"
-    manifest = json.loads((graph_dir / "manifest.json").read_text(encoding="utf-8"))
-    ledger = json.loads((graph_dir / "coverage" / "agent-run-ledger.json").read_text(encoding="utf-8"))
-    assert result["status"] == "failed"
-    assert result["error"]["code"] == "graphify_failed"
-    assert manifest["stage_status"]["stage1"] == "failed"
-    assert any(
-        error["code"] == "graphify_failed"
-        for record in ledger
-        for error in record.get("errors", [])
+    failure_detail = json.dumps(
+        {
+            "warnings": adapter_record["warnings"],
+            "errors": adapter_record["errors"],
+        },
+        ensure_ascii=False,
     )
-    assert not (graph_dir / "graphify-out" / "graph.json").exists()
+    assert "graphify_failed" in failure_detail
 
 
-def test_stage1_graphify_bad_graph_shape_is_structured_failure(tmp_path):
-    novel = tmp_path / "mini_novel.txt"
-    novel.write_text("第一章\n法宝卡片记载法宝。小瓶出现。", encoding="utf-8")
-    template_dir = tmp_path / "templates"
-    _write_template(template_dir)
-    config = _config(template_dir, graphify_repo=None)
-    config["graphify_adapter"] = {
-        "mode": "cli",
-        "command": _graphify_command_with(
-            "import json,pathlib,sys; "
-            "out=pathlib.Path(sys.argv[2]); out.mkdir(parents=True, exist_ok=True); "
-            "graph={'schema_version':'1.0','graphify_schema_version':'test',"
-            "'storygraph_schema_version':'1.0','nodes':['bad-node'],"
-            "'edges':[],'hyperedges':[],'events':[],'evidence_index':[],'metadata':'bad'}; "
-            "(out/'graph.json').write_text(json.dumps(graph), encoding='utf-8'); "
-            "(out/'GRAPH_REPORT.md').write_text('# Graph Report\\n', encoding='utf-8'); "
-            "(out/'graph.html').write_text('<!doctype html><title>graph</title>', encoding='utf-8')"
-        ),
-        "timeout_seconds": 5,
-    }
+def test_stage1_success_path_ignores_source_as_graphify_semantic_base(
+    novel,
+    template_dir,
+    graph_dir_with_reviewed_outputs,
+    config_with_graphify_success,
+):
+    import json
 
-    result = build_stage1_graph(novel, config)
+    from storygraph_lib.stage1 import merge_stage1
 
-    graph_dir = tmp_path / "mini_novel.storygraph"
-    manifest = json.loads((graph_dir / "manifest.json").read_text(encoding="utf-8"))
+    merge = merge_stage1(
+        graph_dir=graph_dir_with_reviewed_outputs,
+        config=config_with_graphify_success,
+    )
+
+    assert merge["status"] in {"success", "warning"}
+    graph = json.loads(
+        (graph_dir_with_reviewed_outputs / "graphify-out" / "graph.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert graph["metadata"]["semantic_generation"] == "agent-produced"
+    assert (
+        graph["metadata"]["graphify_input_strategy"]
+        == "canonical-graph-or-graph-dir-only"
+    )
+    assert "source_semantic_base_graph" not in graph["metadata"]
+
+
+def test_merge_stage1_rejects_reviewed_bundle_missing_required_lane(graph_dir, config):
+    import json
+    from storygraph_lib.stage1 import merge_stage1
+
+    queue = graph_dir / "intermediate" / "merge-queue.json"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    queue.write_text(json.dumps({
+        "status": "ready",
+        "bundle_paths": ["intermediate/reviewed-bundles/chunk-0001.json"],
+        "required_lane_ids": ["entities_resources"],
+    }), encoding="utf-8")
+
+    bundle = graph_dir / "intermediate" / "reviewed-bundles" / "chunk-0001.json"
+    bundle.parent.mkdir(parents=True, exist_ok=True)
+    bundle.write_text(json.dumps({
+        "chunk_id": "chunk-0001",
+        "source_range": [0, 6],
+        "lane_outputs": [],
+        "review_findings": [],
+        "errors": [],
+        "ready_for_merge": True,
+        "reviewer_status": "passed",
+        "lane_output_paths": [],
+        "normalized_nodes": [],
+        "normalized_edges": [],
+        "normalized_events": [],
+        "normalized_evidence": [],
+    }), encoding="utf-8")
+
+    result = merge_stage1(graph_dir=graph_dir, config=config)
+
     assert result["status"] == "failed"
-    assert result["error"]["code"] == "graphify_failed"
-    assert manifest["stage_status"]["stage1"] == "failed"
+    assert "required_lane_missing" in result["validation_errors"]
     assert not (graph_dir / "graphify-out" / "graph.json").exists()
+
+
+def test_merge_stage1_rejects_queue_that_clears_config_required_lanes(graph_dir, config):
+    from storygraph_lib.stage1 import merge_stage1
+
+    _write_merge_ready_bundle(graph_dir, required_lane_ids=[], lane_outputs=[])
+
+    result = merge_stage1(graph_dir=graph_dir, config=config)
+
+    assert result["status"] == "failed"
+    assert set(result["validation_errors"]) & {"required_lane_missing", "merge_queue_invalid"}
+    assert not (graph_dir / "graphify-out" / "graph.json").exists()
+
+
+def test_merge_stage1_rejects_queue_that_replaces_required_lane_with_optional_lane(
+    graph_dir, config
+):
+    from storygraph_lib.stage1 import merge_stage1
+
+    config["element_lanes"].append(
+        {
+            "lane_id": "optional_notes",
+            "agent_role": "可选备注抽取 agent",
+            "required": False,
+            "schema": "lane-output.schema.json",
+            "status_enum_ref": "status_enums.lane_output_statuses",
+        }
+    )
+    _write_merge_ready_bundle(
+        graph_dir,
+        required_lane_ids=["optional_notes"],
+        lane_outputs=[
+            _valid_embedded_lane_output(
+                task_packet_id="chunk-0001:optional_notes:attempt-001",
+                lane_id="optional_notes",
+                agent_role="可选备注抽取 agent",
+            )
+        ],
+    )
+
+    result = merge_stage1(graph_dir=graph_dir, config=config)
+
+    assert result["status"] == "failed"
+    assert set(result["validation_errors"]) & {"required_lane_missing", "merge_queue_invalid"}
+    assert not (graph_dir / "graphify-out" / "graph.json").exists()
+
+
+def test_merge_stage1_rejects_forged_reviewed_bundle_lane_output(graph_dir, config):
+    from storygraph_lib.stage1 import merge_stage1
+
+    _write_merge_ready_bundle(
+        graph_dir,
+        lane_outputs=[
+            {
+                "chunk_id": "chunk-0001",
+                "lane_id": "entities_resources",
+                "output_status": "completed",
+            }
+        ],
+    )
+
+    result = merge_stage1(graph_dir=graph_dir, config=config)
+
+    assert result["status"] == "failed"
+    assert "lane_output_invalid" in result["validation_errors"]
+    assert not (graph_dir / "graphify-out" / "graph.json").exists()
+
+
+def test_merge_stage1_rejects_merge_queue_not_ready(graph_dir, config):
+    from storygraph_lib.stage1 import merge_stage1
+
+    _write_merge_ready_bundle(graph_dir, queue_status="pending")
+
+    result = merge_stage1(graph_dir=graph_dir, config=config)
+
+    assert result["status"] == "failed"
+    assert "merge_queue_not_ready" in result["validation_errors"]
+    assert not (graph_dir / "graphify-out" / "graph.json").exists()
+
+
+def test_merge_stage1_rejects_invalid_bundle_path_in_queue(graph_dir, config):
+    from storygraph_lib.stage1 import merge_stage1
+
+    _write_merge_ready_bundle(
+        graph_dir,
+        bundle_paths=[
+            "intermediate/reviewed-bundles/chunk-0001.json",
+            "../outside.json",
+        ],
+    )
+
+    result = merge_stage1(graph_dir=graph_dir, config=config)
+
+    assert result["status"] == "failed"
+    assert "merge_queue_invalid" in result["validation_errors"]
+    assert not (graph_dir / "graphify-out" / "graph.json").exists()
+
+
+def test_stage1_merge_success_uses_reviewed_agent_outputs(
+    novel,
+    template_dir,
+    graph_dir,
+    config,
+    write_agent_template_requirements,
+    write_lane_output,
+    write_review_finding,
+):
+    from storygraph_lib.stage1 import ingest_stage1, merge_stage1, prepare_stage1
+
+    prepare_stage1(
+        source_path=novel,
+        template_dir=template_dir,
+        graph_dir=graph_dir,
+        config=config,
+    )
+    write_agent_template_requirements(graph_dir)
+    write_lane_output(
+        graph_dir,
+        chunk_id="chunk-0001",
+        lane_id="entities_resources",
+        status="completed",
+    )
+    write_review_finding(graph_dir, status="passed")
+
+    ingest = ingest_stage1(graph_dir=graph_dir, config=config)
+    merge = merge_stage1(graph_dir=graph_dir, config=config)
+
+    assert ingest["status"] == "ingested"
+    assert merge["status"] == "success"
+    graph = json.loads((graph_dir / "graphify-out" / "graph.json").read_text(encoding="utf-8"))
+    assert graph["metadata"]["semantic_generation"] == "agent-produced"
+
+
+def test_build_stage1_cli_returns_pending_when_agent_outputs_missing(
+    capsys, novel, template_dir, graph_dir
+):
+    from storygraph_lib.cli import main
+
+    code = main(
+        [
+            "build-stage1",
+            "--source",
+            str(novel),
+            "--template-dir",
+            str(template_dir),
+            "--graph-dir",
+            str(graph_dir),
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["status"] in {"prepared", "pending_agent_outputs"}
+    assert payload["next_action"] == "run_agent_task_packets"
+    assert not (graph_dir / "graphify-out" / "graph.json").exists()
+
+
+def test_prepare_stage1_writes_chunk_text_under_configured_artifact_dir(
+    novel, template_dir, graph_dir, config
+):
+    from storygraph_lib.stage1 import prepare_stage1
+
+    config["stage1_artifacts"]["chunk_text_dir"] = "intermediate/chunk-text"
+
+    prepare_stage1(
+        source_path=novel,
+        template_dir=template_dir,
+        graph_dir=graph_dir,
+        config=config,
+    )
+
+    assert (graph_dir / "intermediate" / "chunk-text" / "chunk-0001.txt").exists()
+
+
+def test_prepare_stage1_pending_ledger_does_not_mark_agent_runs_completed(
+    novel, template_dir, graph_dir, config
+):
+    from storygraph_lib.stage1 import prepare_stage1
+
+    prepare_stage1(
+        source_path=novel,
+        template_dir=template_dir,
+        graph_dir=graph_dir,
+        config=config,
+    )
+
+    ledger = json.loads(
+        (graph_dir / "coverage" / "agent-run-ledger.json").read_text(encoding="utf-8")
+    )
+    assert ledger
+    assert {record["status"] for record in ledger} == {"pending"}
+    assert all(record.get("finished_at") is None for record in ledger if "finished_at" in record)
+    assert all(record.get("ended_at") is None for record in ledger if "ended_at" in record)

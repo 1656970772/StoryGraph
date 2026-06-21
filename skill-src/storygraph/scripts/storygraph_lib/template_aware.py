@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Any
 
 from .ids import stable_edge_id, stable_event_id, stable_evidence_id, stable_node_id
-from .template_rules import DEFAULT_REQUIREMENT_STATUSES
 
 
 def extract_template_aware_supplements(
@@ -183,11 +182,23 @@ def extract_template_aware_supplements(
         "events": list(events.values()),
         "evidence_index": list(evidence_index.values()),
         "metadata": {
-            "readiness_statuses": list(DEFAULT_REQUIREMENT_STATUSES),
+            "readiness_statuses": _requirement_statuses_from_matrix(matrix),
             "evidence_matching_strategy": "substring",
         },
     }
     return supplement, readiness
+
+
+def _requirement_statuses_from_matrix(matrix: dict) -> list[str]:
+    statuses: list[str] = []
+    for template in matrix.get("templates", []):
+        coverage_rules = template.get("coverage_rules")
+        if not isinstance(coverage_rules, dict):
+            continue
+        for status in coverage_rules.get("requirement_statuses", []):
+            if isinstance(status, str) and status not in statuses:
+                statuses.append(status)
+    return statuses
 
 
 def _template_requirements(template: dict, template_name: str) -> list[dict]:

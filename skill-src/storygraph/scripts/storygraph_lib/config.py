@@ -1,5 +1,27 @@
 import json
+from dataclasses import dataclass
 from pathlib import Path
+
+
+LEGACY_SEMANTIC_CONFIG_KEYS = {
+    "template_parser_rules",
+    "template_graph_mappings",
+    "supplemental_graph_policy",
+    "evidence_matching_strategy",
+}
+LEGACY_STAGE_KEYS = {
+    ("stages", "build_template_aware_graph"),
+}
+LEGACY_GRAPHIFY_CANONICAL_POLICIES = {
+    "merge-template-aware-supplements",
+}
+MAX_CONFIG_JSON_DEPTH = 64
+
+
+@dataclass(frozen=True)
+class ConfigContractResult:
+    ok: bool
+    errors: list[str]
 
 
 class ConfigLoadError(ValueError):
@@ -56,10 +78,35 @@ def load_config(
     return config
 
 
+def validate_config_contract(config: dict) -> ConfigContractResult:
+    errors = [
+        f"legacy_semantic_config:{key}"
+        for key in sorted(LEGACY_SEMANTIC_CONFIG_KEYS)
+        if key in config
+    ]
+    for section, key in sorted(LEGACY_STAGE_KEYS):
+        if isinstance(config.get(section), dict) and key in config[section]:
+            errors.append(f"legacy_semantic_config:{section}.{key}")
+
+    canonical_policy = config.get("canonical_graph_policy")
+    if canonical_policy in LEGACY_GRAPHIFY_CANONICAL_POLICIES:
+        errors.append(f"legacy_semantic_config:canonical_graph_policy:{canonical_policy}")
+
+    graphify_adapter = config.get("graphify_adapter")
+    if isinstance(graphify_adapter, dict):
+        adapter_canonical_policy = graphify_adapter.get("canonical_graph_policy")
+        if adapter_canonical_policy in LEGACY_GRAPHIFY_CANONICAL_POLICIES:
+            errors.append(
+                "legacy_semantic_config:graphify_adapter.canonical_graph_policy:"
+                f"{adapter_canonical_policy}"
+            )
+    return ConfigContractResult(ok=not errors, errors=errors)
+
+
 def _read_config_json(path: Path, source: str) -> dict:
     path = Path(path)
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8"))
     except UnicodeDecodeError as exc:
         raise ConfigLoadError("config_encoding_error", path, source=source) from exc
     except json.JSONDecodeError as exc:
@@ -70,3 +117,33 @@ def _read_config_json(path: Path, source: str) -> dict:
             column=exc.colno,
             source=source,
         ) from exc
+    except RecursionError as exc:
+        raise ConfigLoadError(
+            _config_error_code(source, "too_deep"),
+            path,
+            source=source,
+        ) from exc
+
+    if _json_too_deep(payload, MAX_CONFIG_JSON_DEPTH):
+        raise ConfigLoadError(_config_error_code(source, "too_deep"), path, source=source)
+    if not isinstance(payload, dict):
+        raise ConfigLoadError(_config_error_code(source, "shape_not_object"), path, source=source)
+    return payload
+
+
+def _config_error_code(source: str, suffix: str) -> str:
+    prefix = "local_override" if source == "local_override" else "config"
+    return f"{prefix}_{suffix}"
+
+
+def _json_too_deep(value, max_depth: int) -> bool:
+    stack = [(value, 1)]
+    while stack:
+        item, depth = stack.pop()
+        if depth > max_depth:
+            return True
+        if isinstance(item, dict):
+            stack.extend((child, depth + 1) for child in item.values())
+        elif isinstance(item, list):
+            stack.extend((child, depth + 1) for child in item)
+    return False

@@ -3,308 +3,528 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from typing import Any, Iterable
 
-from .agent_ledger import make_stage_agent_records, validate_single_writer
+from .agent_ledger import (
+    make_agent_run_record,
+    make_lane_agent_record,
+    validate_single_writer,
+)
+from .canonical_writer import build_canonical_graph_from_bundles
+from .chunk_bundles import make_chunk_bundle, validate_bundle_ready_for_merge
 from .coverage import make_chunk_ledger, write_coverage_outputs
-from .graph_schema import merge_template_supplements, validate_canonical_graph
 from .graphify_adapter import GraphifyAdapter
+from .lane_outputs import validate_lane_output
 from .manifest import write_manifest
-from .output_writer import OutputWriter
-from .paths import resolve_novel_context
-from .state import stage1_state
-from .template_aware import extract_template_aware_supplements
-from .templates import build_requirement_matrix, discover_templates
-from .validation import validate_graph_dir
+from .output_writer import OutputWriteError, OutputWriter, normalize_relative_output_path
+from .paths import NovelContext, file_sha256
+from .state import compute_stage1_input_hash
+from .template_requirements import validate_template_requirements_payload
+from .templates import discover_templates
 
 
-@dataclass(frozen=True)
-class PreflightNovelContext:
-    source_path: Path
-    source_hash: str | None
-    source_size: int
-    novel_name: str
-    novel_dir: Path
-    graph_dir: Path
+DEFAULT_STAGE1_ARTIFACTS = {
+    "requirements": "requirements/template-requirements.json",
+    "task_packet_dir": "intermediate/task-packets",
+    "chunk_text_dir": "intermediate/chunks",
+    "lane_output_dir": "intermediate/lane-outputs",
+    "reviewed_bundle_dir": "intermediate/reviewed-bundles",
+    "merge_queue": "intermediate/merge-queue.json",
+    "review_findings": "coverage/review-findings.json",
+    "canonical_graph": "graphify-out/graph.json",
+    "agent_run_ledger": "coverage/agent-run-ledger.json",
+}
+
+PENDING_AGENT_OUTPUT_CODES = {
+    "template_requirements_missing",
+    "chunk_ledger_missing",
+    "agent_lane_outputs_missing",
+    "review_findings_missing",
+    "required_lane_missing",
+}
 
 
-def _infer_novel_context_without_reading(
-    source_path: Path,
-    graph_dir_suffix: str,
-    create: bool = False,
-) -> PreflightNovelContext:
-    source = Path(source_path).expanduser().resolve(strict=False)
-    if not source.name or source.name in {".", ".."}:
-        raise OSError("cannot infer graph directory from source path")
-    graph_dir = source.parent / f"{source.stem}{graph_dir_suffix}"
-    if create:
-        graph_dir.mkdir(parents=True, exist_ok=True)
-    return PreflightNovelContext(
-        source_path=source,
-        source_hash=None,
-        source_size=0,
-        novel_name=source.stem,
-        novel_dir=source.parent,
-        graph_dir=graph_dir,
+def prepare_stage1(
+    *,
+    source_path: str | Path,
+    template_dir: str | Path,
+    graph_dir: str | Path,
+    config: dict,
+) -> dict:
+    active_config = _config_with_paths(config, template_dir)
+    try:
+        ctx = _novel_context(source_path, graph_dir)
+    except (OSError, ValueError) as exc:
+        return _failure_response(None, _error("source_unreadable", exc), False)
+
+    try:
+        discovery = _discover_templates(active_config, template_dir)
+        lanes = _configured_lanes(active_config)
+        lane_ids = _lane_ids(lanes)
+        required_lane_ids = _required_lane_ids(lanes)
+        config_hash = stable_stage_input_hash(ctx, active_config, discovery.templates)
+        _remove_graphify_artifacts(ctx.graph_dir)
+        manifest_path = write_manifest(
+            ctx,
+            config_hash=config_hash,
+            graphify_source=str(active_config.get("paths", {}).get("graphify_repo")),
+        )
+        writer = OutputWriter(ctx.graph_dir, _managed_outputs(active_config))
+        artifacts = _artifact_paths(active_config)
+        chunks = make_chunk_ledger(
+            ctx.source_path,
+            active_config.get("chunk_strategy", {}),
+            processor="storygraph-stage1",
+            target_lane_ids=lane_ids,
+            required_lane_ids=required_lane_ids,
+        )
+        chunks = _write_chunk_texts(writer, chunks, artifacts["chunk_text_dir"])
+        packets = _build_task_packets(
+            ctx.source_path,
+            chunks,
+            lanes,
+            artifacts,
+            active_config,
+        )
+        for packet in packets:
+            writer.write_json(packet["task_packet_path"], packet)
+
+        agent_runs = _pending_agent_run_ledger(
+            chunks,
+            discovery.templates,
+            packets,
+            artifacts,
+        )
+        single_writer = validate_single_writer(agent_runs)
+        if not single_writer.ok:
+            errors = [{"code": "single_writer_conflict", "detail": item} for item in single_writer.errors]
+            write_coverage_outputs(
+                writer,
+                chunks,
+                [],
+                [],
+                _failed_agent_runs(agent_runs, "single_writer_conflict", errors),
+                [f"- single_writer_conflict: {item}" for item in single_writer.errors],
+            )
+            _update_manifest_stage(manifest_path, "failed")
+            return _stage_result(
+                "failed",
+                ctx.graph_dir,
+                discovery.warnings,
+                ["single_writer_conflict"],
+                errors[0],
+                next_action=None,
+            )
+
+        write_coverage_outputs(
+            writer,
+            chunks,
+            [],
+            [],
+            agent_runs,
+            ["- pending_agent_outputs: run agent task packets"],
+        )
+        _update_manifest_stage(manifest_path, "prepared")
+        return _stage_result(
+            "prepared",
+            ctx.graph_dir,
+            discovery.warnings,
+            [],
+            None,
+            next_action="run_agent_task_packets",
+        )
+    except UnicodeDecodeError as exc:
+        return _failure_response(ctx.graph_dir, _error("source_encoding_error", exc), True)
+    except Exception as exc:
+        code = getattr(exc, "code", None) or _exception_code(exc, "stage1_prepare_failed")
+        return _failure_response(ctx.graph_dir, _error(code, exc), (ctx.graph_dir / "manifest.json").exists())
+
+
+def ingest_stage1(*, graph_dir: str | Path, config: dict) -> dict:
+    graph_root = Path(graph_dir)
+    artifacts = _artifact_paths(config)
+    writer = OutputWriter(graph_root, _managed_outputs(config))
+
+    requirements_path = _artifact_path(graph_root, artifacts["requirements"])
+    requirements, requirements_error = _read_json_artifact(
+        requirements_path,
+        missing_code="template_requirements_missing",
+        bad_code="template_requirements_invalid",
+    )
+    if requirements_error:
+        return _failure_response(graph_root, requirements_error, _manifest_exists(graph_root))
+
+    requirement_validation = validate_template_requirements_payload(requirements)
+    if not requirement_validation.ok:
+        return _failure_response(
+            graph_root,
+            {
+                "code": "template_requirements_invalid",
+                "validation_errors": requirement_validation.errors,
+            },
+            _manifest_exists(graph_root),
+            validation_errors=requirement_validation.errors,
+        )
+
+    chunks, chunk_error = _read_json_artifact(
+        _artifact_path(graph_root, "coverage/chunk-ledger.json"),
+        missing_code="chunk_ledger_missing",
+        bad_code="chunk_ledger_invalid",
+    )
+    if chunk_error:
+        return _failure_response(graph_root, chunk_error, _manifest_exists(graph_root))
+    if not isinstance(chunks, list):
+        return _failure_response(
+            graph_root,
+            {"code": "chunk_ledger_invalid", "message": "chunk ledger must be a list"},
+            _manifest_exists(graph_root),
+        )
+
+    lane_outputs, lane_output_errors = _read_lane_outputs(graph_root, config)
+    if lane_output_errors:
+        return _failure_response(
+            graph_root,
+            {"code": lane_output_errors[0], "validation_errors": lane_output_errors},
+            _manifest_exists(graph_root),
+            validation_errors=lane_output_errors,
+        )
+    if not lane_outputs:
+        return _failure_response(
+            graph_root,
+            {"code": "agent_lane_outputs_missing"},
+            _manifest_exists(graph_root),
+        )
+
+    reviews, review_errors = _read_review_records(graph_root, config)
+    if review_errors:
+        return _failure_response(
+            graph_root,
+            {"code": review_errors[0], "validation_errors": review_errors},
+            _manifest_exists(graph_root),
+            validation_errors=review_errors,
+        )
+
+    lanes = _configured_lanes(config)
+    required_lane_ids = _required_lane_ids(lanes)
+    accepted_review_statuses = _accepted_review_statuses(config)
+    bundle_paths: list[str] = []
+    validation_errors: list[str] = []
+
+    for chunk in chunks:
+        if not isinstance(chunk, dict):
+            validation_errors.append("chunk_record_not_object")
+            continue
+        chunk_id = chunk.get("chunk_id")
+        if not isinstance(chunk_id, str) or not chunk_id:
+            validation_errors.append("chunk_id_missing")
+            continue
+
+        chunk_outputs = lane_outputs.get(chunk_id, [])
+        lane_payloads = [record["payload"] for record in chunk_outputs]
+        output_paths = [record["relative_path"] for record in chunk_outputs]
+        chunk_findings = reviews.findings_by_chunk.get(chunk_id, [])
+
+        chunk_validation_errors: list[str] = []
+        chunk_validation_errors.extend(
+            _review_gate_errors(
+                chunk_id,
+                lane_payloads,
+                reviews.statuses,
+                accepted_review_statuses,
+                require_review=_require_review_before_merge(config),
+            )
+        )
+        chunk_validation_errors.extend(_required_lane_errors(required_lane_ids, lane_payloads))
+
+        bundle = make_chunk_bundle(
+            chunk_id=chunk_id,
+            source_range=chunk.get("source_range"),
+            lane_outputs=lane_payloads,
+            review_findings=chunk_findings,
+        )
+        bundle_validation = validate_bundle_ready_for_merge(
+            bundle,
+            require_review_before_merge=_require_review_before_merge(config),
+            allowed_finding_severities=_finding_severities(config),
+            allowed_finding_statuses=_finding_statuses(config),
+        )
+        chunk_validation_errors.extend(bundle_validation.errors)
+        if chunk_validation_errors:
+            validation_errors.extend(chunk_validation_errors)
+            continue
+
+        reviewed_bundle = _reviewed_bundle(
+            bundle,
+            lane_payloads,
+            output_paths,
+            reviewer_status="passed",
+        )
+        bundle_path = _join_artifact(
+            artifacts["reviewed_bundle_dir"],
+            f"{chunk_id}.json",
+        )
+        writer.write_json(bundle_path, reviewed_bundle)
+        bundle_paths.append(bundle_path)
+
+    validation_errors = _canonical_validation_errors(validation_errors)
+    if validation_errors:
+        return _failure_response(
+            graph_root,
+            {"code": validation_errors[0], "validation_errors": validation_errors},
+            _manifest_exists(graph_root),
+            validation_errors=validation_errors,
+        )
+    if not bundle_paths:
+        return _failure_response(
+            graph_root,
+            {"code": "required_lane_missing"},
+            _manifest_exists(graph_root),
+        )
+
+    writer.write_json(
+        artifacts["merge_queue"],
+        {
+            "status": "ready",
+            "bundle_paths": bundle_paths,
+            "required_lane_ids": required_lane_ids,
+        },
+    )
+    return _stage_result(
+        "ingested",
+        graph_root,
+        [],
+        [],
+        None,
+        next_action="merge_stage1",
+        extra={"bundle_paths": bundle_paths},
+    )
+
+
+def merge_stage1(*, graph_dir: str | Path, config: dict) -> dict:
+    graph_root = Path(graph_dir)
+    artifacts = _artifact_paths(config)
+    queue_path = _artifact_path(graph_root, artifacts["merge_queue"])
+    queue, queue_error = _read_json_artifact(
+        queue_path,
+        missing_code="missing_reviewed_agent_outputs",
+        bad_code="merge_queue_invalid",
+    )
+    if queue_error:
+        validation_errors = [queue_error["code"], "required_lane_missing"]
+        return _failure_response(
+            graph_root,
+            queue_error,
+            _manifest_exists(graph_root),
+            validation_errors=validation_errors,
+        )
+
+    bundle_paths, queue_validation_errors = _validate_merge_queue(queue)
+    if queue_validation_errors:
+        validation_errors = _canonical_validation_errors(queue_validation_errors)
+        return _failure_response(
+            graph_root,
+            {"code": validation_errors[0], "validation_errors": validation_errors},
+            _manifest_exists(graph_root),
+            validation_errors=validation_errors,
+        )
+
+    try:
+        allowed_lane_ids = set(_lane_ids(_configured_lanes(config)))
+        allowed_statuses = _lane_output_statuses(config)
+        required_lane_ids = _required_lane_ids_with_queue_guard(queue, config)
+    except ValueError as exc:
+        validation_errors = _canonical_validation_errors([str(exc)])
+        return _failure_response(
+            graph_root,
+            {"code": validation_errors[0], "validation_errors": validation_errors},
+            _manifest_exists(graph_root),
+            validation_errors=validation_errors,
+        )
+
+    bundles: list[dict] = []
+    validation_errors: list[str] = []
+    for relative_path in bundle_paths:
+        path = _artifact_path(graph_root, relative_path)
+        bundle, bundle_error = _read_json_artifact(
+            path,
+            missing_code="missing_reviewed_agent_outputs",
+            bad_code="reviewed_bundle_invalid",
+        )
+        if bundle_error:
+            validation_errors.append(bundle_error["code"])
+            continue
+        if not isinstance(bundle, dict):
+            validation_errors.append("reviewed_bundle_invalid")
+            continue
+        bundle_validation = validate_bundle_ready_for_merge(
+            bundle,
+            require_review_before_merge=_require_review_before_merge(config),
+            required_lane_ids=required_lane_ids,
+            allowed_finding_severities=_finding_severities(config),
+            allowed_finding_statuses=_finding_statuses(config),
+        )
+        if not bundle_validation.ok:
+            validation_errors.extend(bundle_validation.errors)
+            continue
+        lane_output_validation_errors = _embedded_lane_output_errors(
+            bundle,
+            allowed_lane_ids=allowed_lane_ids,
+            allowed_statuses=allowed_statuses,
+        )
+        if lane_output_validation_errors:
+            validation_errors.extend(lane_output_validation_errors)
+            continue
+        bundles.append(bundle)
+
+    if validation_errors:
+        validation_errors = _canonical_validation_errors(validation_errors)
+        return _failure_response(
+            graph_root,
+            {"code": validation_errors[0], "validation_errors": validation_errors},
+            _manifest_exists(graph_root),
+            validation_errors=validation_errors,
+        )
+
+    manifest = _read_manifest(graph_root)
+    novel_name = _novel_name_from_manifest_or_graph_dir(manifest, graph_root)
+    result = build_canonical_graph_from_bundles(
+        bundles,
+        novel_name=novel_name,
+        status_enums=config.get("status_enums"),
+        source_bundle_paths=bundle_paths,
+    )
+    if not result.ok:
+        return _failure_response(
+            graph_root,
+            {"code": "canonical_graph_invalid", "validation_errors": result.errors},
+            _manifest_exists(graph_root),
+            validation_errors=result.errors,
+        )
+
+    writer = OutputWriter(graph_root, _managed_outputs(config))
+    canonical_graph = _graph_with_graphify_metadata(result.graph, config)
+    writer.write_json(artifacts["canonical_graph"], canonical_graph)
+    graphify_warnings: list[str] = []
+    result_status = "success"
+
+    if _graphify_adapter_enabled(config):
+        canonical_graph_path = _artifact_path(graph_root, artifacts["canonical_graph"])
+        graphify_result = _graphify_adapter(config).build_graph(
+            canonical_graph_path,
+            canonical_graph_path.parent,
+            graph_dir=graph_root,
+        )
+        _write_graphify_adapter_ledger(
+            graph_root,
+            config,
+            graphify_result,
+            input_path=artifacts["canonical_graph"],
+        )
+        OutputWriter(graph_root, _managed_outputs(config)).write_json(
+            artifacts["canonical_graph"], canonical_graph
+        )
+        if not graphify_result.ok:
+            if _graphify_failure_policy(config) == "degrade-visualization-and-query":
+                result_status = "warning"
+                graphify_warnings = _dedupe(
+                    [
+                        "graphify_degraded",
+                        *[
+                            warning
+                            for warning in graphify_result.warnings
+                            if isinstance(warning, str)
+                        ],
+                        _graphify_error_code(graphify_result.error),
+                    ]
+                )
+            else:
+                error = graphify_result.error or {"code": "graphify_failed"}
+                manifest_path = graph_root / "manifest.json"
+                if manifest_path.exists():
+                    _update_manifest_stage(manifest_path, "failed")
+                return _failure_response(
+                    graph_root,
+                    error,
+                    _manifest_exists(graph_root),
+                    validation_errors=_dedupe(
+                        ["graphify_adapter_failed", _graphify_error_code(error)]
+                    ),
+                )
+        elif graphify_result.status == "degraded":
+            result_status = "warning"
+            graphify_warnings = _dedupe(
+                [
+                    "graphify_degraded",
+                    *[
+                        warning
+                        for warning in graphify_result.warnings
+                        if isinstance(warning, str)
+                    ],
+                ]
+            )
+
+    manifest_path = graph_root / "manifest.json"
+    if manifest_path.exists():
+        _update_manifest_stage(manifest_path, "success")
+    return _stage_result(
+        result_status,
+        graph_root,
+        graphify_warnings,
+        [],
+        None,
+        next_action=None,
+        extra={"source_bundle_paths": bundle_paths},
     )
 
 
 def build_stage1_graph(source_path: str | Path, config: dict) -> dict:
-    graph_dir_suffix = config.get("graph_dir_suffix", ".storygraph")
-    try:
-        preflight_ctx = _infer_novel_context_without_reading(
-            Path(source_path), graph_dir_suffix, create=True
+    graph_dir = _graph_dir_for_build(source_path, config)
+    template_dir = config.get("paths", {}).get("template_dir")
+    if template_dir is None:
+        return _failure_response(
+            graph_dir,
+            {"code": "template_dir_missing", "message": "paths.template_dir is required"},
+            False,
         )
-    except (OSError, ValueError) as exc:
-        error = {"code": "source_unreadable", "message": str(exc), "source_path": str(source_path)}
-        return _failure_response(None, error, manifest_written=False)
 
-    try:
-        ctx = resolve_novel_context(Path(source_path), graph_dir_suffix, create=True)
-    except UnicodeDecodeError as exc:
-        error = _error("source_encoding_error", exc, preflight_ctx.source_path)
-        _write_preflight_failure(preflight_ctx, config, error)
-        return _failure_response(preflight_ctx.graph_dir, error, manifest_written=True)
-    except (FileNotFoundError, PermissionError, OSError) as exc:
-        error = _error("source_unreadable", exc, preflight_ctx.source_path)
-        _write_preflight_failure(preflight_ctx, config, error)
-        return _failure_response(preflight_ctx.graph_dir, error, manifest_written=True)
-
-    try:
-        discovery = _discover_templates(config)
-        matrix = _build_matrix(discovery.templates, config)
-    except Exception as exc:
-        error = {"code": getattr(exc, "code", "template_discovery_failed"), "message": str(exc)}
-        _write_preflight_failure(preflight_ctx, config, error, role="模板需求分析")
-        return _failure_response(preflight_ctx.graph_dir, error, manifest_written=True)
-
-    config_hash = stable_stage_input_hash(ctx, config, discovery.templates)
-    current_state = stage1_state(ctx, config_hash, validate_graph_dir)
-    if current_state["action"] == "reuse":
-        return {
-            "status": "reused",
-            "source_state": "unchanged",
-            "graph_dir": str(ctx.graph_dir),
-            "manifest_written": False,
-            "validation_errors": [],
-            "warnings": discovery.warnings,
-        }
-
-    _remove_graphify_artifacts(ctx.graph_dir)
-    manifest_path = write_manifest(
-        ctx,
-        config_hash=config_hash,
-        graphify_source=str(config.get("paths", {}).get("graphify_repo")),
+    prepared = prepare_stage1(
+        source_path=source_path,
+        template_dir=template_dir,
+        graph_dir=graph_dir,
+        config=config,
     )
-    writer = OutputWriter(ctx.graph_dir, _managed_outputs(config))
-    writer.write_json("requirements/template-requirements.json", matrix)
+    if prepared.get("status") != "prepared":
+        return prepared
 
-    try:
-        chunks = make_chunk_ledger(
-            ctx.source_path,
-            config.get("chunk_strategy", {}),
-            processor="storygraph-stage1",
-        )
-    except UnicodeDecodeError as exc:
-        error = _error("source_encoding_error", exc, ctx.source_path)
-        _write_chunk_failure(ctx, config, manifest_path, matrix, error, current_state["source_state"])
-        return _failure_response(ctx.graph_dir, error, manifest_written=True)
-    except Exception as exc:
-        error = _error("chunk_extraction_failure", exc, ctx.source_path)
-        _write_chunk_failure(ctx, config, manifest_path, matrix, error, current_state["source_state"])
-        return _failure_response(ctx.graph_dir, error, manifest_written=True)
+    ingested = ingest_stage1(graph_dir=graph_dir, config=config)
+    if ingested.get("status") != "ingested":
+        error = ingested.get("error", {})
+        code = error.get("code")
+        if code in PENDING_AGENT_OUTPUT_CODES:
+            pending = dict(prepared)
+            pending["status"] = "pending_agent_outputs"
+            pending["next_action"] = "run_agent_task_packets"
+            pending["pending_reason"] = error
+            pending["validation_errors"] = ingested.get("validation_errors", [])
+            return pending
+        return ingested
 
-    agent_runs = make_stage_agent_records(
-        [chunk["chunk_id"] for chunk in chunks],
-        [record["template_name"] for record in matrix["templates"]],
-    )
-    single_writer = validate_single_writer(agent_runs)
-    if not single_writer.ok:
-        errors = [{"code": "single_writer_conflict", "detail": detail} for detail in single_writer.errors]
-        for error in errors:
-            _append_error(agent_runs, "质量审查", error)
-        write_coverage_outputs(
-            writer,
-            _complete_pending_chunks(chunks),
-            [],
-            [],
-            agent_runs,
-            [f"- single_writer_conflict: {error['detail']}" for error in errors],
-        )
-        _update_manifest_stage(manifest_path, "failed")
-        _remove_graphify_artifacts(ctx.graph_dir)
-        return _stage_result(
-            "failed",
-            current_state["source_state"],
-            ctx.graph_dir,
-            discovery.warnings,
-            ["single_writer_conflict"],
-            errors[0],
-        )
-
-    try:
-        supplement, readiness = extract_template_aware_supplements(
-            ctx.novel_name,
-            ctx.source_path,
-            chunks,
-            matrix,
-            config.get("evidence_matching_strategy", {}),
-        )
-    except UnicodeDecodeError as exc:
-        error = _error("source_encoding_error", exc, ctx.source_path)
-        _append_error(agent_runs, "图抽取", error)
-        write_coverage_outputs(
-            writer,
-            _failed_chunks_from_error(ctx, error),
-            [],
-            _empty_readiness(matrix, "source_encoding_error"),
-            agent_runs,
-            [f"- source_encoding_error: {error['message']}"],
-        )
-        _update_manifest_stage(manifest_path, "failed")
-        _remove_graphify_artifacts(ctx.graph_dir)
-        return _failure_response(ctx.graph_dir, error, manifest_written=True)
-
-    chunks = _complete_pending_chunks(chunks)
-    gap_lines = [f"- warning: {warning}" for warning in discovery.warnings]
-    contract_errors, contract_warnings = _evaluate_coverage_failures(
-        readiness, chunks, config, agent_runs, gap_lines
-    )
-    subagent_errors, subagent_warnings = _parse_subagent_payloads(config, agent_runs, gap_lines)
-    contract_errors.extend(subagent_errors)
-    contract_warnings.extend(subagent_warnings)
-
-    graph_validation_errors: list[str] = []
-    adapter_error: dict | None = None
-    adapter = _graphify_adapter(config)
-    adapter_result = adapter.build_graph(ctx.source_path, ctx.graph_dir / "graphify-out")
-    if not adapter_result.ok:
-        adapter_error = adapter_result.error or {"code": "graphify_failed"}
-        _append_error(agent_runs, "图抽取", adapter_error)
-        gap_lines.append(f"- {adapter_error['code']}: graphify")
-        _remove_graphify_artifacts(ctx.graph_dir)
-    else:
-        artifacts, artifact_error = _read_graphify_artifacts(
-            adapter_result.graph_path,
-            ctx.graph_dir / "graphify-out",
-        )
-        if artifact_error:
-            adapter_error = artifact_error
-            _append_error(agent_runs, "图抽取", adapter_error)
-            gap_lines.append(f"- {adapter_error['code']}: {adapter_error.get('message', '')}")
-            _remove_graphify_artifacts(ctx.graph_dir)
-        else:
-            graph = merge_template_supplements(artifacts["graph"], supplement)
-            validation = validate_canonical_graph(graph, config.get("status_enums"))
-            graph_validation_errors = validation.errors
-            if graph_validation_errors:
-                adapter_error = {
-                    "code": "graphify_failed",
-                    "message": "merged graph failed canonical validation",
-                    "validation_errors": graph_validation_errors,
-                }
-                _append_error(agent_runs, "图抽取", adapter_error)
-                gap_lines.append("- graphify_failed: merged graph failed canonical validation")
-                _remove_graphify_artifacts(ctx.graph_dir)
-            else:
-                writer.write_json("graphify-out/graph.json", graph)
-                writer.write_text("graphify-out/GRAPH_REPORT.md", artifacts["report"])
-                writer.write_text("graphify-out/graph.html", artifacts["html"])
-
-    validation_errors = [
-        *(error["code"] for error in contract_errors),
-        *(error["code"] for error in contract_warnings),
-        *graph_validation_errors,
-    ]
-    if adapter_error:
-        validation_errors.insert(0, adapter_error["code"])
-
-    status = _stage_status(adapter_error, contract_errors, contract_warnings, graph_validation_errors)
-    if status in {"success", "warning"}:
-        _mark_completed(agent_runs)
-
-    if graph_validation_errors:
-        gap_lines = [f"- validation error: {error}" for error in graph_validation_errors] + gap_lines
-    write_coverage_outputs(
-        writer,
-        chunks,
-        supplement.get("evidence_index", []),
-        readiness,
-        agent_runs,
-        gap_lines,
-    )
-    _update_manifest_stage(manifest_path, status)
-    error = None
-    if status == "failed":
-        if adapter_error:
-            error = adapter_error
-        elif contract_errors:
-            error = contract_errors[0]
-        elif graph_validation_errors:
-            error = {"code": graph_validation_errors[0]}
-    return _stage_result(
-        status,
-        current_state["source_state"],
-        ctx.graph_dir,
-        discovery.warnings,
-        validation_errors,
-        error,
-    )
+    return merge_stage1(graph_dir=graph_dir, config=config)
 
 
 def graphify_source_fingerprint(config: dict) -> dict:
     repo_value = config.get("paths", {}).get("graphify_repo")
     repo = Path(repo_value) if repo_value else None
-    commit = None
-    tree_hash = None
-    dirty_status = None
-    dirty_diff_hash = None
     repo_content_hash = None
-    if repo and (repo / ".git").exists():
-        completed = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=repo,
-            capture_output=True,
-            text=True,
-        )
-        if completed.returncode == 0:
-            commit = completed.stdout.strip()
-        tree = subprocess.run(
-            ["git", "rev-parse", "HEAD^{tree}"],
-            cwd=repo,
-            capture_output=True,
-            text=True,
-        )
-        if tree.returncode == 0:
-            tree_hash = tree.stdout.strip()
-        status = subprocess.run(
-            ["git", "status", "--porcelain=v1", "-z"],
-            cwd=repo,
-            capture_output=True,
-        )
-        if status.returncode == 0:
-            dirty_status = sha256(status.stdout).hexdigest()
-        diff = subprocess.run(
-            ["git", "diff", "--binary", "HEAD"],
-            cwd=repo,
-            capture_output=True,
-        )
-        if diff.returncode == 0:
-            dirty_diff_hash = sha256(diff.stdout).hexdigest()
-        repo_content_hash = _directory_content_hash(repo)
-    elif repo and repo.exists():
+    if repo and repo.exists():
         repo_content_hash = _directory_content_hash(repo)
     adapter_config, adapter_config_error = _graphify_adapter_config(config)
     command = adapter_config.get("command", [])
     return {
         "graphify_repo": str(repo) if repo else None,
-        "graphify_commit": commit,
-        "graphify_tree_hash": tree_hash,
-        "graphify_dirty_status": dirty_status,
-        "graphify_dirty_diff_hash": dirty_diff_hash,
         "graphify_content_hash": repo_content_hash,
         "adapter_mode": adapter_config.get("mode"),
         "adapter_command": command,
@@ -314,29 +534,47 @@ def graphify_source_fingerprint(config: dict) -> dict:
     }
 
 
-def stable_stage_input_hash(ctx, config: dict, templates: list) -> str:
-    relevant = {
-        "source_hash": ctx.source_hash,
-        "config": config,
-        "graphify_source": graphify_source_fingerprint(config),
-        "templates": [
-            {
-                "template_name": template.name,
-                "template_file": str(template.path),
-                "template_file_hash": template.file_hash,
-            }
-            for template in templates
-        ],
-    }
-    return sha256(
-        json.dumps(relevant, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
-    ).hexdigest()
+def stable_stage_input_hash(
+    ctx: NovelContext,
+    config: dict,
+    templates: list,
+    *,
+    requirements_hash: str | None = None,
+    reviewed_output_manifest_hash: str | None = None,
+) -> str:
+    return compute_stage1_input_hash(
+        source_hash=ctx.source_hash,
+        config_hash=_stable_json_hash(config),
+        template_inventory_hash=_template_inventory_hash(templates),
+        task_packet_schema_hash=_task_packet_schema_hash(config),
+        requirements_hash=requirements_hash,
+        reviewed_output_manifest_hash=reviewed_output_manifest_hash,
+    )
 
 
-def _discover_templates(config: dict):
+def _build_task_packets(
+    source_path: Path,
+    chunks: list[dict],
+    lanes: list[dict],
+    artifacts: dict[str, str],
+    config: dict,
+) -> list[dict]:
+    from .stage1_packets import build_task_packets
+
+    return build_task_packets(
+        source_path=source_path,
+        chunks=chunks,
+        lanes=lanes,
+        template_requirements_path=artifacts["requirements"],
+        task_packet_dir=artifacts["task_packet_dir"],
+        required_evidence_policy=config.get("required_evidence_policy"),
+    )
+
+
+def _discover_templates(config: dict, template_dir: str | Path):
     template_config = config.get("template_discovery", {})
     return discover_templates(
-        Path(config.get("paths", {}).get("template_dir")),
+        Path(template_dir),
         glob=template_config.get("glob", "*模板.md"),
         readme_index_file=template_config.get("readme_index_file", "README.md"),
         exclude_files=template_config.get("exclude_files", []),
@@ -344,23 +582,701 @@ def _discover_templates(config: dict):
     )
 
 
-def _build_matrix(templates: list, config: dict) -> dict:
-    matrix = build_requirement_matrix(
-        templates,
-        rules=config.get("template_parser_rules"),
-        mappings=config.get("template_graph_mappings", {}),
-        status_enums=config.get("status_enums"),
-        output_language=config.get("output_language", "zh-CN"),
+def _novel_context(source_path: str | Path, graph_dir: str | Path) -> NovelContext:
+    source = Path(source_path).expanduser().resolve()
+    graph_root = Path(graph_dir).expanduser().resolve()
+    graph_root.mkdir(parents=True, exist_ok=True)
+    return NovelContext(
+        source_path=source,
+        source_hash=file_sha256(source),
+        source_size=source.stat().st_size,
+        novel_name=source.stem,
+        novel_dir=source.parent,
+        graph_dir=graph_root,
     )
-    matrix["template_count_policy"] = config.get("template_count_policy", {})
-    matrix["status_enums"] = config.get("status_enums", {})
-    count_policy = matrix["template_count_policy"]
-    expected = count_policy.get("expected_existing_templates")
-    if count_policy.get("enforce_integration_count") and expected is not None:
-        matrix["count_matches_expected"] = matrix["template_count"] == expected
-        if matrix["template_count"] != expected:
-            raise ValueError(f"template_count_mismatch:{matrix['template_count']}:{expected}")
-    return matrix
+
+
+def _config_with_paths(config: dict, template_dir: str | Path) -> dict:
+    active_config = dict(config)
+    paths = dict(active_config.get("paths", {}))
+    paths["template_dir"] = str(template_dir)
+    active_config["paths"] = paths
+    return active_config
+
+
+def _graph_dir_for_build(source_path: str | Path, config: dict) -> Path:
+    graph_dir = config.get("paths", {}).get("graph_dir")
+    if graph_dir:
+        return Path(graph_dir)
+    suffix = config.get("graph_dir_suffix", ".storygraph")
+    source = Path(source_path).expanduser().resolve(strict=False)
+    return source.parent / f"{source.stem}{suffix}"
+
+
+def _configured_lanes(config: dict) -> list[dict]:
+    lanes = config.get("element_lanes")
+    if not isinstance(lanes, list) or not lanes:
+        raise ValueError("element_lanes_missing")
+    normalized: list[dict] = []
+    for lane in lanes:
+        if not isinstance(lane, dict):
+            raise ValueError("element_lane_not_object")
+        normalized.append(dict(lane))
+    return normalized
+
+
+def _lane_ids(lanes: Iterable[dict]) -> list[str]:
+    return [
+        lane["lane_id"]
+        for lane in lanes
+        if isinstance(lane.get("lane_id"), str) and lane.get("lane_id")
+    ]
+
+
+def _required_lane_ids(lanes: Iterable[dict]) -> list[str]:
+    return [
+        lane["lane_id"]
+        for lane in lanes
+        if lane.get("required") is True
+        and isinstance(lane.get("lane_id"), str)
+        and lane.get("lane_id")
+    ]
+
+
+def _write_chunk_texts(
+    writer: OutputWriter,
+    chunks: list[dict],
+    chunk_text_dir: str,
+) -> list[dict]:
+    prepared_chunks: list[dict] = []
+    for chunk in chunks:
+        prepared = dict(chunk)
+        text = prepared.pop("text", "")
+        chunk_text_path = _join_artifact(chunk_text_dir, f"{prepared['chunk_id']}.txt")
+        writer.write_text(chunk_text_path, text)
+        prepared["chunk_text_path"] = chunk_text_path
+        prepared_chunks.append(prepared)
+    return prepared_chunks
+
+
+def _pending_agent_run_ledger(
+    chunks: list[dict],
+    templates: list,
+    packets: list[dict],
+    artifacts: dict[str, str],
+) -> list[dict]:
+    chunk_ids = [chunk["chunk_id"] for chunk in chunks]
+    template_names = [template.name for template in templates]
+    records = [
+        make_agent_run_record(
+            "stage1-template-requirements",
+            "template-requirements-analysis-agent",
+            "stage1",
+            chunk_ids,
+            template_names,
+            ["templates"],
+            [artifacts["requirements"]],
+            [artifacts["requirements"]],
+        )
+    ]
+    for packet in packets:
+        chunk_id = packet["chunk_id"]
+        lane_id = packet["lane_id"]
+        attempt = packet.get("attempt", 1)
+        output_path = _join_artifact(
+            artifacts["lane_output_dir"],
+            chunk_id,
+            lane_id,
+            f"run-{attempt:03d}.json",
+        )
+        input_paths = [artifacts["requirements"]]
+        if packet.get("chunk_text_path"):
+            input_paths.append(packet["chunk_text_path"])
+        records.append(
+            make_lane_agent_record(
+                run_id=f"{chunk_id}:{lane_id}:run-{attempt:03d}",
+                chunk_id=chunk_id,
+                lane_id=lane_id,
+                agent_role=packet["agent_role"],
+                task_packet_path=packet["task_packet_path"],
+                output_path=output_path,
+                attempt=attempt,
+                input_paths=input_paths,
+            )
+        )
+    return records
+
+
+def _failed_agent_runs(agent_runs: list[dict], code: str, errors: list[dict]) -> list[dict]:
+    failed = [dict(record) for record in agent_runs]
+    for record in failed:
+        record["status"] = "failed"
+        record["errors"] = list(errors)
+    return failed
+
+
+def _read_lane_outputs(graph_dir: Path, config: dict) -> tuple[dict[str, list[dict]], list[str]]:
+    artifacts = _artifact_paths(config)
+    root = _artifact_path(graph_dir, artifacts["lane_output_dir"])
+    if not root.exists():
+        return {}, []
+    allowed_lane_ids = set(_lane_ids(_configured_lanes(config)))
+    allowed_statuses = _lane_output_statuses(config)
+    chunk_ranges = _chunk_ranges(graph_dir)
+    outputs: dict[str, list[dict]] = {}
+    errors: list[str] = []
+    for path in sorted(root.glob("*/*/*.json")):
+        payload, error = _read_json_artifact(
+            path,
+            missing_code="lane_output_missing",
+            bad_code="lane_output_invalid",
+        )
+        relative_path = _relative_to_graph(graph_dir, path)
+        if error:
+            errors.append(error["code"])
+            continue
+        validation = validate_lane_output(
+            payload,
+            allowed_lane_ids=allowed_lane_ids,
+            allowed_statuses=allowed_statuses,
+            chunk_source_range=chunk_ranges.get(payload.get("chunk_id"))
+            if isinstance(payload, dict)
+            else None,
+        )
+        if not validation.ok:
+            errors.extend(validation.errors)
+            continue
+        outputs.setdefault(payload["chunk_id"], []).append(
+            {"payload": payload, "relative_path": relative_path}
+        )
+    return outputs, _dedupe(errors)
+
+
+class _ReviewRecords:
+    def __init__(self) -> None:
+        self.statuses: dict[tuple[str, str], str] = {}
+        self.findings_by_chunk: dict[str, list[dict]] = {}
+
+
+def _read_review_records(graph_dir: Path, config: dict) -> tuple[_ReviewRecords, list[str]]:
+    records = _ReviewRecords()
+    review_path = _artifact_path(graph_dir, _artifact_paths(config)["review_findings"])
+    if not review_path.exists():
+        return records, ["review_findings_missing"] if _require_review_before_merge(config) else []
+    payload, error = _read_json_artifact(
+        review_path,
+        missing_code="review_findings_missing",
+        bad_code="review_findings_invalid",
+    )
+    if error:
+        return records, [error["code"]]
+    if isinstance(payload, dict):
+        items = payload.get("reviews") or payload.get("findings") or []
+    else:
+        items = payload
+    if not isinstance(items, list):
+        return records, ["review_findings_invalid"]
+    errors: list[str] = []
+    allowed_reviewer_statuses = _reviewer_statuses(config)
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            errors.append(f"review_record_not_object:{index}")
+            continue
+        chunk_id = item.get("chunk_id")
+        lane_id = item.get("lane_id")
+        if isinstance(chunk_id, str) and isinstance(lane_id, str):
+            reviewer_status = item.get("reviewer_status")
+            if isinstance(reviewer_status, str) and reviewer_status:
+                if reviewer_status not in allowed_reviewer_statuses:
+                    errors.append(f"reviewer_status_not_allowed:{reviewer_status}")
+                    continue
+                records.statuses[(chunk_id, lane_id)] = reviewer_status
+            for finding in item.get("findings", []):
+                if isinstance(finding, dict):
+                    finding = dict(finding)
+                    finding.setdefault("chunk_id", chunk_id)
+                    finding.setdefault("lane_id", lane_id)
+                    records.findings_by_chunk.setdefault(chunk_id, []).append(finding)
+        elif "finding_id" in item:
+            finding_chunk = item.get("chunk_id")
+            if isinstance(finding_chunk, str):
+                records.findings_by_chunk.setdefault(finding_chunk, []).append(item)
+            else:
+                errors.append(f"review_finding_missing_chunk:{index}")
+        else:
+            errors.append(f"review_record_missing_scope:{index}")
+    return records, _dedupe(errors)
+
+
+def _chunk_ranges(graph_dir: Path) -> dict[str, list[int]]:
+    path = graph_dir / "coverage" / "chunk-ledger.json"
+    try:
+        chunks = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError, RecursionError):
+        return {}
+    if not isinstance(chunks, list):
+        return {}
+    ranges = {}
+    for chunk in chunks:
+        if not isinstance(chunk, dict):
+            continue
+        chunk_id = chunk.get("chunk_id")
+        source_range = chunk.get("source_range")
+        if isinstance(chunk_id, str) and isinstance(source_range, list):
+            ranges[chunk_id] = source_range
+    return ranges
+
+
+def _review_gate_errors(
+    chunk_id: str,
+    lane_outputs: list[dict],
+    review_statuses: dict[tuple[str, str], str],
+    accepted_statuses: set[str],
+    *,
+    require_review: bool,
+) -> list[str]:
+    if not require_review:
+        return []
+    errors: list[str] = []
+    for lane_output in lane_outputs:
+        lane_id = lane_output.get("lane_id")
+        if not isinstance(lane_id, str):
+            continue
+        status = review_statuses.get((chunk_id, lane_id))
+        if status in accepted_statuses:
+            continue
+        if status is None:
+            errors.append(f"review_missing:{chunk_id}:{lane_id}")
+        else:
+            errors.append(f"review_not_passed:{chunk_id}:{lane_id}:{status}")
+    return errors
+
+
+def _required_lane_errors(required_lane_ids: list[str], lane_outputs: list[dict]) -> list[str]:
+    errors: list[str] = []
+    by_lane: dict[str, list[dict]] = {}
+    for output in lane_outputs:
+        lane_id = output.get("lane_id")
+        if isinstance(lane_id, str):
+            by_lane.setdefault(lane_id, []).append(output)
+    for lane_id in required_lane_ids:
+        outputs = by_lane.get(lane_id, [])
+        if any(output.get("output_status") == "completed" for output in outputs):
+            continue
+        if any(_has_qualified_structured_failure(output) for output in outputs):
+            continue
+        errors.append(f"required_lane_missing:{lane_id}")
+    return errors
+
+
+def _has_qualified_structured_failure(output: dict) -> bool:
+    failures = output.get("structured_failures")
+    return output.get("output_status") in {"blocked", "failed", "needs_repair"} and isinstance(
+        failures, list
+    ) and bool(failures)
+
+
+def _reviewed_bundle(
+    bundle: dict,
+    lane_outputs: list[dict],
+    lane_output_paths: list[str],
+    *,
+    reviewer_status: str,
+) -> dict:
+    reviewed = dict(bundle)
+    reviewed["ready_for_merge"] = True
+    reviewed["reviewer_status"] = reviewer_status
+    reviewed["lane_output_paths"] = lane_output_paths
+    reviewed["normalized_nodes"] = _flatten_lane_items(lane_outputs, "extracted_nodes")
+    reviewed["normalized_edges"] = _flatten_lane_items(lane_outputs, "extracted_edges")
+    reviewed["normalized_events"] = _flatten_lane_items(lane_outputs, "extracted_events")
+    reviewed["normalized_evidence"] = _flatten_lane_items(lane_outputs, "extracted_evidence")
+    return reviewed
+
+
+def _flatten_lane_items(lane_outputs: list[dict], field: str) -> list[dict]:
+    items: list[dict] = []
+    for output in lane_outputs:
+        values = output.get(field, [])
+        if isinstance(values, list):
+            items.extend(item for item in values if isinstance(item, dict))
+    return items
+
+
+def _validate_merge_queue(queue: Any) -> tuple[list[str], list[str]]:
+    if not isinstance(queue, dict):
+        return [], ["merge_queue_invalid"]
+
+    status = queue.get("status")
+    if status != "ready":
+        return [], ["merge_queue_not_ready"]
+
+    values = queue.get("bundle_paths")
+    if not isinstance(values, list) or not values:
+        return [], ["merge_queue_invalid"]
+
+    paths: list[str] = []
+    errors: list[str] = []
+    for value in values:
+        if not isinstance(value, str) or not value:
+            errors.append("merge_queue_invalid")
+            continue
+        try:
+            paths.append(normalize_relative_output_path(value))
+        except OutputWriteError:
+            errors.append("merge_queue_invalid")
+    if errors:
+        return [], _dedupe(errors)
+    return paths, []
+
+
+def _embedded_lane_output_errors(
+    bundle: dict,
+    *,
+    allowed_lane_ids: set[str],
+    allowed_statuses: list[str],
+) -> list[str]:
+    lane_outputs = bundle.get("lane_outputs")
+    if not isinstance(lane_outputs, list):
+        return ["lane_output_invalid"]
+
+    errors: list[str] = []
+    for lane_output in lane_outputs:
+        validation = validate_lane_output(
+            lane_output,
+            allowed_lane_ids=allowed_lane_ids,
+            allowed_statuses=allowed_statuses,
+            chunk_source_range=bundle.get("source_range"),
+        )
+        if validation.ok:
+            continue
+        errors.append("lane_output_invalid")
+        errors.extend(validation.errors)
+    return _dedupe(errors)
+
+
+def _required_lane_ids_with_queue_guard(queue: Any, config: dict) -> list[str]:
+    configured_lanes = _configured_lanes(config)
+    config_required_lane_ids = _required_lane_ids(configured_lanes)
+    if not isinstance(queue, dict) or "required_lane_ids" not in queue:
+        return config_required_lane_ids
+
+    queue_required_lane_ids = _validated_queue_required_lane_ids(
+        queue.get("required_lane_ids"),
+        allowed_lane_ids=set(_lane_ids(configured_lanes)),
+    )
+    missing_config_required_lanes = [
+        lane_id
+        for lane_id in config_required_lane_ids
+        if lane_id not in queue_required_lane_ids
+    ]
+    if missing_config_required_lanes:
+        raise ValueError("merge_queue_invalid")
+    return config_required_lane_ids
+
+
+def _validated_queue_required_lane_ids(values: Any, *, allowed_lane_ids: set[str]) -> list[str]:
+    if not isinstance(values, list):
+        raise ValueError("merge_queue_invalid")
+    lane_ids: list[str] = []
+    for value in values:
+        if not isinstance(value, str) or not value or value not in allowed_lane_ids:
+            raise ValueError("merge_queue_invalid")
+        if value not in lane_ids:
+            lane_ids.append(value)
+    return lane_ids
+
+
+def _read_json_artifact(
+    path: Path,
+    *,
+    missing_code: str,
+    bad_code: str,
+) -> tuple[Any | None, dict | None]:
+    if not path.exists():
+        return None, {"code": missing_code, "path": str(path)}
+    try:
+        return json.loads(path.read_text(encoding="utf-8")), None
+    except UnicodeError:
+        return None, {"code": f"{bad_code}_utf8_decode_error", "path": str(path)}
+    except json.JSONDecodeError:
+        return None, {"code": f"{bad_code}_json", "path": str(path)}
+    except RecursionError:
+        return None, {"code": f"{bad_code}_too_deep", "path": str(path)}
+    except OSError:
+        return None, {"code": bad_code, "path": str(path)}
+
+
+def _artifact_paths(config: dict) -> dict[str, str]:
+    paths = dict(DEFAULT_STAGE1_ARTIFACTS)
+    configured = config.get("stage1_artifacts")
+    if isinstance(configured, dict):
+        for key, value in configured.items():
+            if isinstance(value, str) and value:
+                paths[key] = value
+    return paths
+
+
+def _managed_outputs(config: dict) -> list[str]:
+    configured = list(config.get("writer_policy", {}).get("managed_outputs", []))
+    artifacts = _artifact_paths(config)
+    derived = [
+        artifacts["requirements"],
+        _join_artifact(artifacts["task_packet_dir"], "*", "*.json"),
+        _join_artifact(artifacts["chunk_text_dir"], "*.txt"),
+        _join_artifact(artifacts["lane_output_dir"], "*", "*", "*.json"),
+        _join_artifact(artifacts["reviewed_bundle_dir"], "*.json"),
+        artifacts["merge_queue"],
+        artifacts["review_findings"],
+        artifacts["canonical_graph"],
+        artifacts["agent_run_ledger"],
+    ]
+    return _dedupe([*configured, *derived])
+
+
+def _join_artifact(base: str | Path, *parts: str) -> str:
+    normalized = normalize_relative_output_path(base, allow_wildcards=True)
+    return PurePosixPath(normalized, *parts).as_posix()
+
+
+def _artifact_path(graph_dir: Path, relative_path: str | Path) -> Path:
+    normalized = normalize_relative_output_path(relative_path)
+    return graph_dir / Path(*normalized.split("/"))
+
+
+def _relative_to_graph(graph_dir: Path, path: Path) -> str:
+    return path.relative_to(graph_dir).as_posix()
+
+
+def _lane_output_statuses(config: dict) -> list[str]:
+    statuses = config.get("status_enums", {}).get("lane_output_statuses")
+    if isinstance(statuses, list) and all(isinstance(item, str) for item in statuses):
+        return statuses
+    return ["pending", "completed", "blocked", "failed", "needs_repair"]
+
+
+def _finding_statuses(config: dict) -> list[str]:
+    statuses = config.get("status_enums", {}).get("finding_statuses")
+    if isinstance(statuses, list) and all(isinstance(item, str) for item in statuses):
+        return statuses
+    return ["open", "closed", "waived"]
+
+
+def _finding_severities(config: dict) -> list[str]:
+    severities = config.get("status_enums", {}).get("finding_severities")
+    if isinstance(severities, list) and all(isinstance(item, str) for item in severities):
+        return severities
+    return ["must_fix", "should_fix", "note"]
+
+
+def _reviewer_statuses(config: dict) -> set[str]:
+    statuses = config.get("status_enums", {}).get("reviewer_statuses")
+    if isinstance(statuses, list) and all(isinstance(item, str) for item in statuses):
+        return {status for status in statuses if status}
+    return {"pending", "passed", "failed", "blocked"}
+
+
+def _accepted_review_statuses(config: dict) -> set[str]:
+    accepted_statuses = {"passed"}
+    review_policy = config.get("review_policy", {})
+    if isinstance(review_policy, dict):
+        configured_accepted = review_policy.get("accepted_reviewer_statuses")
+        if isinstance(configured_accepted, list) and all(
+            isinstance(item, str) for item in configured_accepted
+        ):
+            accepted_statuses = {status for status in configured_accepted if status}
+    return _reviewer_statuses(config) & accepted_statuses
+
+
+def _require_review_before_merge(config: dict) -> bool:
+    review_policy = config.get("review_policy", {})
+    if isinstance(review_policy, dict):
+        return bool(review_policy.get("require_review_before_canonical_merge", True))
+    return True
+
+
+def _canonical_validation_errors(errors: list[str]) -> list[str]:
+    mapped: list[str] = []
+    for error in errors:
+        if error.startswith(
+            (
+                "required_lane_missing:",
+                "missing_required_lane:",
+                "required_lane_not_completed:",
+                "required_lane_blocked_by_open_finding:",
+                "required_lane_structured_failure:",
+            )
+        ):
+            mapped.append("required_lane_missing")
+        mapped.append(error)
+    return _dedupe(mapped)
+
+
+def _stage_result(
+    status: str,
+    graph_dir: Path,
+    warnings: list[dict],
+    validation_errors: list[str],
+    error: dict | None,
+    *,
+    next_action: str | None,
+    extra: dict | None = None,
+) -> dict:
+    result = {
+        "status": status,
+        "graph_dir": str(graph_dir),
+        "manifest_written": (graph_dir / "manifest.json").exists(),
+        "warnings": warnings,
+        "validation_errors": validation_errors,
+    }
+    if error:
+        result["error"] = error
+    if next_action:
+        result["next_action"] = next_action
+    if extra:
+        result.update(extra)
+    return result
+
+
+def _failure_response(
+    graph_dir: Path | None,
+    error: dict,
+    manifest_written: bool,
+    *,
+    validation_errors: list[str] | None = None,
+) -> dict:
+    return {
+        "status": "failed",
+        "graph_dir": str(graph_dir) if graph_dir else None,
+        "manifest_written": manifest_written,
+        "error": error,
+        "validation_errors": validation_errors or [error["code"]],
+    }
+
+
+def _error(code: str, exc: Exception) -> dict:
+    return {"code": code, "message": str(exc)}
+
+
+def _exception_code(exc: Exception, fallback: str) -> str:
+    text = str(exc)
+    if text and text.replace("_", "").replace("-", "").isalnum():
+        return text
+    return fallback
+
+
+def _manifest_exists(graph_dir: Path) -> bool:
+    return (graph_dir / "manifest.json").exists()
+
+
+def _read_manifest(graph_dir: Path) -> dict:
+    try:
+        payload = json.loads((graph_dir / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError, RecursionError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _novel_name_from_manifest_or_graph_dir(manifest: dict, graph_dir: Path) -> str:
+    novel_name = manifest.get("novel_name")
+    if isinstance(novel_name, str) and novel_name:
+        return novel_name
+    stem = graph_dir.stem
+    return stem.removesuffix(".storygraph") or stem
+
+
+def _update_manifest_stage(manifest_path: Path, stage1_status: str) -> None:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    stage_status = manifest.setdefault("stage_status", {})
+    stage_status["stage1"] = stage1_status
+    stage_status.setdefault("stage2", "not_requested")
+    manifest["updated_at"] = datetime.now(timezone.utc).isoformat()
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _remove_graphify_artifacts(graph_dir: Path) -> None:
+    for relative in [
+        "graphify-out/graph.json",
+        "graphify-out/GRAPH_REPORT.md",
+        "graphify-out/graph.html",
+    ]:
+        path = graph_dir / Path(*relative.split("/"))
+        if path.exists() and path.is_file():
+            path.unlink()
+        elif path.exists() and path.is_dir():
+            shutil.rmtree(path)
+
+
+def _stable_json_hash(value: Any) -> str:
+    return sha256(
+        json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def _template_inventory_hash(templates: list) -> str:
+    inventory = [
+        {
+            "template_name": template.name,
+            "template_file": str(template.path),
+            "template_file_hash": template.file_hash,
+        }
+        for template in templates
+    ]
+    return _stable_json_hash(inventory)
+
+
+def _task_packet_schema_hash(config: dict) -> str:
+    relevant = {
+        "element_lanes": config.get("element_lanes"),
+        "stage1_artifacts": config.get("stage1_artifacts"),
+        "lane_output_statuses": config.get("status_enums", {}).get("lane_output_statuses"),
+    }
+    return _stable_json_hash(relevant)
+
+
+def _directory_content_hash(root: Path) -> str | None:
+    if not root.exists() or not root.is_dir():
+        return None
+    excluded_dirs = {".git", "__pycache__", ".pytest_cache", "node_modules", "graphify-out"}
+    h = sha256()
+    file_count = 0
+    for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
+        relative_parts = path.relative_to(root).parts
+        if any(part in excluded_dirs or part.endswith(".storygraph") for part in relative_parts):
+            continue
+        if not path.is_file():
+            continue
+        try:
+            relative = path.relative_to(root).as_posix()
+            data = path.read_bytes()
+        except OSError:
+            continue
+        h.update(relative.encode("utf-8"))
+        h.update(b"\0")
+        h.update(sha256(data).digest())
+        file_count += 1
+    h.update(f"files:{file_count}".encode("utf-8"))
+    return h.hexdigest()
+
+
+def _executable_fingerprint(command: object) -> dict:
+    if not isinstance(command, list) or not command or not isinstance(command[0], str):
+        return {}
+    executable = command[0]
+    resolved = shutil.which(executable) or executable
+    version = None
+    try:
+        completed = subprocess.run(
+            [resolved, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        completed = None
+    if completed is not None and completed.returncode == 0:
+        version = (completed.stdout or completed.stderr).strip().splitlines()[:1]
+    return {"executable": executable, "resolved": resolved, "version": version}
 
 
 def _graphify_adapter(config: dict) -> GraphifyAdapter:
@@ -371,8 +1287,111 @@ def _graphify_adapter(config: dict) -> GraphifyAdapter:
         adapter_config.get("command", []),
         adapter_config.get("timeout_seconds", 1800),
         adapter_config.get("mode", "local-repo-or-cli"),
+        failure_policy=adapter_config.get("failure_policy", "blocking"),
+        input_strategy=adapter_config.get(
+            "input_strategy", "canonical-graph-or-graph-dir-only"
+        ),
         config_error=adapter_config_error,
     )
+
+
+def _graphify_adapter_enabled(config: dict) -> bool:
+    return "graphify_adapter" in config
+
+
+def _graphify_failure_policy(config: dict) -> str:
+    adapter_config = config.get("graphify_adapter")
+    if isinstance(adapter_config, dict):
+        policy = adapter_config.get("failure_policy")
+        if isinstance(policy, str) and policy:
+            return policy
+    return "blocking"
+
+
+def _graphify_input_strategy(config: dict) -> str:
+    adapter_config = config.get("graphify_adapter")
+    if isinstance(adapter_config, dict):
+        strategy = adapter_config.get("input_strategy")
+        if isinstance(strategy, str) and strategy:
+            return strategy
+    return "canonical-graph-or-graph-dir-only"
+
+
+def _graph_with_graphify_metadata(graph: dict, config: dict) -> dict:
+    metadata = graph.setdefault("metadata", {})
+    if isinstance(metadata, dict):
+        metadata["graphify_input_strategy"] = _graphify_input_strategy(config)
+        metadata.pop("source_semantic_base_graph", None)
+    return graph
+
+
+def _write_graphify_adapter_ledger(
+    graph_dir: Path,
+    config: dict,
+    graphify_result,
+    *,
+    input_path: str,
+) -> None:
+    artifacts = _artifact_paths(config)
+    ledger_path = _artifact_path(graph_dir, artifacts["agent_run_ledger"])
+    records: list[dict] = []
+    if ledger_path.exists():
+        existing, existing_error = _read_json_artifact(
+            ledger_path,
+            missing_code="agent_run_ledger_missing",
+            bad_code="agent_run_ledger_invalid",
+        )
+        if existing_error is None and isinstance(existing, list):
+            records = [record for record in existing if isinstance(record, dict)]
+
+    graphify_output_dir = PurePosixPath(input_path).parent
+    output_paths = [
+        graphify_output_dir.joinpath("GRAPH_REPORT.md").as_posix(),
+        graphify_output_dir.joinpath("graph.html").as_posix(),
+    ]
+    now = datetime.now(timezone.utc).isoformat()
+    error = graphify_result.error if not graphify_result.ok else None
+    status = "completed" if graphify_result.ok else "failed"
+    errors = [error] if error else []
+    warnings = list(graphify_result.warnings)
+    if _graphify_failure_policy(config) == "degrade-visualization-and-query":
+        status = "completed"
+        if not graphify_result.ok:
+            warnings = _dedupe(
+                [
+                    *[warning for warning in warnings if isinstance(warning, str)],
+                    _graphify_error_code(error),
+                ]
+            )
+    records.append(
+        {
+            "run_id": "stage1-graphify-adapter",
+            "stage": "stage1",
+            "chunk_id": "graphify-adapter",
+            "lane_id": "graphify_adapter",
+            "agent_role": "graphify-adapter",
+            "prompt_or_input_packet": input_path,
+            "input_paths": [input_path],
+            "output_paths": output_paths,
+            "write_scope": output_paths,
+            "status": status,
+            "errors": errors,
+            "warnings": warnings,
+            "command": list(graphify_result.command),
+            "reviewer_status": "passed",
+            "started_at": now,
+            "finished_at": now,
+        }
+    )
+    OutputWriter(graph_dir, _managed_outputs(config)).write_json(
+        artifacts["agent_run_ledger"], records
+    )
+
+
+def _graphify_error_code(error: dict | None) -> str:
+    if isinstance(error, dict) and isinstance(error.get("code"), str):
+        return error["code"]
+    return "graphify_failed"
 
 
 def _graphify_adapter_config(config: dict) -> tuple[dict, dict | None]:
@@ -436,316 +1455,12 @@ def _artifact_error(code: str, artifact: str, exc: Exception) -> dict:
     return {"code": code, "artifact": artifact, "message": str(exc)}
 
 
-def _directory_content_hash(root: Path) -> str | None:
-    if not root.exists() or not root.is_dir():
-        return None
-    excluded_dirs = {".git", "__pycache__", ".pytest_cache", "node_modules", "graphify-out"}
-    h = sha256()
-    file_count = 0
-    for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
-        relative_parts = path.relative_to(root).parts
-        if any(part in excluded_dirs or part.endswith(".storygraph") for part in relative_parts):
+def _dedupe(values: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for value in values:
+        if value in seen:
             continue
-        if not path.is_file():
-            continue
-        try:
-            relative = path.relative_to(root).as_posix()
-            data = path.read_bytes()
-        except OSError:
-            continue
-        h.update(relative.encode("utf-8"))
-        h.update(b"\0")
-        h.update(sha256(data).digest())
-        file_count += 1
-    h.update(f"files:{file_count}".encode("utf-8"))
-    return h.hexdigest()
-
-
-def _executable_fingerprint(command: object) -> dict:
-    if not isinstance(command, list) or not command or not isinstance(command[0], str):
-        return {}
-    executable = command[0]
-    resolved = shutil.which(executable) or executable
-    version = None
-    try:
-        completed = subprocess.run(
-            [resolved, "--version"],
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        completed = None
-    if completed is not None and completed.returncode == 0:
-        version = (completed.stdout or completed.stderr).strip().splitlines()[:1]
-    return {"executable": executable, "resolved": resolved, "version": version}
-
-
-def _managed_outputs(config: dict) -> list[str]:
-    return list(config.get("writer_policy", {}).get("managed_outputs", []))
-
-
-def _error(code: str, exc: Exception, source_path: Path) -> dict:
-    return {"code": code, "message": str(exc), "source_path": str(source_path)}
-
-
-def _failure_response(graph_dir: Path | None, error: dict, manifest_written: bool) -> dict:
-    return {
-        "status": "failed",
-        "source_state": "unknown",
-        "graph_dir": str(graph_dir) if graph_dir else None,
-        "manifest_written": manifest_written,
-        "error": error,
-        "validation_errors": [error["code"]],
-    }
-
-
-def _stage_result(
-    status: str,
-    source_state: str,
-    graph_dir: Path,
-    warnings: list[dict],
-    validation_errors: list[str],
-    error: dict | None,
-) -> dict:
-    result = {
-        "status": status,
-        "source_state": source_state,
-        "graph_dir": str(graph_dir),
-        "manifest_written": True,
-        "warnings": warnings,
-        "validation_errors": validation_errors,
-    }
-    if error:
-        result["error"] = error
-    return result
-
-
-def _write_preflight_failure(
-    ctx: PreflightNovelContext,
-    config: dict,
-    error: dict,
-    role: str = "图抽取",
-) -> None:
-    _remove_graphify_artifacts(ctx.graph_dir)
-    writer = OutputWriter(ctx.graph_dir, _managed_outputs(config))
-    manifest = {
-        "source_path": str(ctx.source_path),
-        "source_hash": ctx.source_hash,
-        "source_size": ctx.source_size,
-        "novel_name": ctx.novel_name,
-        "graph_dir": str(ctx.graph_dir),
-        "config_hash": None,
-        "graphify_repo": str(config.get("paths", {}).get("graphify_repo")),
-        "graphify_version_or_commit": None,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-        "stage_status": {"stage1": "failed", "stage2": "not_requested"},
-    }
-    chunks = _failed_chunks_from_error(ctx, error)
-    agent_runs = make_stage_agent_records([chunks[0]["chunk_id"]], [])
-    _append_error(agent_runs, role, error)
-    writer.write_json("manifest.json", manifest)
-    write_coverage_outputs(
-        writer,
-        chunks,
-        [],
-        [],
-        agent_runs,
-        [f"- {error['code']}: {error.get('message', '')}"],
-    )
-
-
-def _write_chunk_failure(
-    ctx,
-    config: dict,
-    manifest_path: Path,
-    matrix: dict,
-    error: dict,
-    source_state: str,
-) -> None:
-    writer = OutputWriter(ctx.graph_dir, _managed_outputs(config))
-    chunks = _failed_chunks_from_error(ctx, error)
-    readiness = _empty_readiness(matrix, error["code"])
-    agent_runs = make_stage_agent_records(
-        [chunks[0]["chunk_id"]],
-        [record["template_name"] for record in matrix.get("templates", [])],
-    )
-    _append_error(agent_runs, "图抽取", error)
-    write_coverage_outputs(
-        writer,
-        chunks,
-        [],
-        readiness,
-        agent_runs,
-        [f"- {error['code']}: {error.get('message', '')}", f"- source_state: {source_state}"],
-    )
-    _update_manifest_stage(manifest_path, "failed")
-    _remove_graphify_artifacts(ctx.graph_dir)
-
-
-def _failed_chunks_from_error(ctx, error: dict) -> list[dict]:
-    return [
-        {
-            "chunk_id": "chunk-0001",
-            "source_path": str(ctx.source_path),
-            "source_range": [0, int(getattr(ctx, "source_size", 0) or 0)],
-            "chapter_hint": None,
-            "hash": None,
-            "scanned_at": None,
-            "processor": "storygraph-stage1",
-            "extraction_status": "failed",
-            "failure": error,
-            "retry_count": 0,
-        }
-    ]
-
-
-def _empty_readiness(matrix: dict, code: str) -> list[dict]:
-    return [
-        {
-            "template_name": record["template_name"],
-            "readiness_score": 0,
-            "supporting_node_count": 0,
-            "supporting_edge_count": 0,
-            "supporting_event_count": 0,
-            "evidence_count": 0,
-            "missing_requirement_types": [code],
-            "requirement_statuses": [],
-            "notes": [code],
-        }
-        for record in matrix.get("templates", [])
-    ]
-
-
-def _append_error(agent_runs: list[dict], role: str, error: dict) -> None:
-    target = next((record for record in agent_runs if record.get("agent_role") == role), None)
-    if target is None and agent_runs:
-        target = agent_runs[-1]
-    if target is None:
-        return
-    target["status"] = "failed"
-    target.setdefault("errors", []).append(error)
-
-
-def _mark_completed(agent_runs: list[dict]) -> None:
-    for record in agent_runs:
-        if record.get("status") == "pending":
-            record["status"] = "completed"
-            record["reviewer_status"] = "passed"
-
-
-def _complete_pending_chunks(chunks: list[dict]) -> list[dict]:
-    for chunk in chunks:
-        if chunk.get("extraction_status") == "pending":
-            chunk["extraction_status"] = "completed"
-    return chunks
-
-
-def _parse_subagent_payloads(
-    config: dict, agent_runs: list[dict], gap_lines: list[str]
-) -> tuple[list[dict], list[dict]]:
-    errors = []
-    warnings = []
-    blocking = config.get("coverage_thresholds", {}).get("block_on_unparsable_subagent_json", True)
-    for index, payload in enumerate(config.get("agent_policy", {}).get("sub_agent_json_payloads", []), 1):
-        try:
-            json.loads(payload)
-        except (json.JSONDecodeError, RecursionError) as exc:
-            error = {
-                "code": "unparsable_subagent_json",
-                "payload_index": index,
-                "message": str(exc),
-            }
-            gap_lines.append(f"- unparsable_subagent_json: payload {index}")
-            if blocking:
-                errors.append(error)
-                _append_error(agent_runs, "质量审查", error)
-            else:
-                warnings.append(error)
-    return errors, warnings
-
-
-def _evaluate_coverage_failures(
-    readiness: list[dict],
-    chunks: list[dict],
-    config: dict,
-    agent_runs: list[dict],
-    gap_lines: list[str],
-) -> tuple[list[dict], list[dict]]:
-    errors = []
-    warnings = []
-    thresholds = config.get("coverage_thresholds", {})
-    readiness_threshold = thresholds.get("readiness_warning_threshold", 0)
-    for record in readiness:
-        score = record.get("readiness_score", 0)
-        if score < readiness_threshold:
-            error = {
-                "code": "readiness_below_threshold",
-                "template_name": record.get("template_name"),
-                "readiness_score": score,
-                "threshold": readiness_threshold,
-            }
-            gap_lines.append(
-                f"- readiness_below_threshold: {record.get('template_name')} {score} < {readiness_threshold}"
-            )
-            if thresholds.get("block_on_low_readiness", True):
-                errors.append(error)
-                _append_error(agent_runs, "覆盖审查", error)
-            else:
-                warnings.append(error)
-        if record.get("evidence_count", 0) == 0:
-            error = {
-                "code": "template_without_reliable_evidence",
-                "template_name": record.get("template_name"),
-            }
-            gap_lines.append(f"- template_without_reliable_evidence: {record.get('template_name')}")
-            if thresholds.get("block_on_template_without_reliable_evidence", True):
-                errors.append(error)
-                _append_error(agent_runs, "覆盖审查", error)
-            else:
-                warnings.append(error)
-
-    if thresholds.get("require_all_chunks_scanned", True):
-        for chunk in chunks:
-            if chunk.get("extraction_status") != "completed":
-                error = {
-                    "code": "chunk_extraction_failure",
-                    "chunk_id": chunk.get("chunk_id"),
-                    "failure": chunk.get("failure"),
-                }
-                errors.append(error)
-                gap_lines.append(f"- chunk_extraction_failure: {chunk.get('chunk_id')}")
-                _append_error(agent_runs, "图抽取", error)
-    return errors, warnings
-
-
-def _stage_status(
-    adapter_error: dict | None,
-    contract_errors: list[dict],
-    contract_warnings: list[dict],
-    graph_validation_errors: list[str],
-) -> str:
-    if adapter_error or contract_errors or graph_validation_errors:
-        return "failed"
-    if contract_warnings:
-        return "warning"
-    return "success"
-
-
-def _update_manifest_stage(manifest_path: Path, stage1_status: str) -> None:
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    stage_status = manifest.setdefault("stage_status", {})
-    stage_status["stage1"] = stage1_status
-    stage_status.setdefault("stage2", "not_requested")
-    manifest["updated_at"] = datetime.now(timezone.utc).isoformat()
-    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def _remove_graphify_artifacts(graph_dir: Path) -> None:
-    for relative in ["graphify-out/graph.json", "graphify-out/GRAPH_REPORT.md", "graphify-out/graph.html"]:
-        path = graph_dir / Path(*relative.split("/"))
-        if path.exists() and path.is_file():
-            path.unlink()
-        elif path.exists() and path.is_dir():
-            shutil.rmtree(path)
+        seen.add(value)
+        deduped.append(value)
+    return deduped

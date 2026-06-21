@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from hashlib import sha256
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 
 @dataclass(frozen=True)
@@ -11,6 +11,14 @@ class NovelContext:
     novel_name: str
     novel_dir: Path
     graph_dir: Path
+
+
+@dataclass(frozen=True)
+class RelativeArtifactPathValidation:
+    ok: bool
+    normalized_path: str | None
+    target_path: Path | None
+    errors: list[str]
 
 
 def file_sha256(path: Path) -> str:
@@ -38,3 +46,69 @@ def resolve_novel_context(
         source.parent,
         graph_dir,
     )
+
+
+def validate_relative_artifact_path(
+    raw_path: str | Path,
+    *,
+    base_dir: str | Path,
+) -> RelativeArtifactPathValidation:
+    if not isinstance(raw_path, (str, Path)):
+        return RelativeArtifactPathValidation(
+            False,
+            None,
+            None,
+            ["path_field_type_error"],
+        )
+
+    raw = str(raw_path)
+    if not raw:
+        return RelativeArtifactPathValidation(False, None, None, ["path_empty"])
+    if "\0" in raw:
+        return RelativeArtifactPathValidation(False, None, None, ["path_embedded_nul"])
+
+    windows_path = PureWindowsPath(raw)
+    posix_path = PurePosixPath(raw.replace("\\", "/"))
+    if (
+        windows_path.drive
+        or windows_path.root
+        or windows_path.anchor
+        or posix_path.root
+        or posix_path.anchor
+    ):
+        return RelativeArtifactPathValidation(False, None, None, ["path_absolute_rejected"])
+
+    normalized_parts: list[str] = []
+    for part in raw.replace("\\", "/").split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            return RelativeArtifactPathValidation(
+                False,
+                None,
+                None,
+                ["path_parent_traversal_rejected"],
+            )
+        if ":" in part:
+            return RelativeArtifactPathValidation(
+                False,
+                None,
+                None,
+                ["path_absolute_rejected"],
+            )
+        normalized_parts.append(part)
+
+    if not normalized_parts:
+        return RelativeArtifactPathValidation(False, None, None, ["path_empty"])
+
+    normalized = "/".join(normalized_parts)
+    root = Path(base_dir).resolve(strict=False)
+    target = (root / Path(*normalized_parts)).resolve(strict=False)
+    if target != root and root not in target.parents:
+        return RelativeArtifactPathValidation(
+            False,
+            normalized,
+            None,
+            ["path_parent_traversal_rejected"],
+        )
+    return RelativeArtifactPathValidation(True, normalized, target, [])

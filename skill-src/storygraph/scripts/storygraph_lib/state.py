@@ -1,22 +1,45 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 from pathlib import Path
+from typing import Any
 from typing import Callable
 
 
 REQUIRED_STAGE1_FILES = [
     "manifest.json",
     "graphify-out/graph.json",
-    "graphify-out/GRAPH_REPORT.md",
-    "graphify-out/graph.html",
     "requirements/template-requirements.json",
+    "intermediate/merge-queue.json",
     "coverage/chunk-ledger.json",
     "coverage/evidence-index.json",
     "coverage/template-readiness.json",
     "coverage/agent-run-ledger.json",
     "coverage/gap-report.md",
 ]
+
+
+def compute_stage1_input_hash(
+    *,
+    source_hash: str | None,
+    config_hash: str | None,
+    template_inventory_hash: str | None,
+    task_packet_schema_hash: str | None,
+    requirements_hash: str | None,
+    reviewed_output_manifest_hash: str | None,
+) -> str:
+    payload: dict[str, Any] = {
+        "source_hash": source_hash,
+        "config_hash": config_hash,
+        "template_inventory_hash": template_inventory_hash,
+        "task_packet_schema_hash": task_packet_schema_hash,
+        "requirements_hash": requirements_hash,
+        "reviewed_output_manifest_hash": reviewed_output_manifest_hash,
+    }
+    return sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
 
 
 def _read_json_file(path: Path):

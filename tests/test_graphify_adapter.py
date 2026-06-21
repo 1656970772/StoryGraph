@@ -15,7 +15,10 @@ def test_adapter_reports_unavailable_graphify_without_modifying_repo(tmp_path):
         mode="local-repo",
     )
 
-    result = adapter.build_graph(source_path=tmp_path / "novel.txt", output_dir=tmp_path / "out")
+    result = adapter.build_graph(
+        canonical_graph_path=tmp_path / "graph.json",
+        output_dir=tmp_path / "out",
+    )
 
     assert result.ok is False
     assert result.error["code"] == "graphify_unavailable"
@@ -30,7 +33,10 @@ def test_adapter_local_repo_or_cli_fails_when_explicit_repo_is_missing(tmp_path)
         mode="local-repo-or-cli",
     )
 
-    result = adapter.build_graph(source_path=tmp_path / "novel.txt", output_dir=tmp_path / "out")
+    result = adapter.build_graph(
+        canonical_graph_path=tmp_path / "graph.json",
+        output_dir=tmp_path / "out",
+    )
 
     assert result.ok is False
     assert result.error["code"] == "graphify_unavailable"
@@ -57,7 +63,7 @@ def test_adapter_invokes_configured_external_command_and_requires_artifacts(tmp_
     source.write_text("正文", encoding="utf-8")
     adapter = GraphifyAdapter(
         graphify_repo=repo,
-        command=[sys.executable, "fake_graphify.py", "{source}", "{output_dir}"],
+        command=[sys.executable, "fake_graphify.py", "{canonical_graph}", "{output_dir}"],
         timeout_seconds=5,
         mode="local-repo-or-cli",
     )
@@ -99,7 +105,7 @@ def test_adapter_local_repo_mode_resolves_relative_output_dir_from_caller_cwd(
     monkeypatch.chdir(caller)
     adapter = GraphifyAdapter(
         graphify_repo=repo,
-        command=[sys.executable, "fake_graphify.py", "{source}", "{output_dir}"],
+        command=[sys.executable, "fake_graphify.py", "{canonical_graph}", "{output_dir}"],
         timeout_seconds=5,
         mode="local-repo",
     )
@@ -119,7 +125,7 @@ def test_adapter_cli_mode_does_not_require_local_repo(tmp_path):
         sys.executable,
         "-c",
         "import json,pathlib,sys; out=pathlib.Path(sys.argv[2]); out.mkdir(parents=True, exist_ok=True); (out/'graph.json').write_text(json.dumps({'nodes': [], 'edges': [], 'hyperedges': [], 'metadata': {'cli': True}}), encoding='utf-8'); (out/'GRAPH_REPORT.md').write_text('# Graph Report\\n', encoding='utf-8'); (out/'graph.html').write_text('<!doctype html><title>graph</title>', encoding='utf-8')",
-        "{source}",
+        "{canonical_graph}",
         "{output_dir}",
     ]
     adapter = GraphifyAdapter(graphify_repo=None, command=command, timeout_seconds=5, mode="cli")
@@ -188,7 +194,7 @@ def test_adapter_integer_timeout_still_runs_command(tmp_path):
         "(out/'graph.json').write_text('{}', encoding='utf-8'); "
         "(out/'GRAPH_REPORT.md').write_text('# ok', encoding='utf-8'); "
         "(out/'graph.html').write_text('<!doctype html>', encoding='utf-8')",
-        "{source}",
+        "{canonical_graph}",
         "{output_dir}",
     ]
     adapter = GraphifyAdapter(None, command, 1, "cli")
@@ -206,7 +212,7 @@ def test_adapter_command_exit_zero_but_missing_required_artifacts_is_structured_
         sys.executable,
         "-c",
         "import pathlib,sys; pathlib.Path(sys.argv[2]).mkdir(parents=True, exist_ok=True)",
-        "{source}",
+        "{canonical_graph}",
         "{output_dir}",
     ]
     adapter = GraphifyAdapter(graphify_repo=None, command=command, timeout_seconds=5, mode="cli")
@@ -232,6 +238,48 @@ def test_adapter_invalid_stdout_encoding_is_structured_error(tmp_path):
     assert result.error["code"] == "graphify_artifact_missing"
 
 
+def test_graphify_adapter_subprocess_decode_follows_failure_policy(tmp_path):
+    source = tmp_path / "novel.txt"
+    source.write_text("正文", encoding="utf-8")
+    command = [
+        sys.executable,
+        "-c",
+        (
+            "import json,pathlib,sys; "
+            "out=pathlib.Path(sys.argv[2]); out.mkdir(parents=True, exist_ok=True); "
+            "(out/'graph.json').write_text(json.dumps({'nodes': [], 'edges': [], 'hyperedges': [], 'metadata': {'ok': True}}), encoding='utf-8'); "
+            "(out/'GRAPH_REPORT.md').write_text('# Graph Report\\n', encoding='utf-8'); "
+            "(out/'graph.html').write_text('<!doctype html><title>graph</title>', encoding='utf-8'); "
+            "sys.stdout.buffer.write(bytes([255]))"
+        ),
+        "{canonical_graph}",
+        "{output_dir}",
+    ]
+
+    degraded = GraphifyAdapter(
+        graphify_repo=None,
+        command=command,
+        timeout_seconds=5,
+        mode="cli",
+        failure_policy="degrade-visualization-and-query",
+    ).build_graph(source, tmp_path / "degraded")
+    blocking = GraphifyAdapter(
+        graphify_repo=None,
+        command=command,
+        timeout_seconds=5,
+        mode="cli",
+        failure_policy="blocking",
+    ).build_graph(source, tmp_path / "blocking")
+
+    assert degraded.ok is True
+    assert degraded.status == "degraded"
+    assert "subprocess_output_decode_error" in degraded.warnings
+    assert degraded.error is None
+    assert blocking.ok is False
+    assert blocking.status == "failed"
+    assert blocking.error["code"] == "subprocess_output_decode_error"
+
+
 def test_adapter_nonzero_exit_returns_failed_error_with_stderr_tail(tmp_path):
     source = tmp_path / "novel.txt"
     source.write_text("正文", encoding="utf-8")
@@ -239,7 +287,7 @@ def test_adapter_nonzero_exit_returns_failed_error_with_stderr_tail(tmp_path):
         sys.executable,
         "-c",
         "import sys; sys.stderr.write('boom'); raise SystemExit(7)",
-        "{source}",
+        "{canonical_graph}",
         "{output_dir}",
     ]
     adapter = GraphifyAdapter(graphify_repo=None, command=command, timeout_seconds=5, mode="cli")
@@ -247,6 +295,27 @@ def test_adapter_nonzero_exit_returns_failed_error_with_stderr_tail(tmp_path):
     result = adapter.build_graph(source, tmp_path / "out")
 
     assert result.ok is False
+    assert result.status == "failed"
     assert result.error["code"] == "graphify_failed"
     assert result.error["returncode"] == 7
     assert "boom" in result.error["stderr"]
+
+
+def test_graphify_adapter_rejects_source_as_semantic_input(novel, config):
+    from storygraph_lib.graphify_adapter import build_graphify_command
+
+    config["graphify_adapter"] = {
+        "input_strategy": "canonical-graph-or-graph-dir-only",
+        "command": [sys.executable, "-c", "print('not reached')", "{source}", "{output_dir}"],
+    }
+
+    result = build_graphify_command(
+        source_path=novel,
+        canonical_graph_path=None,
+        graph_dir=None,
+        output_dir=novel.parent / "graphify-out",
+        config=config,
+    )
+
+    assert result.ok is False
+    assert "graphify_source_input_rejected" in result.errors

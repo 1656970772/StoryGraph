@@ -101,6 +101,7 @@ def validate_canonical_graph(
 ) -> SchemaValidation:
     errors = [f"missing:{key}" for key in REQUIRED_TOP_LEVEL_FIELDS if key not in graph]
     _validate_top_level_shapes(graph, errors)
+    _validate_agent_produced_metadata(graph.get("metadata"), errors)
     enums = _status_enums(status_enums, errors)
     collections = {
         key: _graph_collection(graph, key, errors)
@@ -166,6 +167,13 @@ def _valid_graph_items(key: str, values: list, errors: list[str]) -> list[dict[s
             continue
         _validate_graph_item_id(key, item, errors)
         _validate_locator_ranges(owner, _graph_item_owner_id(key, item), item, errors)
+        _validate_provenance(
+            owner,
+            _graph_item_owner_id(key, item),
+            item.get("provenance"),
+            _is_storygraph_item(item),
+            errors,
+        )
         valid_items.append(item)
     return valid_items
 
@@ -187,6 +195,67 @@ def _graph_item_owner_id(key: str, item: dict[str, Any]) -> object:
 
 def _safe_collection(values: object) -> list:
     return values if isinstance(values, list) else []
+
+
+def _validate_agent_produced_metadata(metadata: object, errors: list[str]) -> None:
+    if not isinstance(metadata, dict):
+        return
+    semantic_generation = metadata.get("semantic_generation")
+    if semantic_generation is not None and not isinstance(semantic_generation, str):
+        errors.append("bad_agent_metadata:semantic_generation")
+    if semantic_generation != "agent-produced":
+        return
+
+    version = metadata.get("canonical_writer_version")
+    if not isinstance(version, str) or not version:
+        errors.append("bad_agent_metadata:canonical_writer_version")
+
+    source_bundle_paths = metadata.get("source_bundle_paths")
+    if not isinstance(source_bundle_paths, list) or any(
+        not isinstance(path, str) or not path for path in source_bundle_paths
+    ):
+        errors.append("bad_agent_metadata:source_bundle_paths")
+
+
+def _validate_provenance(
+    owner: str,
+    owner_id: object,
+    provenance: object,
+    require_agent_produced: bool,
+    errors: list[str],
+) -> None:
+    if provenance is None:
+        if require_agent_produced:
+            errors.append(f"{owner}_missing_provenance:{owner_id}")
+        return
+    if not isinstance(provenance, dict):
+        errors.append(f"bad_provenance:{owner_id}")
+        return
+
+    semantic_generation = provenance.get("semantic_generation")
+    if not isinstance(semantic_generation, str):
+        if semantic_generation is not None or require_agent_produced:
+            errors.append(f"bad_provenance_semantic_generation:{owner_id}")
+    elif require_agent_produced and semantic_generation != "agent-produced":
+        errors.append(f"bad_provenance_semantic_generation:{owner_id}")
+
+    _validate_provenance_string_list("chunk_id", owner_id, provenance.get("chunk_ids"), errors)
+    _validate_provenance_string_list(
+        "lane_output_path", owner_id, provenance.get("lane_output_paths"), errors
+    )
+
+
+def _validate_provenance_string_list(
+    label: str, owner_id: object, values: object, errors: list[str]
+) -> None:
+    if values is None:
+        return
+    if not isinstance(values, list):
+        errors.append(f"bad_provenance_{label}s:{owner_id}")
+        return
+    for index, value in enumerate(values):
+        if not isinstance(value, str) or not value:
+            errors.append(f"bad_provenance_{label}:{owner_id}:{index}")
 
 
 def _status_enums(status_enums: dict[str, list[str]] | None, errors: list[str]) -> dict[str, set[str]]:

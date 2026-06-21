@@ -2,10 +2,14 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .canonical_writer import CANONICAL_WRITER_VERSION
 from .paths import NovelContext
 
 
 DEFAULT_STAGE_STATUS = {"stage1": "initialized", "stage2": "not_requested"}
+MANIFEST_SCHEMA_VERSION = "storygraph.manifest.v1"
+STAGE1_MODE = "agent-driven"
+STAGE1_AGENT_SCHEMA_VERSION = "stage1-agent-driven.v1"
 
 
 def _load_existing_manifest(path: Path) -> dict:
@@ -29,6 +33,10 @@ def write_manifest(ctx: NovelContext, config_hash: str, graphify_source: str) ->
     if not isinstance(stage_status, dict):
         stage_status = DEFAULT_STAGE_STATUS
     data = {
+        "schema_version": MANIFEST_SCHEMA_VERSION,
+        "stage1_mode": STAGE1_MODE,
+        "stage1_agent_schema_version": STAGE1_AGENT_SCHEMA_VERSION,
+        "canonical_writer_version": CANONICAL_WRITER_VERSION,
         "source_path": str(ctx.source_path),
         "source_hash": ctx.source_hash,
         "source_size": ctx.source_size,

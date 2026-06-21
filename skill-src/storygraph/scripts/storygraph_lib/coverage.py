@@ -17,7 +17,13 @@ DEFAULT_COVERAGE_OUTPUTS = [
 ]
 
 
-def make_chunk_ledger(source_path: str | Path, strategy: dict, processor: str) -> list[dict]:
+def make_chunk_ledger(
+    source_path: str | Path,
+    strategy: dict,
+    processor: str,
+    target_lane_ids: Iterable[str] | None = None,
+    required_lane_ids: Iterable[str] | None = None,
+) -> list[dict]:
     source = Path(source_path)
     text = source.read_text(encoding="utf-8")
     active_strategy = strategy or {}
@@ -30,25 +36,36 @@ def make_chunk_ledger(source_path: str | Path, strategy: dict, processor: str) -
     if not sections:
         sections = [(0, len(text), None)]
 
+    target_lanes = list(target_lane_ids or [])
+    required_lanes = list(required_lane_ids or [])
+    lane_tracking_enabled = bool(target_lane_ids is not None or required_lane_ids is not None)
+
     chunks = []
     for section_start, section_end, chapter_hint in sections:
         for start, end in _bounded_ranges(section_start, section_end, max_chars, overlap_chars):
             chunk_text = text[start:end]
-            chunks.append(
-                {
-                    "chunk_id": f"chunk-{len(chunks) + 1:04d}",
-                    "source_path": str(source),
-                    "source_range": [start, end],
-                    "chapter_hint": chapter_hint,
-                    "hash": sha256(chunk_text.encode("utf-8")).hexdigest(),
-                    "scanned_at": None,
-                    "processor": processor,
-                    "extraction_status": "pending",
-                    "failure": None,
-                    "retry_count": 0,
-                    "text": chunk_text,
+            chunk = {
+                "chunk_id": f"chunk-{len(chunks) + 1:04d}",
+                "source_path": str(source),
+                "source_range": [start, end],
+                "chapter_hint": chapter_hint,
+                "hash": sha256(chunk_text.encode("utf-8")).hexdigest(),
+                "scanned_at": None,
+                "processor": processor,
+                "extraction_status": "pending_agent_outputs"
+                if lane_tracking_enabled
+                else "pending",
+                "failure": None,
+                "retry_count": 0,
+                "text": chunk_text,
+            }
+            if lane_tracking_enabled:
+                chunk["target_lane_ids"] = list(target_lanes)
+                chunk["required_lane_ids"] = list(required_lanes)
+                chunk["lane_statuses"] = {
+                    lane_id: "pending_agent_outputs" for lane_id in required_lanes
                 }
-            )
+            chunks.append(chunk)
     return chunks
 
 

@@ -41,6 +41,157 @@ def make_agent_run_record(
     }
 
 
+def make_lane_agent_record(
+    *,
+    run_id: str,
+    chunk_id: str,
+    lane_id: str,
+    agent_role: str,
+    task_packet_path: str | Path,
+    output_path: str | Path,
+    attempt: int = 1,
+    input_paths: Iterable[str | Path] | str | Path | None = None,
+    write_scope: Iterable[str | Path] | str | Path | None = None,
+    status: str = "pending",
+    errors: Iterable[str] | None = None,
+    reviewer_status: str = "pending",
+    repair_of: str | None = None,
+    started_at: str | None = None,
+    ended_at: str | None = None,
+) -> dict:
+    return _make_stage1_rewrite_record(
+        run_id=run_id,
+        chunk_id=chunk_id,
+        lane_id=lane_id,
+        agent_role=agent_role,
+        prompt_or_input_packet=task_packet_path,
+        input_paths=input_paths,
+        output_paths=output_path,
+        write_scope=write_scope,
+        status=status,
+        errors=errors,
+        reviewer_status=reviewer_status,
+        repair_of=repair_of,
+        attempt=attempt,
+        started_at=started_at,
+        ended_at=ended_at,
+    )
+
+
+def make_template_agent_record(
+    *,
+    run_id: str,
+    chunk_id: str,
+    lane_id: str,
+    agent_role: str,
+    template_name: str,
+    task_packet_path: str | Path,
+    output_path: str | Path,
+    attempt: int,
+    input_paths: Iterable[str | Path] | str | Path | None = None,
+    write_scope: Iterable[str | Path] | str | Path | None = None,
+    status: str = "pending",
+    errors: Iterable[str] | None = None,
+    reviewer_status: str = "pending",
+    repair_of: str | None = None,
+    started_at: str | None = None,
+    ended_at: str | None = None,
+) -> dict:
+    record = _make_stage1_rewrite_record(
+        run_id=run_id,
+        chunk_id=chunk_id,
+        lane_id=lane_id,
+        agent_role=agent_role,
+        prompt_or_input_packet=task_packet_path,
+        input_paths=input_paths,
+        output_paths=output_path,
+        write_scope=write_scope,
+        status=status,
+        errors=errors,
+        reviewer_status=reviewer_status,
+        repair_of=repair_of,
+        attempt=attempt,
+        started_at=started_at,
+        ended_at=ended_at,
+    )
+    record["template_name"] = template_name
+    return record
+
+
+def make_review_agent_record(
+    *,
+    run_id: str,
+    chunk_id: str,
+    lane_id: str,
+    agent_role: str,
+    review_input_path: str | Path,
+    output_path: str | Path,
+    attempt: int,
+    input_paths: Iterable[str | Path] | str | Path | None = None,
+    write_scope: Iterable[str | Path] | str | Path | None = None,
+    status: str = "pending",
+    errors: Iterable[str] | None = None,
+    reviewer_status: str = "pending",
+    repair_of: str | None = None,
+    started_at: str | None = None,
+    ended_at: str | None = None,
+) -> dict:
+    return _make_stage1_rewrite_record(
+        run_id=run_id,
+        chunk_id=chunk_id,
+        lane_id=lane_id,
+        agent_role=agent_role,
+        prompt_or_input_packet=review_input_path,
+        input_paths=input_paths,
+        output_paths=output_path,
+        write_scope=write_scope,
+        status=status,
+        errors=errors,
+        reviewer_status=reviewer_status,
+        repair_of=repair_of,
+        attempt=attempt,
+        started_at=started_at,
+        ended_at=ended_at,
+    )
+
+
+def make_repair_agent_record(
+    *,
+    run_id: str,
+    chunk_id: str,
+    lane_id: str,
+    agent_role: str,
+    task_packet_path: str | Path,
+    output_path: str | Path,
+    repair_of: str,
+    attempt: int,
+    input_paths: Iterable[str | Path] | str | Path | None = None,
+    write_scope: Iterable[str | Path] | str | Path | None = None,
+    status: str = "pending",
+    errors: Iterable[str] | None = None,
+    reviewer_status: str = "pending",
+    started_at: str | None = None,
+    ended_at: str | None = None,
+) -> dict:
+    return _make_stage1_rewrite_record(
+        run_id=run_id,
+        chunk_id=chunk_id,
+        lane_id=lane_id,
+        agent_role=agent_role,
+        prompt_or_input_packet=task_packet_path,
+        input_paths=input_paths,
+        output_paths=output_path,
+        write_scope=write_scope,
+        status=status,
+        errors=errors,
+        reviewer_status=reviewer_status,
+        repair_of=repair_of,
+        attempt=attempt,
+        started_at=started_at,
+        ended_at=ended_at,
+    )
+
+
 def make_stage_agent_records(chunk_ids: Iterable[str], template_names: Iterable[str]) -> list[dict]:
     chunks = list(chunk_ids)
     templates = list(template_names)
@@ -111,6 +262,73 @@ def make_stage_agent_records(chunk_ids: Iterable[str], template_names: Iterable[
     ]
 
 
+def validate_repair_attempts(findings: Iterable[dict], records: Iterable[dict]) -> LedgerValidation:
+    errors: list[str] = []
+    original_run_ids: set[str] = set()
+    repairs_by_finding: dict[str, list[dict]] = {}
+
+    record_items = _ledger_items(records, "bad_agent_ledger_records", errors)
+    finding_items = _ledger_items(findings, "bad_review_findings", errors)
+
+    for record in record_items:
+        if not isinstance(record, dict):
+            errors.append("bad_agent_ledger_record")
+            continue
+        run_id = record.get("run_id")
+        repair_of = record.get("repair_of")
+        if repair_of is not None:
+            if not isinstance(repair_of, str) or not repair_of:
+                errors.append("bad_repair_of")
+                continue
+            if not isinstance(run_id, str) or not run_id:
+                errors.append(f"bad_repair_run_id:{repair_of}")
+            repairs_by_finding.setdefault(repair_of, []).append(record)
+            continue
+        if not isinstance(run_id, str) or not run_id:
+            errors.append("bad_agent_run_id")
+            continue
+        original_run_ids.add(run_id)
+
+    for finding in finding_items:
+        if not isinstance(finding, dict):
+            errors.append("bad_review_finding")
+            continue
+        finding_id = finding.get("finding_id")
+        if not isinstance(finding_id, str) or not finding_id:
+            errors.append("bad_review_finding_id")
+            continue
+        status = finding.get("status")
+        if not isinstance(status, str) or not status:
+            errors.append(f"bad_review_finding_status:{finding_id}")
+            continue
+        repair_required = finding.get("repair_required")
+        if not isinstance(repair_required, bool):
+            errors.append(f"bad_review_finding_repair_required:{finding_id}")
+            continue
+        if status != "open" or repair_required is not True:
+            continue
+        finding_key = finding_id
+        repair_records = repairs_by_finding.get(finding_key, [])
+        if not repair_records:
+            errors.append(f"missing_repair_attempt:{finding_key}")
+            continue
+
+        seen_repair_run_ids: set[str] = set()
+        freshness_failed = False
+        for repair_record in repair_records:
+            repair_run_id = repair_record.get("run_id")
+            if not isinstance(repair_run_id, str) or not repair_run_id:
+                continue
+            repair_run_key = repair_run_id
+            if repair_run_key in original_run_ids or repair_run_key in seen_repair_run_ids:
+                freshness_failed = True
+            seen_repair_run_ids.add(repair_run_key)
+        if freshness_failed:
+            errors.append(f"repair_agent_not_fresh:{finding_key}")
+
+    return LedgerValidation(ok=not errors, errors=errors)
+
+
 def validate_single_writer(records: Iterable[dict]) -> LedgerValidation:
     output_owners: dict[str, str] = {}
     scope_owners: dict[str, str] = {}
@@ -148,6 +366,110 @@ def validate_single_writer(records: Iterable[dict]) -> LedgerValidation:
                         errors.append(conflict)
 
     return LedgerValidation(ok=not errors, errors=errors)
+
+
+def _make_stage1_rewrite_record(
+    *,
+    run_id: str,
+    chunk_id: str,
+    lane_id: str,
+    agent_role: str,
+    prompt_or_input_packet: str | Path,
+    input_paths: Iterable[str | Path] | str | Path | None,
+    output_paths: Iterable[str | Path] | str | Path,
+    write_scope: Iterable[str | Path] | str | Path | None,
+    status: str,
+    errors: Iterable[str] | None,
+    reviewer_status: str,
+    repair_of: str | None,
+    attempt: int,
+    started_at: str | None,
+    ended_at: str | None,
+) -> dict:
+    prompt_path = _normalized_ledger_path(
+        prompt_or_input_packet, "prompt_or_input_packet"
+    )
+    normalized_inputs = _dedupe_paths(
+        [prompt_path] + _normalized_ledger_path_list(input_paths, "input_paths")
+    )
+    normalized_outputs = _normalized_ledger_path_list(output_paths, "output_paths")
+    if not normalized_outputs:
+        raise OutputWriteError("unmanaged_output", "output_paths")
+    normalized_scope = (
+        _normalized_ledger_path_list(write_scope, "write_scope")
+        if write_scope is not None
+        else list(normalized_outputs)
+    )
+    return {
+        "run_id": run_id,
+        "stage": "stage1",
+        "chunk_id": chunk_id,
+        "lane_id": lane_id,
+        "agent_role": agent_role,
+        "prompt_or_input_packet": prompt_path,
+        "input_paths": normalized_inputs,
+        "output_paths": normalized_outputs,
+        "write_scope": normalized_scope,
+        "status": status,
+        "errors": list(errors or []),
+        "reviewer_status": reviewer_status,
+        "repair_of": repair_of,
+        "attempt": attempt,
+        "started_at": started_at,
+        "ended_at": ended_at,
+    }
+
+
+def _ledger_items(values: Iterable[dict], error_code: str, errors: list[str]) -> list[dict]:
+    if isinstance(values, (dict, str, bytes)):
+        errors.append(error_code)
+        return []
+    try:
+        return list(values)
+    except TypeError:
+        errors.append(error_code)
+        return []
+
+
+def _normalized_ledger_path(value: str | Path, label: str = "paths") -> str:
+    if not isinstance(value, (str, Path)):
+        raise OutputWriteError("invalid_path_item", label)
+    return normalize_relative_output_path(value)
+
+
+def _normalized_ledger_path_list(
+    values: Iterable[str | Path] | str | Path | None,
+    label: str = "paths",
+) -> list[str]:
+    if values is None:
+        return []
+    if isinstance(values, (str, Path)):
+        path_items = [values]
+    elif isinstance(values, dict):
+        raise OutputWriteError("invalid_path_list", label)
+    else:
+        try:
+            path_items = list(values)
+        except TypeError as exc:
+            raise OutputWriteError("invalid_path_list", label) from exc
+
+    normalized = []
+    for value in path_items:
+        if not isinstance(value, (str, Path)):
+            raise OutputWriteError("invalid_path_item", label)
+        normalized.append(_normalized_ledger_path(value))
+    return normalized
+
+
+def _dedupe_paths(paths: Iterable[str]) -> list[str]:
+    seen = set()
+    deduped = []
+    for path in paths:
+        if path in seen:
+            continue
+        seen.add(path)
+        deduped.append(path)
+    return deduped
 
 
 def _path_list(values: Iterable[str | Path] | str | Path) -> list[str]:

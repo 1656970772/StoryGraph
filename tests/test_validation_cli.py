@@ -72,7 +72,9 @@ def test_storygraph_script_validate_skill_missing_file_returns_nonzero(tmp_path)
         text=True,
     )
     assert result.returncode == 2
-    assert "'SKILL.md'" in result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert "SKILL.md" in payload["missing"]
 
 
 def test_sync_clean_script_contains_destination_boundary_guard():
@@ -281,7 +283,7 @@ def test_config_check_accepts_config_and_preserves_explicit_missing_override_gua
     missing = tmp_path / "missing.local.json"
 
     assert main(["config-check", "--config", str(default), "--local-override", str(missing)]) == 2
-    payload = ast.literal_eval(capsys.readouterr().out)
+    payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False
     assert payload["error"] == "local_override_missing"
     assert payload["path"] == str(missing)
@@ -370,9 +372,7 @@ def test_cli_commands_bad_config_returns_structured_error(
     assert payload["error"] == expected_error
 
 
-def test_inspect_templates_accepts_config_without_losing_count_default_mapping_guard(
-    capsys, tmp_path
-):
+def test_inspect_templates_uses_disabled_legacy_requirement_matrix(capsys, tmp_path):
     from storygraph_lib.cli import main
 
     template_dir = tmp_path / "templates"
@@ -391,13 +391,6 @@ def test_inspect_templates_accepts_config_without_losing_count_default_mapping_g
                     "readme_missing_policy": "warn",
                 },
                 "template_parser_rules": None,
-                "template_graph_mappings": {
-                    "default_mapping": {
-                        "graph_node_mapping": ["generic_node"],
-                        "graph_event_mapping": ["generic_event"],
-                        "graph_relation_mapping": ["generic_relation"],
-                    }
-                },
                 "status_enums": {
                     "requirement_statuses": [
                         "covered",
@@ -416,10 +409,9 @@ def test_inspect_templates_accepts_config_without_losing_count_default_mapping_g
 
     assert main(["inspect-templates", "--config", str(config), "--template-dir", str(template_dir)]) == 2
     payload = json.loads(capsys.readouterr().out)
-    assert payload["template_count"] == 1
-    assert payload["count_matches_expected"] is True
-    assert payload["has_default_mapping"] is True
-    assert payload["error"] == "default_mapping_used"
+
+    assert payload["ok"] is False
+    assert payload["error"] == "legacy_requirement_matrix_disabled"
 
 
 def test_inspect_templates_bad_utf8_template_returns_structured_error(capsys, tmp_path):
@@ -503,6 +495,7 @@ def test_validate_graph_dir_reports_bad_json_without_throwing(tmp_path):
     (graph_dir / "graphify-out").mkdir(parents=True)
     (graph_dir / "requirements").mkdir()
     (graph_dir / "coverage").mkdir()
+    _write_minimal_merge_queue(graph_dir)
     (graph_dir / "manifest.json").write_text("{bad json", encoding="utf-8")
     (graph_dir / "graphify-out" / "graph.json").write_text(
         json.dumps(
@@ -544,6 +537,7 @@ def test_validate_graph_dir_malformed_ledgers_return_errors_without_throwing(tmp
     (graph_dir / "graphify-out").mkdir(parents=True)
     (graph_dir / "requirements").mkdir()
     (graph_dir / "coverage").mkdir()
+    _write_minimal_merge_queue(graph_dir)
     source = tmp_path / "mini.txt"
     source.write_text("法宝", encoding="utf-8")
     (graph_dir / "manifest.json").write_text(
@@ -621,6 +615,7 @@ def test_validate_graph_dir_malformed_graph_collections_return_errors_without_th
     (graph_dir / "graphify-out").mkdir(parents=True)
     (graph_dir / "requirements").mkdir()
     (graph_dir / "coverage").mkdir()
+    _write_minimal_merge_queue(graph_dir)
     source = tmp_path / "mini.txt"
     source.write_text("法宝", encoding="utf-8")
     (graph_dir / "manifest.json").write_text(
@@ -1816,6 +1811,373 @@ def test_validate_graph_dir_requires_success_stage1_agent_roles(tmp_path):
     assert "missing_agent_role:覆盖审查" in result.errors
 
 
+def test_validate_graph_dir_requires_agent_driven_artifacts(tmp_path):
+    from storygraph_lib.validation import validate_graph_dir
+
+    graph_dir = tmp_path / "mini.storygraph"
+    _write_minimal_valid_graph_dir(
+        graph_dir,
+        graph={
+            "metadata": {},
+        },
+        agent_ledger=None,
+    )
+    (graph_dir / "coverage" / "agent-run-ledger.json").unlink()
+
+    result = validate_graph_dir(graph_dir)
+
+    assert result.ok is False
+    assert "missing_agent_run_ledger" in result.errors
+    assert "missing_lane_outputs" in result.errors
+    assert "canonical_graph_without_agent_provenance" in result.errors
+
+
+def test_validate_graph_dir_rejects_corrupt_agent_driven_artifacts(tmp_path):
+    from storygraph_lib.validation import validate_graph_dir
+
+    lane_output_path = "intermediate/lane-outputs/chunk-0001/entities_resources/run-001.json"
+    graph_dir = tmp_path / "mini.storygraph"
+    _write_minimal_valid_graph_dir(
+        graph_dir,
+        graph={
+            "metadata": {
+                "semantic_generation": "agent-produced",
+                "canonical_writer_version": "stage1-agent-driven.v1",
+                "source_bundle_paths": ["intermediate/reviewed-bundles/chunk-0001.json"],
+            },
+        },
+        agent_ledger=[
+            {
+                "run_id": "stage1-template-requirements",
+                "agent_role": "模板需求分析",
+                "status": "completed",
+                "output_paths": ["requirements/template-requirements.json"],
+                "write_scope": ["requirements/template-requirements.json"],
+            },
+            {
+                "run_id": "stage1-graph-extraction",
+                "agent_role": "图抽取",
+                "status": "completed",
+                "output_paths": [lane_output_path],
+                "write_scope": [lane_output_path],
+            },
+            {
+                "run_id": "stage1-coverage-review",
+                "agent_role": "覆盖审查",
+                "status": "completed",
+                "output_paths": ["coverage/review-findings.json"],
+                "write_scope": ["coverage/review-findings.json"],
+            },
+            {
+                "run_id": "stage1-quality-review",
+                "agent_role": "质量审查",
+                "status": "completed",
+                "output_paths": [],
+                "write_scope": [],
+            },
+        ],
+    )
+    task_packet = graph_dir / "intermediate" / "task-packets" / "chunk-0001" / "bad.json"
+    task_packet.parent.mkdir(parents=True, exist_ok=True)
+    task_packet.write_text("{bad json", encoding="utf-8")
+    (graph_dir / "coverage" / "review-findings.json").write_text("{bad json", encoding="utf-8")
+
+    result = validate_graph_dir(graph_dir)
+
+    assert result.ok is False
+    assert {
+        "bad_json:coverage/review-findings.json",
+        "review_findings_invalid_json",
+        "bad_json:intermediate/task-packets/chunk-0001/bad.json",
+        "task_packet_invalid_json",
+        f"missing_lane_output:{lane_output_path}",
+    }.issubset(set(result.errors))
+
+
+def test_validate_graph_dir_rejects_legacy_python_semantic_metadata(tmp_path):
+    from storygraph_lib.validation import validate_graph_dir
+
+    graph_dir = tmp_path / "legacy-semantic.storygraph"
+    _write_minimal_valid_graph_dir(
+        graph_dir,
+        graph={
+            "metadata": {
+                "evidence_matching_strategy": "substring",
+            },
+        },
+    )
+
+    result = validate_graph_dir(graph_dir)
+
+    assert result.ok is False
+    assert "legacy_semantic_metadata:substring" in result.errors
+
+
+def test_validate_graph_dir_accepts_empty_agent_produced_graph_metadata(tmp_path):
+    from storygraph_lib.validation import validate_graph_dir
+
+    graph_dir = tmp_path / "empty-agent-produced.storygraph"
+    _write_agent_driven_success_graph_dir(
+        graph_dir,
+        manifest={
+            "schema_version": "storygraph.manifest.v1",
+            "stage1_mode": "agent-driven",
+            "stage1_agent_schema_version": "stage1-agent-driven.v1",
+            "canonical_writer_version": "1.0",
+        },
+        agent_ledger=_agent_driven_success_ledger(),
+        write_lane_output=True,
+    )
+
+    result = validate_graph_dir(graph_dir)
+
+    assert "canonical_graph_without_agent_provenance" not in result.errors
+    assert "missing_lane_outputs" not in result.errors
+
+
+def test_validate_graph_dir_rejects_provenance_lane_output_path_traversal(tmp_path):
+    from storygraph_lib.validation import validate_graph_dir
+
+    traversal = "intermediate/lane-outputs/../../../outside-lane.json"
+    graph_dir = tmp_path / "mini.storygraph"
+    _write_agent_driven_success_graph_dir(
+        graph_dir,
+        manifest={
+            "schema_version": "storygraph.manifest.v1",
+            "stage1_mode": "agent-driven",
+            "stage1_agent_schema_version": "stage1-agent-driven.v1",
+            "canonical_writer_version": "1.0",
+        },
+        agent_ledger=_agent_driven_success_ledger(),
+        write_lane_output=True,
+    )
+    graph_path = graph_dir / "graphify-out" / "graph.json"
+    graph = json.loads(graph_path.read_text(encoding="utf-8"))
+    graph["nodes"].append({"id": "node:minimal", "provenance": {"lane_output_paths": [traversal]}})
+    graph_path.write_text(json.dumps(graph, ensure_ascii=False), encoding="utf-8")
+
+    normal_lane = graph_dir / "intermediate" / "lane-outputs" / "chunk-0001" / "entities_resources" / "run-001.json"
+    outside_payload = json.loads(normal_lane.read_text(encoding="utf-8"))
+    outside_payload["lane_id"] = ".."
+    (graph_dir.parent / "outside-lane.json").write_text(
+        json.dumps(outside_payload, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    result = validate_graph_dir(graph_dir)
+
+    assert result.ok is False
+    assert (
+        f"invalid_lane_output_path:path_parent_traversal_rejected:{traversal}"
+        in result.errors
+    )
+
+
+def test_validate_graph_dir_rejects_legacy_stage_level_agent_ledger(tmp_path):
+    from storygraph_lib.validation import validate_graph_dir
+
+    graph_dir = tmp_path / "legacy-ledger.storygraph"
+    _write_agent_driven_success_graph_dir(
+        graph_dir,
+        manifest={
+            "schema_version": "storygraph.manifest.v1",
+            "stage1_mode": "agent-driven",
+            "stage1_agent_schema_version": "stage1-agent-driven.v1",
+            "canonical_writer_version": "1.0",
+        },
+        agent_ledger=[
+            {
+                "run_id": f"stage1-{index}",
+                "agent_role": role,
+                "status": "completed",
+                "output_paths": [],
+                "write_scope": [],
+            }
+            for index, role in enumerate(["模板需求分析", "图抽取", "覆盖审查", "质量审查"], start=1)
+        ],
+        write_lane_output=False,
+    )
+
+    result = validate_graph_dir(graph_dir)
+
+    assert result.ok is False
+    assert (
+        "legacy_agent_ledger_requires_rebuild" in result.errors
+        or any(
+            error.startswith("agent_ledger_missing_required_field")
+            for error in result.errors
+        )
+        or "missing_lane_outputs" in result.errors
+    )
+
+
+def test_validate_graph_dir_rejects_manifest_without_agent_driven_schema_fields(tmp_path):
+    from storygraph_lib.validation import validate_graph_dir
+
+    graph_dir = tmp_path / "legacy-manifest.storygraph"
+    _write_agent_driven_success_graph_dir(
+        graph_dir,
+        manifest={},
+        agent_ledger=_agent_driven_success_ledger(),
+        write_lane_output=True,
+    )
+
+    result = validate_graph_dir(graph_dir)
+
+    assert result.ok is False
+    assert (
+        "manifest_missing_required_field:schema_version" in result.errors
+        or "legacy_manifest_requires_rebuild" in result.errors
+    )
+
+
+def test_cli_prepare_stage1_outputs_json_and_pending_agent_tasks(capsys, novel, template_dir):
+    from storygraph_lib.cli import main
+
+    code = main(["prepare-stage1", "--source", str(novel), "--template-dir", str(template_dir)])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["status"] == "prepared"
+    assert payload["next_action"] == "run_agent_task_packets"
+
+
+def test_cli_argument_errors_are_json(capsys):
+    from storygraph_lib.cli import main
+
+    assert main(["prepare-stage1", "--template-dir", "x"]) == 2
+    captured = capsys.readouterr()
+    payload_text = captured.out or captured.err
+    payload = json.loads(payload_text)
+
+    assert payload["ok"] is False
+    assert payload["error"] == "cli_argument_error"
+    assert "--source" in payload["missing"]
+
+
+@pytest.mark.parametrize(
+    ("scenario", "raw_bytes", "expected_code"),
+    [
+        ("bad_json", b"{not-json", "external_json_invalid"),
+        ("bad_utf8", b"\xff\xfe\x00", "external_json_utf8_decode_error"),
+        ("json_shape_not_object", b"[1, 2, 3]", "external_json_shape_not_object"),
+        ("missing_required_field", b"{}", "external_json_missing_required_field:version"),
+        ("field_type_error", b"{\"version\": 1}", "external_json_field_type_error:version"),
+    ],
+)
+def test_external_json_boundary_bad_inputs_are_structured_failures(
+    tmp_path, scenario, raw_bytes, expected_code
+):
+    from storygraph_lib.validation import validate_external_json_artifact
+
+    path = tmp_path / f"{scenario}.json"
+    path.write_bytes(raw_bytes)
+
+    result = validate_external_json_artifact(
+        path,
+        artifact_name="external_json",
+        required_fields={"version": str},
+        max_depth=32,
+    )
+
+    assert result.ok is False
+    assert expected_code in result.errors
+
+
+def test_deep_json_recursion_or_too_deep_is_structured_failure(tmp_path):
+    from storygraph_lib.validation import validate_external_json_artifact
+
+    payload = current = {}
+    for _ in range(80):
+        current["child"] = {}
+        current = current["child"]
+    path = tmp_path / "deep.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = validate_external_json_artifact(
+        path,
+        artifact_name="subagent_payload",
+        max_depth=32,
+    )
+
+    assert result.ok is False
+    assert "subagent_payload_too_deep" in result.errors
+
+
+@pytest.mark.parametrize(
+    ("scenario", "raw_path", "expected_code"),
+    [
+        ("windows_path_semantics", r"C:\tmp\outside.json", "path_absolute_rejected"),
+        ("embedded_nul", "chunk-0001\x00.json", "path_embedded_nul"),
+        ("absolute_path_rejected_where_needed", "/tmp/outside.json", "path_absolute_rejected"),
+        ("parent_traversal_rejected", "../outside.json", "path_parent_traversal_rejected"),
+    ],
+)
+def test_path_string_boundary_errors_are_structured(tmp_path, scenario, raw_path, expected_code):
+    from storygraph_lib.paths import validate_relative_artifact_path
+
+    result = validate_relative_artifact_path(
+        raw_path,
+        base_dir=tmp_path / "mini_novel.storygraph",
+    )
+
+    assert result.ok is False
+    assert expected_code in result.errors
+
+
+def test_subprocess_output_decode_error_is_structured():
+    from storygraph_lib.graphify_adapter import decode_graphify_output
+
+    result = decode_graphify_output(
+        stdout=b"\xff\xfe",
+        stderr=b"",
+        failure_policy="degrade-visualization-and-query",
+    )
+
+    assert result.ok is False
+    assert "subprocess_output_decode_error" in result.errors
+    assert result.status == "degraded"
+
+
+def test_ingest_stage1_bad_subagent_json_does_not_leak_parser_exception(
+    capsys, tmp_path
+):
+    from storygraph_lib.cli import main
+
+    graph_dir = tmp_path / "mini.storygraph"
+    (graph_dir / "requirements").mkdir(parents=True)
+    (graph_dir / "requirements" / "template-requirements.json").write_text(
+        "{bad json", encoding="utf-8"
+    )
+
+    assert main(["ingest-stage1", "--graph-dir", str(graph_dir)]) == 2
+    output = capsys.readouterr().out
+    payload = json.loads(output)
+
+    assert payload["error"]["code"] in {
+        "subagent_payload_invalid_json",
+        "template_requirements_invalid_json",
+    }
+    assert "message" not in payload["error"]
+    assert "Expecting property name" not in output
+
+
+def test_corrupt_legacy_cache_returns_rebuild_or_structured_failure(tmp_path):
+    from storygraph_lib.validation import validate_graph_dir
+
+    graph_dir = tmp_path / "mini_novel.storygraph"
+    (graph_dir / "coverage").mkdir(parents=True)
+    (graph_dir / "coverage" / "template-readiness.json").write_bytes(b"{bad-json")
+
+    result = validate_graph_dir(graph_dir)
+
+    assert result.ok is False
+    assert (
+        "corrupt_legacy_cache_rebuild_required" in result.errors
+        or "coverage_invalid_json" in result.errors
+    )
+
+
 def _write_minimal_valid_graph_dir(
     graph_dir,
     *,
@@ -1886,6 +2248,7 @@ def _write_minimal_valid_graph_dir(
     ]
     if agent_ledger is not None:
         default_agent_ledger = agent_ledger
+    _write_minimal_merge_queue(graph_dir)
     (graph_dir / "manifest.json").write_text(json.dumps(default_manifest), encoding="utf-8")
     (graph_dir / "graphify-out" / "graph.json").write_text(
         json.dumps(base_graph), encoding="utf-8"
@@ -1910,6 +2273,193 @@ def _write_minimal_valid_graph_dir(
         json.dumps(default_agent_ledger), encoding="utf-8"
     )
     (graph_dir / "coverage" / "gap-report.md").write_text("", encoding="utf-8")
+
+
+def _write_minimal_merge_queue(graph_dir):
+    queue_path = graph_dir / "intermediate" / "merge-queue.json"
+    queue_path.parent.mkdir(parents=True, exist_ok=True)
+    queue_path.write_text(
+        json.dumps(
+            {
+                "status": "ready",
+                "bundle_paths": ["intermediate/reviewed-bundles/chunk-0001.json"],
+                "required_lane_ids": ["entities_resources"],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_agent_driven_success_graph_dir(
+    graph_dir,
+    *,
+    manifest,
+    agent_ledger,
+    write_lane_output,
+):
+    lane_output_path = "intermediate/lane-outputs/chunk-0001/entities_resources/run-001.json"
+    default_manifest = {
+        "source_size": len("法宝"),
+        "stage_status": {"stage1": "success", "stage2": "not_requested"},
+    }
+    default_manifest.update(manifest)
+    graph = {
+        "schema_version": "1.0",
+        "graphify_schema_version": "test",
+        "storygraph_schema_version": "1.0",
+        "nodes": [],
+        "edges": [],
+        "hyperedges": [],
+        "events": [],
+        "evidence_index": [],
+        "metadata": {
+            "semantic_generation": "agent-produced",
+            "canonical_writer_version": "stage1-agent-driven.v1",
+            "source_bundle_paths": ["intermediate/reviewed-bundles/chunk-0001.json"],
+        },
+    }
+    task_packet = {
+        "task_packet_id": "chunk-0001:entities_resources",
+        "stage": "stage1",
+        "chunk_id": "chunk-0001",
+        "lane_id": "entities_resources",
+        "agent_role": "图抽取",
+        "source_path": "source.txt",
+        "source_range": [0, len("法宝")],
+        "allowed_output_schema": "lane-output.v1",
+        "relevant_template_requirements": {},
+        "lane_contract": {},
+    }
+    lane_output = {
+        "run_id": "chunk-0001:entities_resources:run-001",
+        "task_packet_id": "chunk-0001:entities_resources",
+        "chunk_id": "chunk-0001",
+        "lane_id": "entities_resources",
+        "agent_role": "图抽取",
+        "model_or_agent_identity": "agent-driven-test",
+        "output_status": "completed",
+        "produced_at": "2026-06-21T00:00:00Z",
+        "extracted_nodes": [],
+        "extracted_edges": [],
+        "extracted_events": [],
+        "extracted_evidence": [],
+        "supports_templates": [],
+        "uncertainties": [],
+        "rejected_candidates": [],
+        "structured_failures": [],
+    }
+
+    (graph_dir / "graphify-out").mkdir(parents=True)
+    (graph_dir / "requirements").mkdir()
+    (graph_dir / "coverage").mkdir()
+    _write_minimal_merge_queue(graph_dir)
+    (graph_dir / "manifest.json").write_text(json.dumps(default_manifest), encoding="utf-8")
+    (graph_dir / "graphify-out" / "graph.json").write_text(json.dumps(graph), encoding="utf-8")
+    (graph_dir / "graphify-out" / "GRAPH_REPORT.md").write_text("# report\n", encoding="utf-8")
+    (graph_dir / "graphify-out" / "graph.html").write_text("<!doctype html>", encoding="utf-8")
+    (graph_dir / "requirements" / "template-requirements.json").write_text(
+        json.dumps(
+            {
+                "template_count": 1,
+                "templates": [{"template_name": "法宝分析", "required_fields": ["法宝"]}],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (graph_dir / "coverage" / "chunk-ledger.json").write_text(
+        json.dumps(
+            [
+                {
+                    "chunk_id": "chunk-0001",
+                    "source_range": [0, len("法宝")],
+                    "extraction_status": "completed",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (graph_dir / "coverage" / "evidence-index.json").write_text("[]", encoding="utf-8")
+    (graph_dir / "coverage" / "template-readiness.json").write_text(
+        json.dumps(
+            [
+                {
+                    "template_name": "法宝分析",
+                    "requirement_statuses": [
+                        {"requirement_id": "法宝分析.required_fields.法宝", "status": "covered"}
+                    ],
+                }
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (graph_dir / "coverage" / "agent-run-ledger.json").write_text(
+        json.dumps(agent_ledger, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (graph_dir / "coverage" / "gap-report.md").write_text("", encoding="utf-8")
+    (graph_dir / "coverage" / "review-findings.json").write_text("[]", encoding="utf-8")
+    (graph_dir / "coverage" / "quality-review.json").write_text("[]", encoding="utf-8")
+    task_packet_path = graph_dir / "intermediate" / "task-packets" / "chunk-0001" / "entities_resources.json"
+    task_packet_path.parent.mkdir(parents=True, exist_ok=True)
+    task_packet_path.write_text(json.dumps(task_packet, ensure_ascii=False), encoding="utf-8")
+    if write_lane_output:
+        output_path = graph_dir / Path(*lane_output_path.split("/"))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(lane_output), encoding="utf-8")
+
+
+def _agent_driven_success_ledger():
+    lane_output_path = "intermediate/lane-outputs/chunk-0001/entities_resources/run-001.json"
+    task_packet_path = "intermediate/task-packets/chunk-0001/entities_resources.json"
+    return [
+        {
+            "run_id": "stage1-template-requirements",
+            "stage": "stage1",
+            "chunk_id": "chunk-0001",
+            "lane_id": "requirements",
+            "agent_role": "模板需求分析",
+            "prompt_or_input_packet": task_packet_path,
+            "status": "completed",
+            "output_paths": ["requirements/template-requirements.json"],
+            "write_scope": ["requirements/template-requirements.json"],
+        },
+        {
+            "run_id": "chunk-0001:entities_resources:run-001",
+            "stage": "stage1",
+            "chunk_id": "chunk-0001",
+            "lane_id": "entities_resources",
+            "agent_role": "图抽取",
+            "prompt_or_input_packet": task_packet_path,
+            "status": "completed",
+            "output_paths": [lane_output_path],
+            "write_scope": [lane_output_path],
+        },
+        {
+            "run_id": "stage1-coverage-review",
+            "stage": "stage1",
+            "chunk_id": "chunk-0001",
+            "lane_id": "coverage_review",
+            "agent_role": "覆盖审查",
+            "prompt_or_input_packet": lane_output_path,
+            "status": "completed",
+            "output_paths": ["coverage/review-findings.json"],
+            "write_scope": ["coverage/review-findings.json"],
+        },
+        {
+            "run_id": "stage1-quality-review",
+            "stage": "stage1",
+            "chunk_id": "chunk-0001",
+            "lane_id": "quality_review",
+            "agent_role": "质量审查",
+            "prompt_or_input_packet": "coverage/review-findings.json",
+            "status": "completed",
+            "output_paths": ["coverage/quality-review.json"],
+            "write_scope": ["coverage/quality-review.json"],
+        },
+    ]
 
 
 def test_build_stage1_cli_rejects_missing_explicit_local_override_before_running_build(
