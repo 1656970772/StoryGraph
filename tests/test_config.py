@@ -156,6 +156,7 @@ def test_stage1_artifacts_include_agent_driven_output_dirs(default_config):
     required = {
         "requirements",
         "agent_dispatch_plan",
+        "dispatch_state",
         "task_packet_dir",
         "chunk_text_dir",
         "lane_output_dir",
@@ -173,6 +174,7 @@ def test_writer_policy_manages_agent_driven_stage1_outputs(default_config):
     managed = set(default_config["writer_policy"]["managed_outputs"])
     assert "coverage/review-findings.json" in managed
     assert "intermediate/agent-dispatch-plan.json" in managed
+    assert "intermediate/agent-dispatch-state.json" in managed
     assert "intermediate/merge-queue.json" in managed
     assert "requirements/template-requirements.json" in managed
     assert "intermediate/template-requirements-parts/*.json" in managed
@@ -185,6 +187,7 @@ def test_writer_policy_accepts_configured_stage1_artifact_samples(default_config
     managed = default_config["writer_policy"]["managed_outputs"]
     samples = [
         artifacts["agent_dispatch_plan"],
+        artifacts["dispatch_state"],
         f"{artifacts['task_packet_dir']}/chunk-0001/events.json",
         f"{artifacts['chunk_text_dir']}/chunk-0001.txt",
         f"{artifacts['lane_output_dir']}/chunk-0001/events/run-001.json",

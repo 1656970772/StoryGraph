@@ -36,6 +36,7 @@ from .templates import discover_templates
 DEFAULT_STAGE1_ARTIFACTS = {
     "requirements": "requirements/template-requirements.json",
     "agent_dispatch_plan": "intermediate/agent-dispatch-plan.json",
+    "dispatch_state": "intermediate/agent-dispatch-state.json",
     "task_packet_dir": "intermediate/task-packets",
     "chunk_text_dir": "intermediate/chunks",
     "lane_output_dir": "intermediate/lane-outputs",
@@ -506,6 +507,138 @@ def next_agent_batches(
         "phase": phase,
         "pending_count": len(pending),
         "returned_count": len(selected),
+        "batches": selected,
+    }
+
+
+def claim_agent_batches(
+    *, graph_dir: str | Path, phase: str, limit: int | None = None
+) -> dict:
+    graph_root = Path(graph_dir)
+    dispatch, error = _read_dispatch_plan(graph_root)
+    if error:
+        return _failure_response(graph_root, error, _manifest_exists(graph_root))
+    phase_record = _dispatch_phase(dispatch, phase)
+    if phase_record is None:
+        return _failure_response(
+            graph_root,
+            {"code": "dispatch_phase_missing", "phase": phase},
+            _manifest_exists(graph_root),
+        )
+    batches = phase_record.get("execution_batches")
+    if not isinstance(batches, list):
+        return _failure_response(
+            graph_root,
+            {"code": "dispatch_execution_batches_missing", "phase": phase},
+            _manifest_exists(graph_root),
+        )
+
+    state_path_error = _dispatch_state_path_validation_error(dispatch)
+    if state_path_error:
+        return _failure_response(
+            graph_root,
+            state_path_error,
+            _manifest_exists(graph_root),
+            validation_errors=state_path_error["validation_errors"],
+        )
+
+    state, state_error = _read_dispatch_state(graph_root, dispatch)
+    if state_error:
+        return _failure_response(
+            graph_root,
+            state_error,
+            _manifest_exists(graph_root),
+            validation_errors=state_error.get("validation_errors"),
+        )
+
+    now = datetime.now(timezone.utc).isoformat()
+    phase_state = _dispatch_state_phase(state, phase)
+    state_batches = phase_state["batches"]
+    current_batches = [
+        batch for batch in batches if isinstance(batch, dict) and batch.get("batch_id")
+    ]
+    path_errors = _dispatch_batch_path_errors(current_batches)
+    if path_errors:
+        return _failure_response(
+            graph_root,
+            {
+                "code": "dispatch_batch_path_invalid",
+                "phase": phase,
+                "validation_errors": path_errors,
+            },
+            _manifest_exists(graph_root),
+            validation_errors=path_errors,
+        )
+
+    current_batch_ids = {batch["batch_id"] for batch in current_batches}
+
+    for batch in current_batches:
+        batch_id = batch["batch_id"]
+        record = state_batches.get(batch_id)
+        if not isinstance(record, dict):
+            continue
+        status = record.get("status")
+        outputs_exist = _batch_outputs_exist(graph_root, batch)
+        if status == "running" and outputs_exist:
+            state_batches[batch_id] = _dispatch_state_batch_record(
+                batch=batch,
+                status="completed",
+                now=now,
+                previous=record,
+            )
+        elif status == "completed" and not outputs_exist:
+            del state_batches[batch_id]
+
+    running_ids = {
+        batch_id
+        for batch_id, record in state_batches.items()
+        if batch_id in current_batch_ids
+        and isinstance(record, dict)
+        and record.get("status") == "running"
+    }
+    completed_ids = {
+        batch_id
+        for batch_id, record in state_batches.items()
+        if batch_id in current_batch_ids
+        and isinstance(record, dict)
+        and record.get("status") == "completed"
+    }
+    pending = [
+        batch
+        for batch in current_batches
+        if batch["batch_id"] not in running_ids
+        and batch["batch_id"] not in completed_ids
+    ]
+    available_slots = _claim_available_slots(
+        limit, len(running_ids), len(pending), dispatch.get("max_parallel")
+    )
+    selected = pending[:available_slots]
+    for batch in selected:
+        state_batches[batch["batch_id"]] = _dispatch_state_batch_record(
+            batch=batch,
+            status="running",
+            now=now,
+            previous=state_batches.get(batch["batch_id"]),
+        )
+    try:
+        _write_dispatch_state(graph_root, dispatch, state)
+    except OutputWriteError as exc:
+        return _failure_response(
+            graph_root,
+            {"code": "dispatch_state_write_failed", "validation_errors": [str(exc)]},
+            _manifest_exists(graph_root),
+            validation_errors=[str(exc)],
+        )
+
+    return {
+        "status": "agent_batches_claimed",
+        "graph_dir": str(graph_root),
+        "phase": phase,
+        "claimed_count": len(selected),
+        "in_flight_count": len(running_ids) + len(selected),
+        "available_slots": available_slots,
+        "pending_count": len(pending) - len(selected),
+        "completed_count": len(completed_ids),
         "batches": selected,
     }
 
@@ -1388,6 +1521,7 @@ def _build_agent_dispatch_plan(
         "stage": "stage1",
         "max_parallel": _agent_max_parallel(config),
         "review_policy_mode": _review_policy_mode(config),
+        "dispatch_state_path": artifacts["dispatch_state"],
         "phases": phases,
     }
 
@@ -2048,6 +2182,117 @@ def _read_dispatch_plan(graph_root: Path) -> tuple[dict | None, dict | None]:
     return payload, None
 
 
+def _read_dispatch_state(
+    graph_root: Path, dispatch: dict
+) -> tuple[dict | None, dict | None]:
+    try:
+        path = _artifact_path(graph_root, _dispatch_state_relative_path(dispatch))
+    except OutputWriteError as exc:
+        return None, {
+            "code": "dispatch_state_path_invalid",
+            "validation_errors": [str(exc)],
+        }
+    if not path.exists():
+        return _empty_dispatch_state(), None
+    payload, error = _read_json_artifact(
+        path,
+        missing_code="dispatch_state_missing",
+        bad_code="dispatch_state_invalid",
+    )
+    if error:
+        return None, error
+    if not isinstance(payload, dict):
+        return None, {"code": "dispatch_state_invalid", "path": str(path)}
+    if not isinstance(payload.get("phases", {}), dict):
+        return None, {"code": "dispatch_state_invalid", "path": str(path)}
+    payload.setdefault("schema_version", "storygraph.agent-dispatch-state.v1")
+    payload.setdefault("stage", "stage1")
+    payload.setdefault("phases", {})
+    return payload, None
+
+
+def _write_dispatch_state(graph_root: Path, dispatch: dict, state: dict) -> None:
+    relative_path = normalize_relative_output_path(_dispatch_state_relative_path(dispatch))
+    OutputWriter(graph_root, _dedupe([*_managed_outputs({}), relative_path])).write_json(
+        relative_path, state
+    )
+
+
+def _dispatch_state_path_validation_error(dispatch: dict) -> dict | None:
+    try:
+        normalize_relative_output_path(_dispatch_state_relative_path(dispatch))
+    except OutputWriteError as exc:
+        return {
+            "code": "dispatch_state_path_invalid",
+            "validation_errors": [str(exc)],
+        }
+    return None
+
+
+def _dispatch_state_relative_path(dispatch: dict) -> str:
+    value = dispatch.get("dispatch_state_path")
+    if isinstance(value, str) and value:
+        return value
+    return DEFAULT_STAGE1_ARTIFACTS["dispatch_state"]
+
+
+def _empty_dispatch_state() -> dict:
+    return {
+        "schema_version": "storygraph.agent-dispatch-state.v1",
+        "stage": "stage1",
+        "phases": {},
+    }
+
+
+def _dispatch_state_phase(state: dict, phase: str) -> dict:
+    phases = state.setdefault("phases", {})
+    phase_state = phases.setdefault(phase, {})
+    if not isinstance(phase_state, dict):
+        phase_state = {}
+        phases[phase] = phase_state
+    batches = phase_state.setdefault("batches", {})
+    if not isinstance(batches, dict):
+        batches = {}
+        phase_state["batches"] = batches
+    return phase_state
+
+
+def _dispatch_state_batch_record(
+    *, batch: dict, status: str, now: str, previous: dict | None = None
+) -> dict:
+    previous = previous if isinstance(previous, dict) else {}
+    record = {
+        "batch_id": batch["batch_id"],
+        "phase": batch.get("phase"),
+        "status": status,
+        "updated_at": now,
+        "expected_output_paths": list(batch.get("expected_output_paths", [])),
+        "task_packet_paths": list(batch.get("task_packet_paths", [])),
+    }
+    claimed_at = previous.get("claimed_at")
+    if status == "running":
+        record["claimed_at"] = claimed_at if isinstance(claimed_at, str) else now
+    if status == "completed":
+        if isinstance(claimed_at, str):
+            record["claimed_at"] = claimed_at
+        record["completed_at"] = now
+    return record
+
+
+def _claim_available_slots(
+    limit: int | None, running_count: int, pending_count: int, max_parallel: object
+) -> int:
+    window_limit = max_parallel if type(max_parallel) is int and max_parallel > 0 else None
+    window_slots = (
+        pending_count
+        if window_limit is None
+        else max(0, min(window_limit - running_count, pending_count))
+    )
+    if limit is None or limit < 0:
+        return window_slots
+    return max(0, min(limit, window_slots))
+
+
 def _dispatch_phase(dispatch: dict, phase: str) -> dict | None:
     phases = dispatch.get("phases")
     if not isinstance(phases, list):
@@ -2066,6 +2311,19 @@ def _batch_outputs_exist(graph_root: Path, batch: dict) -> bool:
         isinstance(path, str) and _artifact_path(graph_root, path).exists()
         for path in output_paths
     )
+
+
+def _dispatch_batch_path_errors(batches: list[dict]) -> list[str]:
+    errors: list[str] = []
+    for batch in batches:
+        batch_id = batch.get("batch_id")
+        owner = batch_id if isinstance(batch_id, str) and batch_id else "unknown_batch"
+        for field in ("expected_output_paths", "task_packet_paths", "write_scope"):
+            _paths, path_errors = _validated_artifact_path_list(
+                batch.get(field), f"{owner}:{field}"
+            )
+            errors.extend(path_errors)
+    return _dedupe(errors)
 
 
 def _template_requirements_batch_size_is_valid(items: list) -> bool:
@@ -2427,6 +2685,7 @@ def _managed_outputs(config: dict) -> list[str]:
     derived = [
         artifacts["requirements"],
         artifacts["agent_dispatch_plan"],
+        artifacts["dispatch_state"],
         _join_artifact(artifacts["task_packet_dir"], "*", "*.json"),
         _join_artifact(artifacts["template_requirements_part_dir"], "*.json"),
         _join_artifact(artifacts["chunk_text_dir"], "*.txt"),

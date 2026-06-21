@@ -3,6 +3,7 @@ from pathlib import Path
 from .config import ConfigLoadError, load_config
 from .stage1 import (
     build_stage1_graph,
+    claim_agent_batches,
     ingest_stage1,
     ingest_template_requirements,
     inspect_dispatch,
@@ -96,6 +97,7 @@ def _stage1_cli_ok(status: str | None) -> bool:
         "requirements_ingested",
         "dispatch_ready",
         "pending_agent_batches",
+        "agent_batches_claimed",
     }
 
 
@@ -146,6 +148,10 @@ def main(argv=None):
     next_batches.add_argument("--graph-dir", required=True)
     next_batches.add_argument("--phase", required=True)
     next_batches.add_argument("--limit", type=int)
+    claim_batches = sub.add_parser("claim-agent-batches")
+    claim_batches.add_argument("--graph-dir", required=True)
+    claim_batches.add_argument("--phase", required=True)
+    claim_batches.add_argument("--limit", type=int, required=True)
     merge = sub.add_parser("merge-stage1")
     merge.add_argument("--config")
     merge.add_argument("--local-override")
@@ -315,6 +321,14 @@ def main(argv=None):
         )
         _print_json(result)
         return 0 if result.get("status") == "pending_agent_batches" else 2
+    if args.command == "claim-agent-batches":
+        result = claim_agent_batches(
+            graph_dir=Path(args.graph_dir),
+            phase=args.phase,
+            limit=args.limit,
+        )
+        _print_json(result)
+        return 0 if result.get("status") == "agent_batches_claimed" else 2
     if args.command == "merge-stage1":
         local = _local_override_arg(args)
         if local and not local.exists():

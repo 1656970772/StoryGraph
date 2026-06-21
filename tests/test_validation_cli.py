@@ -2273,6 +2273,162 @@ def test_cli_next_agent_batches_returns_limited_pending_batches(
     assert payload["batches"][0]["expected_output_paths"]
 
 
+def test_cli_claim_agent_batches_outputs_json_and_claims_running_state(
+    capsys, novel, template_dir, graph_dir
+):
+    from storygraph_lib.cli import main
+
+    prepare_code = main(
+        [
+            "prepare-stage1",
+            "--source",
+            str(novel),
+            "--template-dir",
+            str(template_dir),
+            "--graph-dir",
+            str(graph_dir),
+        ]
+    )
+    assert prepare_code == 0
+    capsys.readouterr()
+
+    code = main(
+        [
+            "claim-agent-batches",
+            "--graph-dir",
+            str(graph_dir),
+            "--phase",
+            "lane_extraction",
+            "--limit",
+            "1",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["status"] == "agent_batches_claimed"
+    assert payload["phase"] == "lane_extraction"
+    assert payload["claimed_count"] == 1
+    assert payload["in_flight_count"] == 1
+    assert payload["batches"][0]["expected_output_paths"]
+
+
+def test_cli_claim_agent_batches_returns_structured_error_for_unsafe_expected_output_paths(
+    capsys, novel, template_dir, graph_dir
+):
+    from storygraph_lib.cli import main
+
+    prepare_code = main(
+        [
+            "prepare-stage1",
+            "--source",
+            str(novel),
+            "--template-dir",
+            str(template_dir),
+            "--graph-dir",
+            str(graph_dir),
+        ]
+    )
+    assert prepare_code == 0
+    capsys.readouterr()
+
+    dispatch_path = graph_dir / "intermediate" / "agent-dispatch-plan.json"
+    dispatch = json.loads(dispatch_path.read_text(encoding="utf-8"))
+    batch = dispatch["phases"][1]["execution_batches"][0]
+    batch["expected_output_paths"] = ["../escape.json"]
+    batch["write_scope"] = ["../escape.json"]
+    dispatch_path.write_text(json.dumps(dispatch, ensure_ascii=False), encoding="utf-8")
+
+    code = main(
+        [
+            "claim-agent-batches",
+            "--graph-dir",
+            str(graph_dir),
+            "--phase",
+            "lane_extraction",
+            "--limit",
+            "1",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 2
+    assert payload["status"] == "failed"
+    assert payload["error"]["code"] == "dispatch_batch_path_invalid"
+    assert "unmanaged_output:../escape.json" in payload["validation_errors"]
+
+
+def test_cli_claim_agent_batches_returns_structured_error_for_unsafe_dispatch_state_path(
+    capsys, graph_dir
+):
+    from storygraph_lib.cli import main
+
+    dispatch_path = graph_dir / "intermediate" / "agent-dispatch-plan.json"
+    task_packet_path = (
+        graph_dir
+        / "intermediate"
+        / "task-packets"
+        / "chunk-0001"
+        / "comprehensive_extraction.json"
+    )
+    dispatch_path.parent.mkdir(parents=True, exist_ok=True)
+    task_packet_path.parent.mkdir(parents=True, exist_ok=True)
+    task_packet_path.write_text("{}", encoding="utf-8")
+    safe_output_path = (
+        "intermediate/lane-outputs/chunk-0001/comprehensive_extraction/run-001.json"
+    )
+    dispatch_path.write_text(
+        json.dumps(
+            {
+                "stage": "stage1",
+                "max_parallel": 1,
+                "dispatch_state_path": "../escape.json",
+                "phases": [
+                    {
+                        "phase": "lane_extraction",
+                        "execution_batches": [
+                            {
+                                "batch_id": "batch-0001",
+                                "phase": "lane_extraction",
+                                "expected_output_paths": [safe_output_path],
+                                "task_packet_paths": [
+                                    "intermediate/task-packets/chunk-0001/comprehensive_extraction.json"
+                                ],
+                                "write_scope": [safe_output_path],
+                            }
+                        ],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    code = main(
+        [
+            "claim-agent-batches",
+            "--graph-dir",
+            str(graph_dir),
+            "--phase",
+            "lane_extraction",
+            "--limit",
+            "1",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert code == 2
+    assert "Traceback" not in captured.err
+    assert payload["status"] == "failed"
+    assert payload["error"]["code"] in {
+        "dispatch_state_path_invalid",
+        "dispatch_state_invalid",
+    }
+    assert "unmanaged_output:../escape.json" in payload["validation_errors"]
+
+
 def test_cli_inspect_dispatch_reports_phase_batch_counts(
     capsys, novel, template_dir, graph_dir
 ):

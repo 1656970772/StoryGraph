@@ -639,6 +639,233 @@ def test_next_agent_batches_returns_only_pending_batches(
     ]
 
 
+def test_claim_agent_batches_uses_sliding_window_dispatch_state(
+    tmp_path, template_dir, graph_dir, config
+):
+    from storygraph_lib.stage1 import claim_agent_batches, prepare_stage1
+
+    novel = _write_five_chapter_novel(tmp_path / "five_chapters.txt")
+    config["element_lanes"] = _three_required_lanes()
+    config["agent_orchestration"] = {
+        "lane_batch_strategy": "by-lane-contiguous-chunks",
+        "lane_chunks_per_agent": 2,
+        "max_parallel_agents": 6,
+    }
+    prepare_stage1(
+        source_path=novel,
+        template_dir=template_dir,
+        graph_dir=graph_dir,
+        config=config,
+    )
+
+    first = claim_agent_batches(graph_dir=graph_dir, phase="lane_extraction", limit=6)
+    second = claim_agent_batches(graph_dir=graph_dir, phase="lane_extraction", limit=6)
+
+    assert first["status"] == "agent_batches_claimed"
+    assert first["phase"] == "lane_extraction"
+    assert first["claimed_count"] == 6
+    assert first["in_flight_count"] == 6
+    assert first["available_slots"] == 6
+    assert first["pending_count"] == 3
+    assert first["completed_count"] == 0
+    assert len(first["batches"]) == 6
+    assert second["claimed_count"] == 0
+    assert second["in_flight_count"] == 6
+    assert second["available_slots"] == 0
+    assert second["pending_count"] == 3
+    assert second["batches"] == []
+
+    first_batch = first["batches"][0]
+    _write_batch_outputs(graph_dir, first_batch)
+
+    third = claim_agent_batches(graph_dir=graph_dir, phase="lane_extraction", limit=1)
+
+    assert third["claimed_count"] == 1
+    assert third["in_flight_count"] == 6
+    assert third["available_slots"] == 1
+    assert third["pending_count"] == 2
+    assert third["completed_count"] == 1
+    assert third["batches"][0]["batch_id"] not in {
+        batch["batch_id"] for batch in first["batches"]
+    }
+
+    partial_batch = first["batches"][1]
+    partial_path = graph_dir / Path(*partial_batch["expected_output_paths"][0].split("/"))
+    partial_path.parent.mkdir(parents=True, exist_ok=True)
+    partial_path.write_text("{}", encoding="utf-8")
+
+    partial = claim_agent_batches(graph_dir=graph_dir, phase="lane_extraction", limit=6)
+
+    assert partial["claimed_count"] == 0
+    assert partial["in_flight_count"] == 6
+    assert partial["pending_count"] == 2
+    assert partial["completed_count"] == 1
+
+    known_batches = {
+        batch["batch_id"]: batch for batch in [*first["batches"], *third["batches"]]
+    }
+    for batch in known_batches.values():
+        _write_batch_outputs(graph_dir, batch)
+
+    fourth = claim_agent_batches(graph_dir=graph_dir, phase="lane_extraction", limit=6)
+    for batch in fourth["batches"]:
+        known_batches[batch["batch_id"]] = batch
+        _write_batch_outputs(graph_dir, batch)
+
+    final = claim_agent_batches(graph_dir=graph_dir, phase="lane_extraction", limit=6)
+
+    assert final["claimed_count"] == 0
+    assert final["in_flight_count"] == 0
+    assert final["pending_count"] == 0
+    assert final["completed_count"] == 9
+    state = json.loads(
+        (graph_dir / "intermediate" / "agent-dispatch-state.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    lane_state = state["phases"]["lane_extraction"]["batches"]
+    assert {item["status"] for item in lane_state.values()} == {"completed"}
+
+
+def test_claim_agent_batches_reclaims_stale_completed_state_when_outputs_are_missing(
+    novel, template_dir, graph_dir, config
+):
+    from storygraph_lib.stage1 import claim_agent_batches, prepare_stage1
+
+    prepare_stage1(
+        source_path=novel,
+        template_dir=template_dir,
+        graph_dir=graph_dir,
+        config=config,
+    )
+    dispatch_path = graph_dir / "intermediate" / "agent-dispatch-plan.json"
+    dispatch = json.loads(dispatch_path.read_text(encoding="utf-8"))
+    batch = dispatch["phases"][1]["execution_batches"][0]
+    state_path = graph_dir / "intermediate" / "agent-dispatch-state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "storygraph.agent-dispatch-state.v1",
+                "stage": "stage1",
+                "phases": {
+                    "lane_extraction": {
+                        "batches": {
+                            batch["batch_id"]: {
+                                "batch_id": batch["batch_id"],
+                                "phase": "lane_extraction",
+                                "status": "completed",
+                                "expected_output_paths": batch["expected_output_paths"],
+                                "task_packet_paths": batch["task_packet_paths"],
+                            }
+                        }
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    result = claim_agent_batches(graph_dir=graph_dir, phase="lane_extraction", limit=1)
+
+    assert result["status"] == "agent_batches_claimed"
+    assert result["claimed_count"] == 1
+    assert result["in_flight_count"] == 1
+    assert result["pending_count"] == 0
+    assert result["completed_count"] == 0
+    assert result["batches"][0]["batch_id"] == batch["batch_id"]
+    assert not (graph_dir / Path(*batch["expected_output_paths"][0].split("/"))).exists()
+
+
+def test_claim_agent_batches_fails_closed_for_unsafe_expected_output_paths(
+    novel, template_dir, graph_dir, config
+):
+    from storygraph_lib.stage1 import claim_agent_batches, prepare_stage1
+
+    prepare_stage1(
+        source_path=novel,
+        template_dir=template_dir,
+        graph_dir=graph_dir,
+        config=config,
+    )
+    dispatch_path = graph_dir / "intermediate" / "agent-dispatch-plan.json"
+    dispatch = json.loads(dispatch_path.read_text(encoding="utf-8"))
+    batch = dispatch["phases"][1]["execution_batches"][0]
+    batch["expected_output_paths"] = ["../escape.json"]
+    batch["write_scope"] = ["../escape.json"]
+    dispatch_path.write_text(json.dumps(dispatch, ensure_ascii=False), encoding="utf-8")
+
+    result = claim_agent_batches(graph_dir=graph_dir, phase="lane_extraction", limit=1)
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "dispatch_batch_path_invalid"
+    assert "unmanaged_output:../escape.json" in result["validation_errors"]
+    assert not (graph_dir / "intermediate" / "agent-dispatch-state.json").exists()
+
+
+def test_claim_agent_batches_fails_closed_for_unsafe_dispatch_state_path(graph_dir):
+    from storygraph_lib.stage1 import claim_agent_batches
+
+    dispatch_path = graph_dir / "intermediate" / "agent-dispatch-plan.json"
+    task_packet_path = (
+        graph_dir
+        / "intermediate"
+        / "task-packets"
+        / "chunk-0001"
+        / "comprehensive_extraction.json"
+    )
+    dispatch_path.parent.mkdir(parents=True, exist_ok=True)
+    task_packet_path.parent.mkdir(parents=True, exist_ok=True)
+    task_packet_path.write_text("{}", encoding="utf-8")
+    safe_output_path = (
+        "intermediate/lane-outputs/chunk-0001/comprehensive_extraction/run-001.json"
+    )
+    dispatch_path.write_text(
+        json.dumps(
+            {
+                "stage": "stage1",
+                "max_parallel": 1,
+                "dispatch_state_path": "../escape.json",
+                "phases": [
+                    {
+                        "phase": "lane_extraction",
+                        "execution_batches": [
+                            {
+                                "batch_id": "batch-0001",
+                                "phase": "lane_extraction",
+                                "expected_output_paths": [safe_output_path],
+                                "task_packet_paths": [
+                                    "intermediate/task-packets/chunk-0001/comprehensive_extraction.json"
+                                ],
+                                "write_scope": [safe_output_path],
+                            }
+                        ],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    result = claim_agent_batches(graph_dir=graph_dir, phase="lane_extraction", limit=1)
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] in {
+        "dispatch_state_path_invalid",
+        "dispatch_state_invalid",
+    }
+    assert "unmanaged_output:../escape.json" in result["validation_errors"]
+    assert not (graph_dir.parent / "escape.json").exists()
+
+
+def _write_batch_outputs(graph_dir: Path, batch: dict) -> None:
+    for output_path in batch["expected_output_paths"]:
+        path = graph_dir / Path(*output_path.split("/"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}", encoding="utf-8")
+
+
 def test_ingest_stage1_requires_agent_template_requirements_before_lane_merge(
     graph_dir, config
 ):

@@ -21,6 +21,7 @@
   "stage1_artifacts": {
     "requirements": "requirements/template-requirements.json",
     "agent_dispatch_plan": "intermediate/agent-dispatch-plan.json",
+    "dispatch_state": "intermediate/agent-dispatch-state.json",
     "task_packet_dir": "intermediate/task-packets",
     "template_requirements_part_dir": "intermediate/template-requirements-parts",
     "input_cache": "intermediate/stage1-input-cache.json",
@@ -174,6 +175,7 @@
       "graphify-out/graph.html",
       "requirements/template-requirements.json",
       "intermediate/agent-dispatch-plan.json",
+      "intermediate/agent-dispatch-state.json",
       "intermediate/stage1-input-cache.json",
       "intermediate/task-packets/*/*.json",
       "intermediate/template-requirements-parts/*.json",
