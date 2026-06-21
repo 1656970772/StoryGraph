@@ -79,8 +79,10 @@
 
 - JSON 可解析，UTF-8 without BOM。
 - 固定字段正确：`run_id=run-001`、`lane_id=comprehensive_extraction`、`agent_role=comprehensive-stage1-extraction-agent`、`model_or_agent_identity=codex-subagent`、`output_status=completed`。
+- 所有 node/edge/event/evidence 都有合法 `confidence` 和 `verification_status`；`confidence` 只能使用配置枚举，例如 `EXTRACTED`、`INFERRED`、`AMBIGUOUS`，不要写 `high`、`medium`、`extracted` 等临时值。
+- 所有 node/edge/event/evidence 都有可验证的 source locator：优先同时写 `source_range` 和对象型 `source_location`，例如 `{"chunk_id":"chunk-0001","source_range":[0,100]}`；不要只写字符串型 `source_location`。
 - 所有 source_range 在 packet 范围内，且映射文本能支撑 fact_summary。
-- 所有 edge/event/evidence 引用闭合。
-- 所有 template_name 和 requirement_id 真实存在。
+- 所有 node/edge/event 引用的 evidence id 必须存在于 `extracted_evidence`；edge 的 source/target、event 的 participants 必须使用本文件内真实 node id，不能使用自然语言名称。
+- 所有 template_name 和 requirement_id 真实存在。若最终 `requirements/template-requirements.json` 是 summary 结构，`requirement_id` 使用真实 summary category id；不要留空或临时编造字段名。
 - 没有本 chunk 未明示的姓名、势力、身份、物品功能或关系。
 - 低戏份路人没有被无意义建节点；疑似伪装或关键路人已用当前称呼保守抽取并写明不确定性。
