@@ -4,7 +4,7 @@ from storygraph_lib.stage2 import ingest_stage2, prepare_stage2, render_stage2, 
 from test_stage2_prepare import _stage2_config, _write_stage1_inputs
 
 
-def _write_stage2_record(graph_dir):
+def _write_stage2_record(graph_dir, *, overwrite_policy="draft"):
     path = (
         graph_dir
         / "intermediate"
@@ -64,7 +64,7 @@ def _write_stage2_record(graph_dir):
                     }
                 ],
                 "evidence_citations": ["evidence:abc"],
-                "overwrite_policy": "draft",
+                "overwrite_policy": overwrite_policy,
             },
             ensure_ascii=False,
             indent=2,
@@ -122,7 +122,7 @@ def test_ingest_and_render_stage2_writes_draft_with_evidence_and_warning(tmp_pat
     assert "Stage 1 review_status: unreviewed_usable" in text
 
 
-def test_render_stage2_rejects_formal_output_until_merge_contract_exists(tmp_path):
+def test_render_stage2_backup_overwrite_backs_up_existing_formal_document(tmp_path):
     graph_dir = tmp_path / "book.storygraph"
     template_dir = tmp_path / "templates"
     graph_dir.mkdir()
@@ -131,16 +131,59 @@ def test_render_stage2_rejects_formal_output_until_merge_contract_exists(tmp_pat
     config["overwrite_policy"] = "backup-and-overwrite"
     _write_stage1_inputs(graph_dir, template_dir)
     prepare_stage2(graph_dir, template_dir, config)
-    record_path = _write_stage2_record(graph_dir)
-    record = json.loads(record_path.read_text(encoding="utf-8"))
-    record["overwrite_policy"] = "backup-and-overwrite"
-    record_path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    formal = tmp_path / "法宝分析.md"
+    formal.write_text("用户已有正式文档", encoding="utf-8")
+    _write_stage2_record(graph_dir, overwrite_policy="backup-and-overwrite")
+    ingest_stage2(graph_dir, config)
+
+    result = render_stage2(graph_dir, config)
+
+    assert result["status"] == "rendered"
+    assert result["rendered"] == ["../法宝分析.md"]
+    assert (tmp_path / "法宝分析.md.bak").read_text(encoding="utf-8") == "用户已有正式文档"
+    formal_text = formal.read_text(encoding="utf-8")
+    assert "# 法宝分析" in formal_text
+    assert "韩立获得小瓶，这是后续资源线索。" in formal_text
+
+
+def test_render_stage2_backup_overwrite_creates_new_formal_document_without_backup(tmp_path):
+    graph_dir = tmp_path / "book.storygraph"
+    template_dir = tmp_path / "templates"
+    graph_dir.mkdir()
+    template_dir.mkdir()
+    config = _stage2_config()
+    config["overwrite_policy"] = "backup-and-overwrite"
+    _write_stage1_inputs(graph_dir, template_dir)
+    prepare_stage2(graph_dir, template_dir, config)
+    _write_stage2_record(graph_dir, overwrite_policy="backup-and-overwrite")
+    ingest_stage2(graph_dir, config)
+
+    result = render_stage2(graph_dir, config)
+
+    assert result["status"] == "rendered"
+    assert (tmp_path / "法宝分析.md").exists()
+    assert not (tmp_path / "法宝分析.md.bak").exists()
+
+
+def test_render_stage2_merge_policy_requires_merge_contract_and_preserves_formal_document(tmp_path):
+    graph_dir = tmp_path / "book.storygraph"
+    template_dir = tmp_path / "templates"
+    graph_dir.mkdir()
+    template_dir.mkdir()
+    config = _stage2_config()
+    config["overwrite_policy"] = "merge"
+    _write_stage1_inputs(graph_dir, template_dir)
+    prepare_stage2(graph_dir, template_dir, config)
+    formal = tmp_path / "法宝分析.md"
+    formal.write_text("用户已有正式文档", encoding="utf-8")
+    _write_stage2_record(graph_dir, overwrite_policy="merge")
     ingest_stage2(graph_dir, config)
 
     result = render_stage2(graph_dir, config)
 
     assert result["status"] == "failed"
-    assert result["error"] == "formal_render_requires_merge_contract"
+    assert result["error"] == "stage2_merge_contract_required"
+    assert formal.read_text(encoding="utf-8") == "用户已有正式文档"
 
 
 def test_render_stage2_fails_without_completed_records_and_preserves_manifest(tmp_path):

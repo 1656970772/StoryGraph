@@ -25,8 +25,8 @@ graphify 只作为可选的可视化和查询适配层，输入必须是 StoryGr
 
 ## Stage 2 边界
 
-Stage 2 是 agent-driven 模板文档生成工具链。主 agent 先运行 `prepare-stage2`，按 template requirements summary 的 category 生成 `intermediate/stage2/task-packets/*.json`；Stage 2 agents 读取 task packet 和 Stage 1 证据，写入 `intermediate/stage2/extraction-records/<模板名>/run-001.json`。Python 只负责 schema 校验、证据闭合、ledger、路径策略和 Markdown 渲染，不负责自动编写模板正文。
+Stage 2 是 agent-driven 模板文档生成工具链。主 agent 先运行 `prepare-stage2`，按模板文档生成 `intermediate/stage2/task-packets/*.json`；每个 task packet 只对应一个模板、一个 Stage 2 agent、一个 `intermediate/stage2/extraction-records/<模板名>/run-001.json` 和一个输出文档。task packet 会携带该模板覆盖到的 template requirements summary category、相关 requirements 和 Stage 1 证据。Python 只负责 schema 校验、证据闭合、ledger、路径策略和 Markdown 渲染，不负责自动编写模板正文。
 
-默认输出策略仍是 draft-first。`render-stage2` 使用配置中的 `stage2_categories`、`stage2_output_policy`、`overwrite_policy` 和 `stage2_render_policy`，在 `draft` 策略下写入 graph draft 目录，不覆盖已有正式 Markdown 文档。正式覆盖或 merge 需要单独 contract 和复核流程。
+默认输出策略仍是 draft-first。`render-stage2` 使用配置中的 `stage2_categories`、`stage2_output_policy`、`overwrite_policy` 和 `stage2_render_policy`，在 `draft` 策略下写入 graph draft 目录，不覆盖已有正式 Markdown 文档。显式 `backup-and-overwrite` 会先备份小说目录中的同名正式 Markdown，再用单模板 agent 产物整篇覆盖；`merge` 需要单独 merge contract 和复核流程。
 
 汇报 skill source ready 前必须运行 `scripts/storygraph.py validate-skill`。

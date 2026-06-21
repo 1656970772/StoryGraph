@@ -78,8 +78,8 @@ python skill-src/storygraph/scripts/storygraph.py render-stage2 --graph-dir path
 python skill-src/storygraph/scripts/storygraph.py validate-stage2 --graph-dir path/to/novel.storygraph
 ```
 
-`prepare-stage2` 读取 `requirements/template-requirements.json`、`coverage/template-readiness.json`、`coverage/evidence-index.json`、`intermediate/stage1-input-cache.json` 和模板目录，按 requirement category 生成 `intermediate/stage2/task-packets/*.json` 与 `intermediate/stage2/dispatch-state.json`。每个 task packet 包含模板标题、相关 requirement、可用 evidence id 和预期 agent 输出路径 `intermediate/stage2/extraction-records/<模板名>/run-001.json`。
+`prepare-stage2` 读取 `requirements/template-requirements.json`、`coverage/template-readiness.json`、`coverage/evidence-index.json`、`intermediate/stage1-input-cache.json` 和模板目录，按模板文档生成 `intermediate/stage2/task-packets/*.json` 与 `intermediate/stage2/dispatch-state.json`。每个 task packet 只包含一个模板、该模板关联的 requirement category/requirement/evidence 上下文，以及唯一预期 agent 输出路径 `intermediate/stage2/extraction-records/<模板名>/run-001.json`。
 
-`claim-stage2-batches` 只维护 `pending` / `running` / `completed` 状态；当 running batch 的全部预期 extraction record 已落盘时才标记完成。`ingest-stage2` 校验每个 extraction record 的 `document_sections`、`facts`、分类标签、overwrite policy 和 evidence id 是否闭合到 Stage 1 evidence index，并更新 `coverage/template-run-ledger.json`、`coverage/template-evidence-usage.json` 和 `coverage/template-gap-report.md`。
+`claim-stage2-batches` 维护模板级 `pending` / `running` / `completed` 滑动窗口；当 running batch 的唯一预期 extraction record 已落盘且通过校验时才标记完成，并按 `--limit` 补领新的模板 batch。`ingest-stage2` 校验每个 extraction record 的 `document_sections`、`facts`、分类标签、overwrite policy 和 evidence id 是否闭合到 Stage 1 evidence index，并更新 `coverage/template-run-ledger.json`、`coverage/template-evidence-usage.json` 和 `coverage/template-gap-report.md`。
 
-默认输出策略是 draft-first：`render-stage2` 在 `draft` 策略下写入 `<graph_dir>/<stage2_output_policy.default_dir>/<template_name>.md`，不会覆盖小说目录中同名正式 Markdown。正式文档目标只能由 `backup-and-overwrite` 或经过独立 contract 的 `merge` 选择；本轮工具链不自动合并或覆盖正式文档。
+默认输出策略是 draft-first：`render-stage2` 在 `draft` 策略下写入 `<graph_dir>/<stage2_output_policy.default_dir>/<template_name>.md`，不会覆盖小说目录中同名正式 Markdown。显式 `backup-and-overwrite` 会先把已存在的正式文档复制到 `.bak`，再用单模板 agent 产出的 Markdown 整篇覆盖正式文档；`merge` 仍需要独立 merge contract，本轮工具链会失败关闭而不会伪合并。

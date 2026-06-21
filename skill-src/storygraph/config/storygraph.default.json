@@ -185,7 +185,7 @@
     "extraction_record_dir": "intermediate/stage2/extraction-records"
   },
   "stage2_agent_orchestration": {
-    "grouping_strategy": "by_requirement_category",
+    "grouping_strategy": "by_template_document",
     "agent_role": "stage2-template-document-agent",
     "max_parallel_agents": 6
   },

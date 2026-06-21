@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+from hashlib import sha256
 from pathlib import Path
+import shutil
 
 from .output_writer import OutputWriteError, OutputWriter, normalize_relative_output_path
 from .stage2_evidence import evidence_by_id, evidence_id_set, evidence_ids_for_category
@@ -44,6 +47,15 @@ def prepare_stage2(
     template_dir = Path(template_dir)
     artifacts = _stage2_artifacts(config)
     writer = _writer(graph_dir, config)
+    grouping_strategy = config.get("stage2_agent_orchestration", {}).get(
+        "grouping_strategy", "by_template_document"
+    )
+    if grouping_strategy != "by_template_document":
+        return {
+            "status": "failed",
+            "error": "unsupported_stage2_grouping_strategy",
+            "grouping_strategy": grouping_strategy,
+        }
     requirements = _read_json(graph_dir / "requirements" / "template-requirements.json")
     stage1_cache = _read_json(graph_dir / "intermediate" / "stage1-input-cache.json")
     evidence_index = _read_json(graph_dir / "coverage" / "evidence-index.json")
@@ -53,44 +65,68 @@ def prepare_stage2(
         return {"status": "failed", "error": "template_cache_mismatch", "errors": template_errors}
 
     templates_by_name = {template["template_name"]: template for template in templates}
-    batches = []
     categories = requirements.get("categories", []) if isinstance(requirements, dict) else []
-    record_root = artifacts["extraction_record_dir"]
+    categories_by_template: dict[str, list[dict]] = {}
     for category in categories:
-        category_id = category.get("category_id")
-        if not category_id:
-            continue
-        category_templates = []
         for template_name in category.get("template_coverage", []):
-            template = templates_by_name.get(template_name)
-            if template:
-                category_templates.append(template)
-        if not category_templates:
+            if template_name in templates_by_name:
+                categories_by_template.setdefault(template_name, []).append(category)
+
+    batches = []
+    record_root = artifacts["extraction_record_dir"]
+    covered_templates = []
+    for template in templates:
+        template_name = template["template_name"]
+        template_categories = categories_by_template.get(template_name, [])
+        if not template_categories:
             continue
-        expected_rel_paths = [
-            f"{record_root}/{template['template_name']}/run-001.json"
-            for template in category_templates
-        ]
+        category_ids = [category.get("category_id") for category in template_categories]
+        category_ids = [category_id for category_id in category_ids if category_id]
+        if not category_ids:
+            continue
+        covered_templates.append(template)
+        expected_rel_paths = [f"{record_root}/{template_name}/run-001.json"]
+        batch_index = len(batches) + 1
+        batch_id = _stage2_template_batch_id(batch_index, template)
         batches.append(
             {
-                "batch_id": category_id,
-                "category_id": category_id,
-                "category_name": category.get("category_name"),
+                "batch_id": batch_id,
+                "grouping_strategy": "by_template_document",
+                "category_id": category_ids[0],
+                "category_name": template_categories[0].get("category_name"),
+                "requirement_categories": [
+                    {
+                        "category_id": category.get("category_id"),
+                        "category_name": category.get("category_name"),
+                    }
+                    for category in template_categories
+                    if category.get("category_id")
+                ],
                 "agent_role": config.get("stage2_agent_orchestration", {}).get(
                     "agent_role", "stage2-template-document-agent"
                 ),
                 "status": "pending",
-                "templates": category_templates,
+                "templates": [template],
                 "requirements": {
-                    "required_extraction_targets": category.get(
-                        "required_extraction_targets", []
+                    "required_extraction_targets": _unique_in_order(
+                        target
+                        for category in template_categories
+                        for target in category.get("required_extraction_targets", [])
                     ),
-                    "evidence_requirements": category.get("evidence_requirements", []),
+                    "evidence_requirements": _unique_in_order(
+                        requirement
+                        for category in template_categories
+                        for requirement in category.get("evidence_requirements", [])
+                    ),
                 },
-                "evidence_ids": evidence_ids_for_category(
-                    evidence_index,
-                    category_id,
-                    [template["template_name"] for template in category_templates],
+                "evidence_ids": _unique_in_order(
+                    evidence_id
+                    for category_id in category_ids
+                    for evidence_id in evidence_ids_for_category(
+                        evidence_index,
+                        category_id,
+                        [template_name],
+                    )
                 ),
                 "expected_output_rel_paths": expected_rel_paths,
                 "expected_output_paths": [
@@ -103,18 +139,23 @@ def prepare_stage2(
     for batch in batches:
         packet = dict(batch)
         packet["schema"] = "stage2-task-packet.v1"
+        packet["overwrite_policy"] = overwrite_policy or config.get("overwrite_policy", "draft")
+        packet["stage2_policy"] = {
+            "stage2_categories": config.get("stage2_categories", {}),
+            "stage2_output_policy": config.get("stage2_output_policy", {}),
+        }
         writer.write_json(f"{artifacts['task_packet_dir']}/{batch['batch_id']}.json", packet)
 
     state = _dispatch_state(batches)
     writer.write_json(artifacts["dispatch_state"], state)
-    writer.write_json(TEMPLATE_RUN_LEDGER, _template_run_ledger(templates, batches))
+    writer.write_json(TEMPLATE_RUN_LEDGER, _template_run_ledger(covered_templates, batches))
     writer.write_json(TEMPLATE_EVIDENCE_USAGE, _template_evidence_usage(batches))
     writer.write_text(TEMPLATE_GAP_REPORT, "# Stage 2 Template Gap Report\n\n")
     _update_manifest_stage2(graph_dir, "prepared")
     return {
         "status": "prepared",
         "batch_count": len(batches),
-        "template_count": len(templates),
+        "template_count": len(covered_templates),
         "overwrite_policy": overwrite_policy or config.get("overwrite_policy", "draft"),
     }
 
@@ -257,19 +298,18 @@ def render_stage2(graph_dir: str | Path, config: dict) -> dict:
                 f"{normalized_rel_path}:{error}" for error in validation.errors
             )
             continue
+        overwrite_policy = record.get("overwrite_policy", config.get("overwrite_policy", "draft"))
         decision = resolve_render_target(
             graph_dir,
             _novel_dir(graph_dir),
             record["template_name"],
             config["stage2_output_policy"],
-            record.get("overwrite_policy", config.get("overwrite_policy", "draft")),
+            overwrite_policy,
         )
-        try:
-            relative_target = _relative_to_graph(graph_dir, Path(decision["target_path"]))
-        except ValueError:
+        if overwrite_policy == "merge":
             return {
                 "status": "failed",
-                "error": "formal_render_requires_merge_contract",
+                "error": "stage2_merge_contract_required",
                 "template_name": record["template_name"],
                 "target_path": decision["target_path"],
             }
@@ -279,7 +319,24 @@ def render_stage2(graph_dir: str | Path, config: dict) -> dict:
             config.get("stage2_render_policy", {}),
             review_status=review_status,
         )
-        writer.write_text(relative_target, text)
+        if overwrite_policy == "backup-and-overwrite":
+            write_error = _write_formal_stage2_document(
+                graph_dir,
+                _novel_dir(graph_dir),
+                decision,
+                text,
+            )
+            if write_error:
+                return {
+                    "status": "failed",
+                    "error": write_error["error"],
+                    "template_name": record["template_name"],
+                    **write_error,
+                }
+            relative_target = _display_rendered_path(graph_dir, Path(decision["target_path"]))
+        else:
+            relative_target = _relative_to_graph(graph_dir, Path(decision["target_path"]))
+            writer.write_text(relative_target, text)
         rendered.append(relative_target)
     if record_errors:
         return {
@@ -352,6 +409,32 @@ def _stage2_artifacts(config: dict) -> dict:
         key: normalize_relative_output_path(value)
         for key, value in artifacts.items()
     }
+
+
+def _stage2_template_batch_id(index: int, template: dict) -> str:
+    payload = json.dumps(
+        {
+            "template_name": template.get("template_name"),
+            "template_file": template.get("template_file"),
+            "template_sha256": template.get("template_sha256"),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    digest = sha256(payload.encode("utf-8")).hexdigest()[:12]
+    return f"template-batch-{index:04d}-{digest}"
+
+
+def _unique_in_order(values) -> list:
+    seen = set()
+    unique = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        unique.append(value)
+    return unique
 
 
 def _writer(graph_dir: Path, config: dict) -> OutputWriter:
@@ -466,6 +549,42 @@ def _is_within(path: Path, root: Path) -> bool:
     return True
 
 
+def _write_formal_stage2_document(
+    graph_dir: Path,
+    novel_dir: Path,
+    decision: dict,
+    text: str,
+) -> dict | None:
+    graph_root = Path(graph_dir).resolve()
+    novel_root = Path(novel_dir).resolve()
+    target = Path(decision["target_path"]).resolve()
+    if _is_within(target, graph_root) or not _is_within(target, novel_root):
+        return {
+            "error": "formal_target_path_invalid",
+            "target_path": str(target),
+        }
+    backup_path = decision.get("backup_path")
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists() and backup_path:
+            backup = Path(backup_path).resolve()
+            if not _is_within(backup, novel_root):
+                return {
+                    "error": "formal_backup_path_invalid",
+                    "target_path": str(target),
+                    "backup_path": str(backup),
+                }
+            shutil.copy2(target, backup)
+        target.write_text(text, encoding="utf-8")
+    except OSError as exc:
+        return {
+            "error": "formal_document_write_failed",
+            "target_path": str(target),
+            "detail": str(exc),
+        }
+    return None
+
+
 def _template_run_ledger(templates: list[dict], batches: list[dict]) -> dict:
     batch_by_template = {}
     for batch in batches:
@@ -565,6 +684,13 @@ def _novel_dir(graph_dir: Path) -> Path:
 
 def _relative_to_graph(graph_dir: Path, target: Path) -> str:
     return target.resolve().relative_to(graph_dir.resolve()).as_posix()
+
+
+def _display_rendered_path(graph_dir: Path, target: Path) -> str:
+    try:
+        return _relative_to_graph(graph_dir, target)
+    except ValueError:
+        return Path(os.path.relpath(target.resolve(), graph_dir.resolve())).as_posix()
 
 
 def _update_manifest_stage2(graph_dir: Path, status: str) -> None:

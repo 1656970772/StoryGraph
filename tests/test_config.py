@@ -160,6 +160,17 @@ def test_default_element_lanes_do_not_carry_legacy_artifact_paths(default_config
     ] == []
 
 
+def test_stage2_default_config_uses_template_document_batches(default_config):
+    assert default_config["stage2_agent_orchestration"]["grouping_strategy"] == (
+        "by_template_document"
+    )
+    assert default_config["stage2_agent_orchestration"]["agent_role"] == (
+        "stage2-template-document-agent"
+    )
+    assert default_config["stage2_agent_orchestration"]["max_parallel_agents"] == 6
+    assert default_config["overwrite_policy"] == "draft"
+
+
 def test_stage1_artifacts_include_agent_driven_output_dirs(default_config):
     required = {
         "requirements",
