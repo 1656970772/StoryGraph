@@ -137,7 +137,15 @@ def test_stage1_agent_driven_config_contains_lanes_review_and_writer_policy(defa
     assert default_config["agent_orchestration"]["lane_batch_strategy"] == (
         "by-lane-contiguous-chunks"
     )
-    assert default_config["agent_orchestration"]["lane_chunks_per_agent"] == 8
+    assert default_config["agent_orchestration"]["lane_chunks_per_agent"] == 2
+    quality_rules_path = default_config["agent_orchestration"][
+        "extraction_quality_rules_path"
+    ]
+    assert quality_rules_path
+    assert ".storygraph" not in quality_rules_path
+    assert (
+        Path("skill-src/storygraph") / quality_rules_path
+    ).exists()
     assert default_config["agent_orchestration"]["max_parallel_agents"] == (
         default_config["agent_policy"]["max_parallel"]
     )

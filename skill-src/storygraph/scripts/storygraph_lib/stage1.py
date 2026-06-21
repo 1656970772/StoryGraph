@@ -68,6 +68,10 @@ def prepare_stage1(
         return _failure_response(None, _error("source_unreadable", exc), False)
 
     try:
+        extraction_quality_rules = _load_extraction_quality_rules(active_config)
+        active_config = _config_with_resolved_extraction_quality_rules(
+            active_config, extraction_quality_rules
+        )
         discovery = _discover_templates(active_config, template_dir)
         lanes = _configured_lanes(active_config)
         lane_ids = _lane_ids(lanes)
@@ -105,6 +109,7 @@ def prepare_stage1(
             target_lane_ids=lane_ids,
             required_lane_ids=required_lane_ids,
             required_evidence_policy=active_config.get("required_evidence_policy"),
+            extraction_quality_rules=extraction_quality_rules,
         )
         source_flow_status = "reused" if source_reusable else "refreshed"
         if not source_reusable:
@@ -123,6 +128,7 @@ def prepare_stage1(
                 lanes,
                 artifacts,
                 active_config,
+                extraction_quality_rules,
             )
             for packet in packets:
                 writer.write_json(packet["task_packet_path"], packet)
@@ -1093,6 +1099,7 @@ def _try_reuse_source_flow(
     target_lane_ids: list[str],
     required_lane_ids: list[str],
     required_evidence_policy: dict | None,
+    extraction_quality_rules: dict | None,
 ) -> tuple[bool, list[dict], list[dict]]:
     if not previous_cache:
         return False, [], []
@@ -1125,6 +1132,7 @@ def _try_reuse_source_flow(
         chunks,
         lanes=lanes,
         required_evidence_policy=required_evidence_policy,
+        extraction_quality_rules=extraction_quality_rules,
     )
     if not packets:
         return False, [], []
@@ -1186,6 +1194,7 @@ def _read_reusable_lane_task_packets(
     *,
     lanes: list[dict],
     required_evidence_policy: dict | None,
+    extraction_quality_rules: dict | None,
 ) -> list[dict]:
     try:
         root = _artifact_path(graph_dir, artifacts["task_packet_dir"])
@@ -1235,6 +1244,7 @@ def _read_reusable_lane_task_packets(
                 template_requirements_path=artifacts["requirements"],
                 task_packet_path=relative_path,
                 expected_required_evidence_policy=expected_required_evidence_policy,
+                expected_extraction_quality_rules=extraction_quality_rules,
             ):
                 return []
             packets.append(packet)
@@ -1259,6 +1269,7 @@ def _reusable_lane_task_packet_is_complete(
     template_requirements_path: str,
     task_packet_path: str,
     expected_required_evidence_policy: Any,
+    expected_extraction_quality_rules: dict | None,
 ) -> bool:
     from .stage1_packets import validate_task_packet_contract
 
@@ -1269,6 +1280,7 @@ def _reusable_lane_task_packet_is_complete(
         template_requirements_path=template_requirements_path,
         task_packet_path=task_packet_path,
         expected_required_evidence_policy=expected_required_evidence_policy,
+        expected_extraction_quality_rules=expected_extraction_quality_rules,
     )
 
 
@@ -1346,6 +1358,7 @@ def _build_task_packets(
     lanes: list[dict],
     artifacts: dict[str, str],
     config: dict,
+    extraction_quality_rules: dict | None,
 ) -> list[dict]:
     from .stage1_packets import build_task_packets
 
@@ -1356,6 +1369,7 @@ def _build_task_packets(
         template_requirements_path=artifacts["requirements"],
         task_packet_dir=artifacts["task_packet_dir"],
         required_evidence_policy=config.get("required_evidence_policy"),
+        extraction_quality_rules=extraction_quality_rules,
     )
 
 
@@ -1432,6 +1446,50 @@ def _config_with_paths(config: dict, template_dir: str | Path) -> dict:
     paths = dict(active_config.get("paths", {}))
     paths["template_dir"] = str(template_dir)
     active_config["paths"] = paths
+    return active_config
+
+
+def _load_extraction_quality_rules(config: dict) -> dict | None:
+    orchestration = config.get("agent_orchestration", {})
+    if not isinstance(orchestration, dict):
+        return None
+    configured_path = orchestration.get("extraction_quality_rules_path")
+    if configured_path in (None, ""):
+        return None
+    if not isinstance(configured_path, str) or "\0" in configured_path:
+        raise ValueError("extraction_quality_rules_unreadable")
+    rules_path = _resolve_extraction_quality_rules_path(configured_path)
+    try:
+        content = rules_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError("extraction_quality_rules_unreadable") from exc
+    if not content:
+        raise ValueError("extraction_quality_rules_unreadable")
+    return {"path": configured_path, "content": content}
+
+
+def _resolve_extraction_quality_rules_path(configured_path: str) -> Path:
+    path = Path(configured_path).expanduser()
+    if path.is_absolute():
+        return path
+    cwd_path = Path(configured_path)
+    if cwd_path.is_file():
+        return cwd_path
+    skill_root = Path(__file__).resolve().parents[2]
+    return skill_root / configured_path
+
+
+def _config_with_resolved_extraction_quality_rules(
+    config: dict, rules: dict | None
+) -> dict:
+    if rules is None:
+        return config
+    active_config = dict(config)
+    active_config["_resolved_extraction_quality_rules"] = {
+        "path": rules["path"],
+        "content_sha256": sha256(rules["content"].encode("utf-8")).hexdigest(),
+        "content_length": len(rules["content"]),
+    }
     return active_config
 
 
@@ -3178,6 +3236,7 @@ def _task_packet_schema_hash(config: dict) -> str:
     relevant = {
         "element_lanes": config.get("element_lanes"),
         "stage1_artifacts": config.get("stage1_artifacts"),
+        "extraction_quality_rules": config.get("_resolved_extraction_quality_rules"),
         "lane_output_statuses": config.get("status_enums", {}).get("lane_output_statuses"),
     }
     return _stable_json_hash(relevant)

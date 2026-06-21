@@ -115,7 +115,8 @@
   "agent_orchestration": {
     "lane_assignment_strategy": "configured-element-lanes",
     "lane_batch_strategy": "by-lane-contiguous-chunks",
-    "lane_chunks_per_agent": 8,
+    "lane_chunks_per_agent": 2,
+    "extraction_quality_rules_path": "references/stage1-extraction-agent-quality-rules.md",
     "max_parallel_agents": 6,
     "template_requirements_parallel": true,
     "max_parallel_lanes": 3,
