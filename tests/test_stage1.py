@@ -456,11 +456,20 @@ def test_default_config_prepares_one_comprehensive_packet_per_chunk(
         "lane_extraction",
     ]
     assert len(lane_phase["task_packets"]) == 5
-    assert len(lane_phase["execution_batches"]) == 1
     assert {
         packet["lane_id"] for packet in lane_phase["task_packets"]
     } == {"comprehensive_extraction"}
-    assert lane_phase["execution_batches"][0]["expected_output_paths"] == [
+    assert len(lane_phase["execution_batches"]) == 3
+    assert [batch["chunk_ids"] for batch in lane_phase["execution_batches"]] == [
+        ["chunk-0001", "chunk-0002"],
+        ["chunk-0003", "chunk-0004"],
+        ["chunk-0005"],
+    ]
+    assert [
+        path
+        for batch in lane_phase["execution_batches"]
+        for path in batch["expected_output_paths"]
+    ] == [
         f"intermediate/lane-outputs/chunk-000{index}/comprehensive_extraction/run-001.json"
         for index in range(1, 6)
     ]
@@ -509,7 +518,7 @@ def test_default_config_large_corpus_batches_are_chunks_not_chunks_times_lanes(
     assert result["status"] == "prepared"
     assert len(lane_phase["task_packets"]) == 2452
     assert len(output_paths) == len(set(output_paths)) == 2452
-    assert len(lane_phase["execution_batches"]) == 307
+    assert len(lane_phase["execution_batches"]) == 1226
     assert output_paths[0] == (
         "intermediate/lane-outputs/chunk-0001/comprehensive_extraction/run-001.json"
     )

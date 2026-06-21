@@ -46,6 +46,10 @@ def test_prepare_task_packets_writes_one_packet_per_required_lane(tmp_path):
         lanes=lanes,
         template_requirements_path="requirements/template-requirements.json",
         task_packet_dir=task_packet_dir,
+        extraction_quality_rules={
+            "path": "references/stage1-extraction-agent-quality-rules.md",
+            "content": "# Stage 1 抽取 Agent 附加质量规则\n只抽当前 chunk。",
+        },
     )
 
     assert len(packets) == 2
@@ -58,6 +62,11 @@ def test_prepare_task_packets_writes_one_packet_per_required_lane(tmp_path):
         packets[0]["task_packet_path"]
         == f"{task_packet_dir}/chunk-0001/entities_resources.json"
     )
+    assert packets[0]["extraction_quality_rules"] == {
+        "path": "references/stage1-extraction-agent-quality-rules.md",
+        "content": "# Stage 1 抽取 Agent 附加质量规则\n只抽当前 chunk。",
+    }
+    assert packets[1]["extraction_quality_rules"] == packets[0]["extraction_quality_rules"]
 
 
 def test_comprehensive_task_packet_declares_full_stage1_output_contract():
@@ -86,8 +95,15 @@ def test_comprehensive_task_packet_declares_full_stage1_output_contract():
         ],
         template_requirements_path="requirements/template-requirements.json",
         task_packet_dir="intermediate/task-packets",
+        extraction_quality_rules={
+            "path": "references/stage1-extraction-agent-quality-rules.md",
+            "content": "# Stage 1 抽取 Agent 附加质量规则",
+        },
     )
 
+    assert packets[0]["extraction_quality_rules"]["content"].startswith(
+        "# Stage 1 抽取 Agent 附加质量规则"
+    )
     assert packets[0]["stage1_output_contract"] == {
         "required_collections": [
             "extracted_nodes",
@@ -461,6 +477,7 @@ def test_build_template_requirements_task_packets_split_templates_into_batches()
     assert packets[0]["relevant_template_requirements"] == {
         "path": "requirements/template-requirements.json",
     }
+    assert "extraction_quality_rules" not in packets[0]
 
 
 def test_build_template_requirements_task_packets_allows_one_to_five_per_batch():

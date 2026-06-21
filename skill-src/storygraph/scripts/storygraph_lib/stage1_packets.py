@@ -27,6 +27,7 @@ def build_task_packets(
     task_packet_dir: str | Path | None = None,
     attempt: int = 1,
     required_evidence_policy: dict | None = None,
+    extraction_quality_rules: dict | None = None,
 ) -> list[dict]:
     packets = []
     required_lanes = []
@@ -80,6 +81,10 @@ def build_task_packets(
             }
             if _is_comprehensive_lane(lane):
                 packet["stage1_output_contract"] = _comprehensive_output_contract()
+            if extraction_quality_rules is not None:
+                packet["extraction_quality_rules"] = _extraction_quality_rules(
+                    extraction_quality_rules
+                )
             packet_path = lane.get("task_packet_path")
             if packet_path is None:
                 packet_path = lane.get("packet_path")
@@ -101,6 +106,7 @@ def validate_task_packet_contract(
     template_requirements_path: str | Path,
     task_packet_path: str | Path,
     expected_required_evidence_policy: Any = _UNSET,
+    expected_extraction_quality_rules: Any = _UNSET,
 ) -> bool:
     if not isinstance(packet, dict):
         return False
@@ -181,9 +187,26 @@ def validate_task_packet_contract(
         and packet.get("required_evidence_policy") != expected_required_evidence_policy
     ):
         return False
+    if (
+        expected_extraction_quality_rules is not _UNSET
+        and packet.get("extraction_quality_rules") != expected_extraction_quality_rules
+    ):
+        return False
     if _is_comprehensive_lane(lane_contract):
         return packet.get("stage1_output_contract") == _comprehensive_output_contract()
     return True
+
+
+def _extraction_quality_rules(value: dict) -> dict:
+    if not isinstance(value, dict):
+        raise ValueError("invalid_extraction_quality_rules")
+    path = value.get("path")
+    content = value.get("content")
+    if not isinstance(path, str) or not path:
+        raise ValueError("invalid_extraction_quality_rules")
+    if not isinstance(content, str) or not content:
+        raise ValueError("invalid_extraction_quality_rules")
+    return {"path": path, "content": content}
 
 
 def _is_comprehensive_lane(lane: dict) -> bool:

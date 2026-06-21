@@ -351,6 +351,63 @@ def test_prepare_stage1_reuses_source_flow_when_source_hash_and_chunk_artifacts_
     assert reused_packet["sentinel"] == "keep-existing-packet"
 
 
+def test_prepare_stage1_rebuilds_source_flow_when_extraction_quality_rules_change(
+    tmp_path, novel, template_dir, graph_dir, config
+):
+    from storygraph_lib.stage1 import prepare_stage1
+
+    rules_path = tmp_path / "rules.md"
+    rules_path.write_text("# 抽取规则\n旧规则", encoding="utf-8")
+    config["agent_orchestration"] = {
+        "extraction_quality_rules_path": str(rules_path),
+    }
+    _prepare_and_ingest_requirements(novel, template_dir, graph_dir, config)
+    packet_path = _lane_packet_path(graph_dir)
+    packet = json.loads(packet_path.read_text(encoding="utf-8"))
+    packet["sentinel"] = "stale-rules"
+    packet_path.write_text(
+        json.dumps(packet, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    rules_path.write_text("# 抽取规则\n新规则", encoding="utf-8")
+    result = prepare_stage1(
+        source_path=novel,
+        template_dir=template_dir,
+        graph_dir=graph_dir,
+        config=config,
+    )
+    rebuilt_packet = json.loads(packet_path.read_text(encoding="utf-8"))
+
+    assert result["cache"]["source_flow"] == "refreshed"
+    assert "sentinel" not in rebuilt_packet
+    assert rebuilt_packet["extraction_quality_rules"] == {
+        "path": str(rules_path),
+        "content": "# 抽取规则\n新规则",
+    }
+
+
+def test_prepare_stage1_fails_closed_when_extraction_quality_rules_missing(
+    tmp_path, novel, template_dir, graph_dir, config
+):
+    from storygraph_lib.stage1 import prepare_stage1
+
+    config["agent_orchestration"] = {
+        "extraction_quality_rules_path": str(tmp_path / "missing-rules.md"),
+    }
+
+    result = prepare_stage1(
+        source_path=novel,
+        template_dir=template_dir,
+        graph_dir=graph_dir,
+        config=config,
+    )
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "extraction_quality_rules_unreadable"
+    assert result["validation_errors"] == ["extraction_quality_rules_unreadable"]
+
+
 def test_prepare_stage1_isolates_stale_lane_outputs_when_template_requirements_refresh(
     novel,
     template_dir,
