@@ -81,6 +81,52 @@ def _write_merge_ready_bundle(
     )
 
 
+def _template_requirement(template_name: str, template_file: str | None = None) -> dict:
+    return {
+        "template_name": template_name,
+        "template_file": template_file or f"templates/{template_name}模板.md",
+        "required_fields": ["字段"],
+        "required_tables": [],
+        "required_cards": [],
+        "required_case_patterns": [],
+        "required_evidence_fields": ["原文位置"],
+        "graph_node_mapping": ["node"],
+        "graph_event_mapping": ["event"],
+        "graph_relation_mapping": ["relation"],
+        "coverage_rules": {
+            "requirement_statuses": ["covered", "needs_review", "not_found_in_source"]
+        },
+    }
+
+
+def _write_template_requirement_parts(graph_dir: Path) -> list[dict]:
+    packets = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in sorted(
+            (graph_dir / "intermediate" / "task-packets" / "template-requirements").glob(
+                "batch-*.json"
+            )
+        )
+    ]
+    for packet in packets:
+        part_path = graph_dir / Path(*packet["output_path"].split("/"))
+        part_path.parent.mkdir(parents=True, exist_ok=True)
+        part_path.write_text(
+            json.dumps(
+                {
+                    "templates": [
+                        _template_requirement(item["template_name"], item["template_file"])
+                        for item in packet["template_inventory"]
+                    ]
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    return packets
+
+
 @pytest.fixture
 def graph_dir_without_agent_outputs(graph_dir):
     return graph_dir
@@ -145,6 +191,157 @@ def test_prepare_stage1_writes_task_packets_but_no_canonical_graph(
     assert not (graph_dir / "graphify-out" / "graph.json").exists()
 
 
+def test_prepare_stage1_writes_template_requirements_agent_task_packets(
+    novel, template_dir, graph_dir, config
+):
+    from storygraph_lib.stage1 import prepare_stage1
+
+    config["stage1_artifacts"]["task_packet_dir"] = "custom/task-packets"
+    config["stage1_artifacts"][
+        "template_requirements_part_dir"
+    ] = "custom/template-requirements-parts"
+    config["writer_policy"]["managed_outputs"].append(
+        "custom/template-requirements-parts/*.json"
+    )
+    config["template_requirements_strategy"] = {
+        "mode": "auto-from-templates",
+        "agent_role": "template-requirements-analysis-agent",
+        "lane_id": "template_requirements",
+        "schema": "template-requirements.schema.json",
+        "templates_per_packet": 3,
+        "allow_manual_overrides": True,
+        "python_validate_only": True,
+    }
+    for index in range(2, 7):
+        (template_dir / f"模板{index}模板.md").write_text(
+            f"# 模板{index}模板\n## 字段\n- 字段{index}",
+            encoding="utf-8",
+        )
+
+    result = prepare_stage1(
+        source_path=novel,
+        template_dir=template_dir,
+        graph_dir=graph_dir,
+        config=config,
+    )
+
+    assert result["status"] == "prepared"
+    task_packet_paths = [
+        graph_dir
+        / "custom"
+        / "task-packets"
+        / "template-requirements"
+        / f"batch-{index:04d}.json"
+        for index in (1, 2)
+    ]
+    assert all(path.exists() for path in task_packet_paths)
+    packets = [
+        json.loads(path.read_text(encoding="utf-8")) for path in task_packet_paths
+    ]
+    assert [packet["batch_id"] for packet in packets] == ["batch-0001", "batch-0002"]
+    assert [len(packet["template_inventory"]) for packet in packets] == [3, 3]
+    assert packets[0]["stage"] == "stage1"
+    assert packets[0]["lane_id"] == "template_requirements"
+    assert packets[0]["agent_role"] == "template-requirements-analysis-agent"
+    assert packets[0]["source_path"] == str(novel.resolve())
+    assert packets[0]["allowed_output_schema"] == "template-requirements.schema.json"
+    assert packets[0]["relevant_template_requirements"] == {
+        "path": "requirements/template-requirements.json",
+    }
+    assert packets[0]["lane_contract"]["output_path"] == (
+        "custom/template-requirements-parts/batch-0001.json"
+    )
+    assert packets[0]["output_path"] == (
+        "custom/template-requirements-parts/batch-0001.json"
+    )
+    assert packets[0]["write_scope"] == [
+        "custom/template-requirements-parts/batch-0001.json"
+    ]
+    assert packets[0]["chunk_ids"] == ["chunk-0001"]
+    assert packets[0]["template_names"] == [
+        item["template_name"] for item in packets[0]["template_inventory"]
+    ]
+
+    ledger = json.loads(
+        (graph_dir / "coverage" / "agent-run-ledger.json").read_text(encoding="utf-8")
+    )
+    template_runs = [
+        record
+        for record in ledger
+        if record["run_id"].startswith("stage1-template-requirements:")
+    ]
+    assert [record["run_id"] for record in template_runs] == [
+        "stage1-template-requirements:batch-0001",
+        "stage1-template-requirements:batch-0002",
+    ]
+    assert template_runs[0]["prompt_or_input_packet"] == (
+        "custom/task-packets/template-requirements/batch-0001.json"
+    )
+    assert template_runs[0]["input_paths"][0] == (
+        "custom/task-packets/template-requirements/batch-0001.json"
+    )
+    assert template_runs[0]["output_paths"] == [
+        "custom/template-requirements-parts/batch-0001.json"
+    ]
+    assert template_runs[0]["write_scope"] == [
+        "custom/template-requirements-parts/batch-0001.json"
+    ]
+
+
+def test_prepare_stage1_uses_configured_template_requirements_strategy(
+    novel, template_dir, graph_dir, config
+):
+    from storygraph_lib.stage1 import prepare_stage1
+
+    config["template_requirements_strategy"] = {
+        "mode": "auto-from-templates",
+        "allow_manual_overrides": True,
+        "python_validate_only": True,
+        "agent_role": "custom-template-agent",
+        "lane_id": "custom_template_requirements",
+        "schema": "custom-template.schema.json",
+        "templates_per_packet": 5,
+    }
+
+    result = prepare_stage1(
+        source_path=novel,
+        template_dir=template_dir,
+        graph_dir=graph_dir,
+        config=config,
+    )
+
+    assert result["status"] == "prepared"
+    packet = json.loads(
+        (
+            graph_dir
+            / "intermediate"
+            / "task-packets"
+            / "template-requirements"
+            / "batch-0001.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert packet["agent_role"] == "custom-template-agent"
+    assert packet["lane_id"] == "custom_template_requirements"
+    assert packet["allowed_output_schema"] == "custom-template.schema.json"
+    assert "producer" not in packet["relevant_template_requirements"]
+    assert packet["lane_contract"]["agent_role"] == "custom-template-agent"
+    assert packet["lane_contract"]["lane_id"] == "custom_template_requirements"
+    assert packet["lane_contract"]["schema"] == "custom-template.schema.json"
+
+    ledger = json.loads(
+        (graph_dir / "coverage" / "agent-run-ledger.json").read_text(encoding="utf-8")
+    )
+    template_run = next(
+        record
+        for record in ledger
+        if record["run_id"] == "stage1-template-requirements:batch-0001"
+    )
+    assert template_run["agent_role"] == packet["agent_role"]
+    assert template_run["lane_id"] == packet["lane_id"]
+    assert template_run["chunk_id"] == packet["chunk_id"]
+    assert template_run["attempt"] == packet["attempt"]
+
+
 def test_ingest_stage1_requires_agent_template_requirements_before_lane_merge(
     graph_dir, config
 ):
@@ -154,6 +351,582 @@ def test_ingest_stage1_requires_agent_template_requirements_before_lane_merge(
 
     assert result["status"] == "failed"
     assert result["error"]["code"] == "template_requirements_missing"
+
+
+def test_ingest_stage1_aggregates_template_requirements_parts_before_lane_merge(
+    novel,
+    template_dir,
+    graph_dir,
+    config,
+    write_lane_output,
+    write_review_finding,
+):
+    from storygraph_lib.stage1 import ingest_stage1, prepare_stage1
+
+    config["template_requirements_strategy"] = {
+        "agent_role": "template-requirements-analysis-agent",
+        "lane_id": "template_requirements",
+        "schema": "template-requirements.schema.json",
+        "templates_per_packet": 3,
+        "allow_manual_overrides": True,
+        "python_validate_only": True,
+    }
+    for index in range(2, 7):
+        (template_dir / f"模板{index}模板.md").write_text(
+            f"# 模板{index}模板\n## 字段\n- 字段{index}",
+            encoding="utf-8",
+        )
+    prepare_stage1(
+        source_path=novel,
+        template_dir=template_dir,
+        graph_dir=graph_dir,
+        config=config,
+    )
+    _write_template_requirement_parts(graph_dir)
+    write_lane_output(graph_dir, status="completed")
+    write_review_finding(graph_dir, status="passed")
+
+    result = ingest_stage1(graph_dir=graph_dir, config=config)
+
+    assert result["status"] == "ingested"
+    requirements = json.loads(
+        (graph_dir / "requirements" / "template-requirements.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert "producer" not in requirements
+    assert [item["template_name"] for item in requirements["templates"]] == [
+        "模板2",
+        "模板3",
+        "模板4",
+        "模板5",
+        "模板6",
+        "法宝分析",
+    ]
+
+
+def test_ingest_stage1_ignores_existing_requirements_and_requires_parts(
+    novel,
+    template_dir,
+    graph_dir,
+    config,
+    write_lane_output,
+    write_review_finding,
+):
+    from storygraph_lib.stage1 import ingest_stage1, prepare_stage1
+
+    config["template_requirements_strategy"] = {
+        "agent_role": "template-requirements-analysis-agent",
+        "lane_id": "template_requirements",
+        "schema": "template-requirements.schema.json",
+        "templates_per_packet": 3,
+        "allow_manual_overrides": True,
+        "python_validate_only": True,
+    }
+    for index in range(2, 7):
+        (template_dir / f"模板{index}模板.md").write_text(
+            f"# 模板{index}模板\n## 字段\n- 字段{index}",
+            encoding="utf-8",
+        )
+    prepare_stage1(
+        source_path=novel,
+        template_dir=template_dir,
+        graph_dir=graph_dir,
+        config=config,
+    )
+    requirements_path = graph_dir / "requirements" / "template-requirements.json"
+    requirements_path.parent.mkdir(parents=True, exist_ok=True)
+    requirements_path.write_text(
+        json.dumps(
+            {
+                "templates": [
+                    _template_requirement("法宝分析", "templates/法宝分析模板.md")
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    write_lane_output(graph_dir, status="completed")
+    write_review_finding(graph_dir, status="passed")
+
+    result = ingest_stage1(graph_dir=graph_dir, config=config)
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "template_requirements_part_missing"
+    assert "template_requirements_part_missing" in result["validation_errors"]
+
+
+def test_ingest_stage1_fails_closed_when_template_requirement_packet_file_swapped(
+    novel,
+    template_dir,
+    graph_dir,
+    config,
+    write_lane_output,
+    write_review_finding,
+):
+    from storygraph_lib.stage1 import ingest_stage1, prepare_stage1
+
+    config["template_requirements_strategy"] = {
+        "agent_role": "template-requirements-analysis-agent",
+        "lane_id": "template_requirements",
+        "schema": "template-requirements.schema.json",
+        "templates_per_packet": 3,
+        "allow_manual_overrides": True,
+        "python_validate_only": True,
+    }
+    for index in range(2, 7):
+        (template_dir / f"模板{index}模板.md").write_text(
+            f"# 模板{index}模板\n## 字段\n- 字段{index}",
+            encoding="utf-8",
+        )
+    prepare_stage1(
+        source_path=novel,
+        template_dir=template_dir,
+        graph_dir=graph_dir,
+        config=config,
+    )
+    _write_template_requirement_parts(graph_dir)
+    packet_dir = graph_dir / "intermediate" / "task-packets" / "template-requirements"
+    first_packet = packet_dir / "batch-0001.json"
+    second_packet = packet_dir / "batch-0002.json"
+    first_content = first_packet.read_text(encoding="utf-8")
+    second_content = second_packet.read_text(encoding="utf-8")
+    first_packet.write_text(second_content, encoding="utf-8")
+    second_packet.write_text(first_content, encoding="utf-8")
+    write_lane_output(graph_dir, status="completed")
+    write_review_finding(graph_dir, status="passed")
+
+    result = ingest_stage1(graph_dir=graph_dir, config=config)
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "template_requirements_part_invalid"
+    assert "template_requirements_task_packet_path_mismatch:batch-0002" in result["validation_errors"]
+    assert "template_requirements_task_packet_filename_mismatch:batch-0002" in result["validation_errors"]
+    assert not (graph_dir / "requirements" / "template-requirements.json").exists()
+
+
+def test_ingest_stage1_fails_closed_when_template_requirement_part_missing(
+    novel,
+    template_dir,
+    graph_dir,
+    config,
+):
+    from storygraph_lib.stage1 import ingest_stage1, prepare_stage1
+
+    config["template_requirements_strategy"] = {
+        "agent_role": "template-requirements-analysis-agent",
+        "lane_id": "template_requirements",
+        "schema": "template-requirements.schema.json",
+        "templates_per_packet": 3,
+        "allow_manual_overrides": True,
+        "python_validate_only": True,
+    }
+    for index in range(2, 7):
+        (template_dir / f"模板{index}模板.md").write_text(
+            f"# 模板{index}模板\n## 字段\n- 字段{index}",
+            encoding="utf-8",
+        )
+    prepare_stage1(
+        source_path=novel,
+        template_dir=template_dir,
+        graph_dir=graph_dir,
+        config=config,
+    )
+    packets = _write_template_requirement_parts(graph_dir)
+    missing_part = graph_dir / Path(*packets[-1]["output_path"].split("/"))
+    missing_part.unlink()
+
+    result = ingest_stage1(graph_dir=graph_dir, config=config)
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "template_requirements_part_missing"
+    assert "template_requirements_part_missing" in result["validation_errors"]
+    assert not (graph_dir / "requirements" / "template-requirements.json").exists()
+
+
+def test_ingest_stage1_fails_closed_when_template_requirement_part_invalid(
+    novel,
+    template_dir,
+    graph_dir,
+    config,
+):
+    from storygraph_lib.stage1 import ingest_stage1, prepare_stage1
+
+    config["template_requirements_strategy"] = {
+        "agent_role": "template-requirements-analysis-agent",
+        "lane_id": "template_requirements",
+        "schema": "template-requirements.schema.json",
+        "templates_per_packet": 3,
+        "allow_manual_overrides": True,
+        "python_validate_only": True,
+    }
+    for index in range(2, 7):
+        (template_dir / f"模板{index}模板.md").write_text(
+            f"# 模板{index}模板\n## 字段\n- 字段{index}",
+            encoding="utf-8",
+        )
+    prepare_stage1(
+        source_path=novel,
+        template_dir=template_dir,
+        graph_dir=graph_dir,
+        config=config,
+    )
+    packets = _write_template_requirement_parts(graph_dir)
+    invalid_part = graph_dir / Path(*packets[0]["output_path"].split("/"))
+    invalid_part.write_text(
+        json.dumps({"producer": "python-template-parser", "templates": []}),
+        encoding="utf-8",
+    )
+
+    result = ingest_stage1(graph_dir=graph_dir, config=config)
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "template_requirements_part_invalid"
+    assert "template_requirements_not_agent_produced" in result["validation_errors"]
+    assert not (graph_dir / "requirements" / "template-requirements.json").exists()
+
+
+def test_ingest_stage1_fails_closed_when_template_requirement_ledger_output_path_unsafe(
+    novel,
+    template_dir,
+    graph_dir,
+    config,
+):
+    from storygraph_lib.stage1 import ingest_stage1, prepare_stage1
+
+    config["template_requirements_strategy"] = {
+        "agent_role": "template-requirements-analysis-agent",
+        "lane_id": "template_requirements",
+        "schema": "template-requirements.schema.json",
+        "templates_per_packet": 3,
+        "allow_manual_overrides": True,
+        "python_validate_only": True,
+    }
+    for index in range(2, 7):
+        (template_dir / f"模板{index}模板.md").write_text(
+            f"# 模板{index}模板\n## 字段\n- 字段{index}",
+            encoding="utf-8",
+        )
+    prepare_stage1(
+        source_path=novel,
+        template_dir=template_dir,
+        graph_dir=graph_dir,
+        config=config,
+    )
+    _write_template_requirement_parts(graph_dir)
+    ledger_path = graph_dir / "coverage" / "agent-run-ledger.json"
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    template_run = next(
+        record
+        for record in ledger
+        if record["run_id"] == "stage1-template-requirements:batch-0001"
+    )
+    template_run["output_paths"] = ["../escape.json"]
+    template_run["write_scope"] = ["../escape.json"]
+    ledger_path.write_text(json.dumps(ledger, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    result = ingest_stage1(graph_dir=graph_dir, config=config)
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "template_requirements_part_invalid"
+    assert "unmanaged_output:../escape.json" in result["validation_errors"]
+    assert not (graph_dir / "requirements" / "template-requirements.json").exists()
+
+
+def test_ingest_stage1_fails_closed_when_template_requirement_ledger_batch_missing(
+    novel,
+    template_dir,
+    graph_dir,
+    config,
+):
+    from storygraph_lib.stage1 import ingest_stage1, prepare_stage1
+
+    config["template_requirements_strategy"] = {
+        "agent_role": "template-requirements-analysis-agent",
+        "lane_id": "template_requirements",
+        "schema": "template-requirements.schema.json",
+        "templates_per_packet": 3,
+        "allow_manual_overrides": True,
+        "python_validate_only": True,
+    }
+    for index in range(2, 7):
+        (template_dir / f"模板{index}模板.md").write_text(
+            f"# 模板{index}模板\n## 字段\n- 字段{index}",
+            encoding="utf-8",
+        )
+    prepare_stage1(
+        source_path=novel,
+        template_dir=template_dir,
+        graph_dir=graph_dir,
+        config=config,
+    )
+    _write_template_requirement_parts(graph_dir)
+    ledger_path = graph_dir / "coverage" / "agent-run-ledger.json"
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    ledger = [
+        record
+        for record in ledger
+        if record.get("run_id") != "stage1-template-requirements:batch-0002"
+    ]
+    ledger_path.write_text(json.dumps(ledger, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    result = ingest_stage1(graph_dir=graph_dir, config=config)
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "template_requirements_part_invalid"
+    assert "template_requirements_ledger_batch_mismatch" in result["validation_errors"]
+    assert not (graph_dir / "requirements" / "template-requirements.json").exists()
+
+
+def test_ingest_stage1_fails_closed_when_template_requirement_batch_sequence_has_gap(
+    novel,
+    template_dir,
+    graph_dir,
+    config,
+    write_lane_output,
+    write_review_finding,
+):
+    from storygraph_lib.stage1 import ingest_stage1, prepare_stage1
+
+    config["template_requirements_strategy"] = {
+        "agent_role": "template-requirements-analysis-agent",
+        "lane_id": "template_requirements",
+        "schema": "template-requirements.schema.json",
+        "templates_per_packet": 2,
+        "allow_manual_overrides": True,
+        "python_validate_only": True,
+    }
+    for index in range(2, 7):
+        (template_dir / f"模板{index}模板.md").write_text(
+            f"# 模板{index}模板\n## 字段\n- 字段{index}",
+            encoding="utf-8",
+        )
+    prepare_stage1(
+        source_path=novel,
+        template_dir=template_dir,
+        graph_dir=graph_dir,
+        config=config,
+    )
+    _write_template_requirement_parts(graph_dir)
+    (
+        graph_dir
+        / "intermediate"
+        / "task-packets"
+        / "template-requirements"
+        / "batch-0002.json"
+    ).unlink()
+    (graph_dir / "intermediate" / "template-requirements-parts" / "batch-0002.json").unlink()
+    ledger_path = graph_dir / "coverage" / "agent-run-ledger.json"
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    ledger = [
+        record
+        for record in ledger
+        if record.get("run_id") != "stage1-template-requirements:batch-0002"
+    ]
+    ledger_path.write_text(json.dumps(ledger, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_lane_output(graph_dir, status="completed")
+    write_review_finding(graph_dir, status="passed")
+
+    result = ingest_stage1(graph_dir=graph_dir, config=config)
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "template_requirements_part_invalid"
+    assert "template_requirements_batch_sequence_invalid" in result["validation_errors"]
+    assert not (graph_dir / "requirements" / "template-requirements.json").exists()
+
+
+def test_ingest_stage1_fails_closed_when_template_requirement_ledger_duplicates_batch_output(
+    novel,
+    template_dir,
+    graph_dir,
+    config,
+):
+    from storygraph_lib.stage1 import ingest_stage1, prepare_stage1
+
+    config["template_requirements_strategy"] = {
+        "agent_role": "template-requirements-analysis-agent",
+        "lane_id": "template_requirements",
+        "schema": "template-requirements.schema.json",
+        "templates_per_packet": 3,
+        "allow_manual_overrides": True,
+        "python_validate_only": True,
+    }
+    for index in range(2, 7):
+        (template_dir / f"模板{index}模板.md").write_text(
+            f"# 模板{index}模板\n## 字段\n- 字段{index}",
+            encoding="utf-8",
+        )
+    prepare_stage1(
+        source_path=novel,
+        template_dir=template_dir,
+        graph_dir=graph_dir,
+        config=config,
+    )
+    _write_template_requirement_parts(graph_dir)
+    ledger_path = graph_dir / "coverage" / "agent-run-ledger.json"
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    template_runs = [
+        record
+        for record in ledger
+        if record["run_id"].startswith("stage1-template-requirements:")
+    ]
+    template_runs[1]["output_paths"] = list(template_runs[0]["output_paths"])
+    template_runs[1]["write_scope"] = list(template_runs[0]["write_scope"])
+    template_runs[1]["assigned_template_names"] = list(
+        template_runs[0]["assigned_template_names"]
+    )
+    ledger_path.write_text(json.dumps(ledger, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    result = ingest_stage1(graph_dir=graph_dir, config=config)
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "template_requirements_part_invalid"
+    assert "template_requirements_packet_ledger_mismatch:batch-0002" in result["validation_errors"]
+    assert not (graph_dir / "requirements" / "template-requirements.json").exists()
+
+
+def test_ingest_stage1_fails_closed_when_template_requirement_write_scope_overbroad(
+    novel,
+    template_dir,
+    graph_dir,
+    config,
+):
+    from storygraph_lib.stage1 import ingest_stage1, prepare_stage1
+
+    config["template_requirements_strategy"] = {
+        "agent_role": "template-requirements-analysis-agent",
+        "lane_id": "template_requirements",
+        "schema": "template-requirements.schema.json",
+        "templates_per_packet": 3,
+        "allow_manual_overrides": True,
+        "python_validate_only": True,
+    }
+    for index in range(2, 7):
+        (template_dir / f"模板{index}模板.md").write_text(
+            f"# 模板{index}模板\n## 字段\n- 字段{index}",
+            encoding="utf-8",
+        )
+    prepare_stage1(
+        source_path=novel,
+        template_dir=template_dir,
+        graph_dir=graph_dir,
+        config=config,
+    )
+    _write_template_requirement_parts(graph_dir)
+
+    packet_path = (
+        graph_dir
+        / "intermediate"
+        / "task-packets"
+        / "template-requirements"
+        / "batch-0001.json"
+    )
+    packet = json.loads(packet_path.read_text(encoding="utf-8"))
+    packet["write_scope"] = [
+        packet["output_path"],
+        "requirements/template-requirements.json",
+    ]
+    packet_path.write_text(json.dumps(packet, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    ledger_path = graph_dir / "coverage" / "agent-run-ledger.json"
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    template_run = next(
+        record
+        for record in ledger
+        if record["run_id"] == "stage1-template-requirements:batch-0001"
+    )
+    template_run["write_scope"] = [
+        template_run["output_paths"][0],
+        "requirements/template-requirements.json",
+    ]
+    ledger_path.write_text(json.dumps(ledger, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    result = ingest_stage1(graph_dir=graph_dir, config=config)
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "template_requirements_part_invalid"
+    assert "template_requirements_task_packet_write_scope_mismatch:batch-0001" in result[
+        "validation_errors"
+    ]
+    assert "template_requirements_ledger_write_scope_mismatch:batch-0001" in result[
+        "validation_errors"
+    ]
+    assert not (graph_dir / "requirements" / "template-requirements.json").exists()
+
+
+def test_ingest_stage1_fails_closed_when_template_requirement_batch_has_too_many_templates(
+    novel,
+    template_dir,
+    graph_dir,
+    config,
+):
+    from storygraph_lib.stage1 import ingest_stage1, prepare_stage1
+
+    config["template_requirements_strategy"] = {
+        "agent_role": "template-requirements-analysis-agent",
+        "lane_id": "template_requirements",
+        "schema": "template-requirements.schema.json",
+        "templates_per_packet": 5,
+        "allow_manual_overrides": True,
+        "python_validate_only": True,
+    }
+    for index in range(2, 8):
+        (template_dir / f"模板{index}模板.md").write_text(
+            f"# 模板{index}模板\n## 字段\n- 字段{index}",
+            encoding="utf-8",
+        )
+    prepare_stage1(
+        source_path=novel,
+        template_dir=template_dir,
+        graph_dir=graph_dir,
+        config=config,
+    )
+
+    packet_dir = graph_dir / "intermediate" / "task-packets" / "template-requirements"
+    first_packet_path = packet_dir / "batch-0001.json"
+    second_packet_path = packet_dir / "batch-0002.json"
+    first_packet = json.loads(first_packet_path.read_text(encoding="utf-8"))
+    second_packet = json.loads(second_packet_path.read_text(encoding="utf-8"))
+    assert len(first_packet["template_names"]) == 5
+    assert len(second_packet["template_names"]) == 2
+
+    moved_template = second_packet["template_inventory"].pop(0)
+    second_packet["template_names"].remove(moved_template["template_name"])
+    first_packet["template_inventory"].append(moved_template)
+    first_packet["template_names"].append(moved_template["template_name"])
+    first_packet_path.write_text(
+        json.dumps(first_packet, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    second_packet_path.write_text(
+        json.dumps(second_packet, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+    ledger_path = graph_dir / "coverage" / "agent-run-ledger.json"
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    for record in ledger:
+        if record.get("run_id") == "stage1-template-requirements:batch-0001":
+            record["assigned_template_names"] = list(first_packet["template_names"])
+        if record.get("run_id") == "stage1-template-requirements:batch-0002":
+            record["assigned_template_names"] = list(second_packet["template_names"])
+    ledger_path.write_text(json.dumps(ledger, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_template_requirement_parts(graph_dir)
+
+    result = ingest_stage1(graph_dir=graph_dir, config=config)
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "template_requirements_part_invalid"
+    assert "template_requirements_task_packet_template_count_invalid:batch-0001" in result[
+        "validation_errors"
+    ]
+    assert "template_requirements_task_packet_template_inventory_count_invalid:batch-0001" in result[
+        "validation_errors"
+    ]
+    assert "template_requirements_ledger_template_count_invalid:batch-0001" in result[
+        "validation_errors"
+    ]
+    assert not (graph_dir / "requirements" / "template-requirements.json").exists()
 
 
 def test_ingest_stage1_writes_reviewed_chunk_bundle_from_reviewed_agent_artifacts(
@@ -503,7 +1276,6 @@ def test_stage1_merge_success_uses_reviewed_agent_outputs(
     template_dir,
     graph_dir,
     config,
-    write_agent_template_requirements,
     write_lane_output,
     write_review_finding,
 ):
@@ -515,7 +1287,7 @@ def test_stage1_merge_success_uses_reviewed_agent_outputs(
         graph_dir=graph_dir,
         config=config,
     )
-    write_agent_template_requirements(graph_dir)
+    _write_template_requirement_parts(graph_dir)
     write_lane_output(
         graph_dir,
         chunk_id="chunk-0001",

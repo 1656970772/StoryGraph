@@ -36,10 +36,12 @@ DEFAULT_STAGE1_ARTIFACTS = {
     "review_findings": "coverage/review-findings.json",
     "canonical_graph": "graphify-out/graph.json",
     "agent_run_ledger": "coverage/agent-run-ledger.json",
+    "template_requirements_part_dir": "intermediate/template-requirements-parts",
 }
 
 PENDING_AGENT_OUTPUT_CODES = {
     "template_requirements_missing",
+    "template_requirements_part_missing",
     "chunk_ledger_missing",
     "agent_lane_outputs_missing",
     "review_findings_missing",
@@ -82,6 +84,13 @@ def prepare_stage1(
             required_lane_ids=required_lane_ids,
         )
         chunks = _write_chunk_texts(writer, chunks, artifacts["chunk_text_dir"])
+        template_requirements_packets = _build_template_requirements_task_packets(
+            ctx.source_path,
+            chunks,
+            discovery.templates,
+            artifacts,
+            active_config,
+        )
         packets = _build_task_packets(
             ctx.source_path,
             chunks,
@@ -89,12 +98,17 @@ def prepare_stage1(
             artifacts,
             active_config,
         )
+        for template_requirements_packet in template_requirements_packets:
+            writer.write_json(
+                template_requirements_packet["task_packet_path"],
+                template_requirements_packet,
+            )
         for packet in packets:
             writer.write_json(packet["task_packet_path"], packet)
 
         agent_runs = _pending_agent_run_ledger(
             chunks,
-            discovery.templates,
+            template_requirements_packets,
             packets,
             artifacts,
         )
@@ -148,12 +162,41 @@ def ingest_stage1(*, graph_dir: str | Path, config: dict) -> dict:
     artifacts = _artifact_paths(config)
     writer = OutputWriter(graph_root, _managed_outputs(config))
 
+    if _template_requirements_agent_state_exists(graph_root, artifacts):
+        aggregate_error = _aggregate_template_requirements_from_parts(
+            graph_root, config, writer
+        )
+        if aggregate_error is not None:
+            return _failure_response(
+                graph_root,
+                aggregate_error,
+                _manifest_exists(graph_root),
+                validation_errors=aggregate_error.get("validation_errors"),
+            )
+
     requirements_path = _artifact_path(graph_root, artifacts["requirements"])
     requirements, requirements_error = _read_json_artifact(
         requirements_path,
         missing_code="template_requirements_missing",
         bad_code="template_requirements_invalid",
     )
+    if requirements_error and requirements_error.get("code") == "template_requirements_missing":
+        aggregate_error = _aggregate_template_requirements_from_parts(
+            graph_root, config, writer
+        )
+        if aggregate_error is None:
+            requirements, requirements_error = _read_json_artifact(
+                requirements_path,
+                missing_code="template_requirements_missing",
+                bad_code="template_requirements_invalid",
+            )
+        else:
+            return _failure_response(
+                graph_root,
+                aggregate_error,
+                _manifest_exists(graph_root),
+                validation_errors=aggregate_error.get("validation_errors"),
+            )
     if requirements_error:
         return _failure_response(graph_root, requirements_error, _manifest_exists(graph_root))
 
@@ -571,6 +614,26 @@ def _build_task_packets(
     )
 
 
+def _build_template_requirements_task_packets(
+    source_path: Path,
+    chunks: list[dict],
+    templates: list,
+    artifacts: dict[str, str],
+    config: dict,
+) -> list[dict]:
+    from .stage1_packets import build_template_requirements_task_packets
+
+    return build_template_requirements_task_packets(
+        source_path=source_path,
+        chunks=chunks,
+        templates=templates,
+        template_requirements_path=artifacts["requirements"],
+        task_packet_dir=artifacts["task_packet_dir"],
+        template_requirements_part_dir=artifacts["template_requirements_part_dir"],
+        strategy=config.get("template_requirements_strategy"),
+    )
+
+
 def _discover_templates(config: dict, template_dir: str | Path):
     template_config = config.get("template_discovery", {})
     return discover_templates(
@@ -661,24 +724,31 @@ def _write_chunk_texts(
 
 def _pending_agent_run_ledger(
     chunks: list[dict],
-    templates: list,
+    template_requirements_packets: list[dict],
     packets: list[dict],
     artifacts: dict[str, str],
 ) -> list[dict]:
     chunk_ids = [chunk["chunk_id"] for chunk in chunks]
-    template_names = [template.name for template in templates]
-    records = [
-        make_agent_run_record(
-            "stage1-template-requirements",
-            "template-requirements-analysis-agent",
+    records = []
+    for template_requirements_packet in template_requirements_packets:
+        template_packet_path = template_requirements_packet["task_packet_path"]
+        batch_id = template_requirements_packet["batch_id"]
+        template_record = make_agent_run_record(
+            f"stage1-template-requirements:{batch_id}",
+            template_requirements_packet["agent_role"],
             "stage1",
             chunk_ids,
-            template_names,
-            ["templates"],
-            [artifacts["requirements"]],
-            [artifacts["requirements"]],
+            template_requirements_packet.get("template_names", []),
+            [template_packet_path, "templates"],
+            [template_requirements_packet["output_path"]],
+            template_requirements_packet["write_scope"],
         )
-    ]
+        template_record["prompt_or_input_packet"] = template_packet_path
+        template_record["chunk_id"] = template_requirements_packet["chunk_id"]
+        template_record["batch_id"] = batch_id
+        template_record["lane_id"] = template_requirements_packet["lane_id"]
+        template_record["attempt"] = template_requirements_packet.get("attempt", 1)
+        records.append(template_record)
     for packet in packets:
         chunk_id = packet["chunk_id"]
         lane_id = packet["lane_id"]
@@ -713,6 +783,417 @@ def _failed_agent_runs(agent_runs: list[dict], code: str, errors: list[dict]) ->
         record["status"] = "failed"
         record["errors"] = list(errors)
     return failed
+
+
+def _template_requirements_agent_state_exists(
+    graph_root: Path, artifacts: dict[str, str]
+) -> bool:
+    try:
+        packet_root = _artifact_path(
+            graph_root,
+            _join_artifact(artifacts["task_packet_dir"], "template-requirements"),
+        )
+    except OutputWriteError:
+        return True
+    if packet_root.exists():
+        return True
+
+    try:
+        ledger_path = _artifact_path(graph_root, artifacts["agent_run_ledger"])
+    except OutputWriteError:
+        return True
+    if not ledger_path.exists():
+        return False
+    ledger, ledger_error = _read_json_artifact(
+        ledger_path,
+        missing_code="template_requirements_missing",
+        bad_code="template_requirements_part_ledger_invalid",
+    )
+    if ledger_error:
+        return True
+    if not isinstance(ledger, list):
+        return True
+    return any(
+        isinstance(record, dict)
+        and isinstance(record.get("run_id"), str)
+        and record["run_id"].startswith("stage1-template-requirements:")
+        for record in ledger
+    )
+
+
+def _aggregate_template_requirements_from_parts(
+    graph_root: Path, config: dict, writer: OutputWriter
+) -> dict | None:
+    artifacts = _artifact_paths(config)
+    ledger_path = _artifact_path(graph_root, artifacts["agent_run_ledger"])
+    ledger, ledger_error = _read_json_artifact(
+        ledger_path,
+        missing_code="template_requirements_missing",
+        bad_code="template_requirements_part_ledger_invalid",
+    )
+    if ledger_error:
+        return ledger_error
+    if not isinstance(ledger, list):
+        return {
+            "code": "template_requirements_part_ledger_invalid",
+            "validation_errors": ["template_requirements_part_ledger_not_list"],
+        }
+
+    records = [
+        record
+        for record in ledger
+        if isinstance(record, dict)
+        and isinstance(record.get("run_id"), str)
+        and record["run_id"].startswith("stage1-template-requirements:")
+    ]
+    if not records:
+        return {"code": "template_requirements_missing"}
+
+    record_by_batch: dict[str, dict] = {}
+    validation_errors: list[str] = []
+    seen_ledger_output_paths: set[str] = set()
+    seen_ledger_write_scope: set[str] = set()
+    for record in records:
+        batch_id = record.get("batch_id")
+        if not isinstance(batch_id, str) or not batch_id:
+            validation_errors.append("template_requirements_ledger_batch_id_invalid")
+            continue
+        if batch_id in record_by_batch:
+            validation_errors.append(f"template_requirements_duplicate_ledger_batch:{batch_id}")
+            continue
+        record_by_batch[batch_id] = record
+
+        output_paths, output_path_errors = _validated_artifact_path_list(
+            record.get("output_paths"),
+            f"template_requirements_ledger_output_paths:{batch_id}",
+        )
+        write_scope, write_scope_errors = _validated_artifact_path_list(
+            record.get("write_scope"),
+            f"template_requirements_ledger_write_scope:{batch_id}",
+        )
+        validation_errors.extend(output_path_errors)
+        validation_errors.extend(write_scope_errors)
+        if output_paths is None or len(output_paths) != 1:
+            validation_errors.append("template_requirements_part_output_path_invalid")
+        if write_scope is None:
+            validation_errors.append("template_requirements_part_write_scope_invalid")
+        expected_part_path = _join_artifact(
+            artifacts["template_requirements_part_dir"], f"{batch_id}.json"
+        )
+        if output_paths is not None:
+            if output_paths != [expected_part_path]:
+                validation_errors.append(
+                    f"template_requirements_ledger_output_paths_mismatch:{batch_id}"
+                )
+            for output_path in output_paths:
+                if output_path in seen_ledger_output_paths:
+                    validation_errors.append(
+                        f"template_requirements_duplicate_ledger_output_path:{output_path}"
+                    )
+                seen_ledger_output_paths.add(output_path)
+        if write_scope is not None:
+            if write_scope != [expected_part_path]:
+                validation_errors.append(
+                    f"template_requirements_ledger_write_scope_mismatch:{batch_id}"
+                )
+            for write_path in write_scope:
+                if write_path in seen_ledger_write_scope:
+                    validation_errors.append(
+                        f"template_requirements_duplicate_ledger_write_scope:{write_path}"
+                    )
+                seen_ledger_write_scope.add(write_path)
+        assigned_names = record.get("assigned_template_names")
+        if not isinstance(assigned_names, list) or any(
+            not isinstance(name, str) for name in assigned_names
+        ):
+            validation_errors.append(
+                f"template_requirements_ledger_assigned_template_names_invalid:{batch_id}"
+            )
+        elif not _template_requirements_batch_size_is_valid(assigned_names):
+            validation_errors.append(
+                f"template_requirements_ledger_template_count_invalid:{batch_id}"
+            )
+
+    packets, packet_error = _read_template_requirements_packets(graph_root, artifacts)
+    if packet_error:
+        validation_errors.extend(
+            packet_error.get("validation_errors") or [packet_error["code"]]
+        )
+        return {
+            "code": "template_requirements_part_invalid",
+            "validation_errors": validation_errors,
+        }
+    packet_by_batch = {packet["batch_id"]: packet for packet in packets}
+
+    if set(record_by_batch) != set(packet_by_batch):
+        validation_errors.append("template_requirements_ledger_batch_mismatch")
+
+    for batch_id, packet in packet_by_batch.items():
+        record = record_by_batch.get(batch_id)
+        if record is None:
+            continue
+        expected_output_paths = [packet["output_path"]]
+        expected_write_scope = packet["write_scope"]
+        expected_template_names = packet["template_names"]
+        if (
+            record.get("run_id") != f"stage1-template-requirements:{batch_id}"
+            or record.get("output_paths") != expected_output_paths
+            or record.get("write_scope") != expected_write_scope
+            or record.get("assigned_template_names") != expected_template_names
+            or record.get("prompt_or_input_packet") != packet["task_packet_path"]
+        ):
+            validation_errors.append(
+                f"template_requirements_packet_ledger_mismatch:{batch_id}"
+            )
+
+    if validation_errors:
+        return {
+            "code": "template_requirements_part_invalid",
+            "validation_errors": validation_errors,
+        }
+
+    records = [record_by_batch[packet["batch_id"]] for packet in packets]
+    merged_templates: list[dict] = []
+    expected_template_names: list[str] = []
+    for packet, record in zip(packets, records):
+        assigned_names = record["assigned_template_names"]
+        part_path = _artifact_path(graph_root, packet["output_path"])
+        part, part_error = _read_json_artifact(
+            part_path,
+            missing_code="template_requirements_part_missing",
+            bad_code="template_requirements_part_invalid",
+        )
+        if part_error:
+            return part_error
+        validation = validate_template_requirements_payload(
+            part, expected_template_names=assigned_names
+        )
+        if not validation.ok:
+            return {
+                "code": "template_requirements_part_invalid",
+                "validation_errors": validation.errors,
+            }
+        merged_templates.extend(part["templates"])
+        expected_template_names.extend(assigned_names)
+
+    payload = {"template_count": len(merged_templates), "templates": merged_templates}
+    validation = validate_template_requirements_payload(
+        payload, expected_template_names=expected_template_names
+    )
+    if not validation.ok:
+        return {
+            "code": "template_requirements_invalid",
+            "validation_errors": validation.errors,
+        }
+    try:
+        writer.write_json(artifacts["requirements"], payload)
+    except OutputWriteError as exc:
+        return {
+            "code": "template_requirements_invalid",
+            "validation_errors": [f"{exc.code}:{exc.path}"],
+        }
+    return None
+
+
+def _read_template_requirements_packets(
+    graph_root: Path, artifacts: dict[str, str]
+) -> tuple[list[dict], dict | None]:
+    try:
+        packet_root = _artifact_path(
+            graph_root,
+            _join_artifact(artifacts["task_packet_dir"], "template-requirements"),
+        )
+    except OutputWriteError as exc:
+        return [], {
+            "code": "template_requirements_part_invalid",
+            "validation_errors": [f"{exc.code}:{exc.path}"],
+        }
+    if not packet_root.exists():
+        return [], {
+            "code": "template_requirements_part_invalid",
+            "validation_errors": ["template_requirements_task_packets_missing"],
+        }
+
+    packets: list[dict] = []
+    errors: list[str] = []
+    seen_batch_ids: set[str] = set()
+    seen_output_paths: set[str] = set()
+    seen_write_scope_paths: set[str] = set()
+    for path in sorted(packet_root.glob("batch-*.json")):
+        actual_packet_path = path.relative_to(graph_root).as_posix()
+        filename_batch_id = path.stem
+        packet, packet_error = _read_json_artifact(
+            path,
+            missing_code="template_requirements_task_packet_missing",
+            bad_code="template_requirements_task_packet_invalid",
+        )
+        if packet_error:
+            errors.append(packet_error["code"])
+            continue
+        if not isinstance(packet, dict):
+            errors.append("template_requirements_task_packet_not_object")
+            continue
+
+        batch_id = packet.get("batch_id")
+        output_path = packet.get("output_path")
+        write_scope = packet.get("write_scope")
+        lane_contract = packet.get("lane_contract")
+        template_names = packet.get("template_names")
+        template_inventory = packet.get("template_inventory")
+        task_packet_path = packet.get("task_packet_path")
+        packet_errors: list[str] = []
+        if not isinstance(batch_id, str) or not batch_id:
+            packet_errors.append("template_requirements_task_packet_batch_id_invalid")
+        elif batch_id in seen_batch_ids:
+            packet_errors.append(f"template_requirements_duplicate_task_packet:{batch_id}")
+        elif filename_batch_id != batch_id:
+            packet_errors.append(
+                f"template_requirements_task_packet_filename_mismatch:{batch_id}"
+            )
+            seen_batch_ids.add(batch_id)
+        else:
+            seen_batch_ids.add(batch_id)
+        output_paths, output_errors = _validated_artifact_path_list(
+            [output_path] if isinstance(output_path, str) else output_path,
+            f"template_requirements_packet_output_path:{batch_id}",
+        )
+        write_scope_paths, write_scope_errors = _validated_artifact_path_list(
+            write_scope,
+            f"template_requirements_packet_write_scope:{batch_id}",
+        )
+        packet_errors.extend(output_errors)
+        packet_errors.extend(write_scope_errors)
+        if output_paths is None or len(output_paths) != 1:
+            packet_errors.append("template_requirements_task_packet_output_path_invalid")
+        if write_scope_paths is None:
+            packet_errors.append("template_requirements_task_packet_write_scope_invalid")
+        if isinstance(batch_id, str) and batch_id:
+            expected_part_path = _join_artifact(
+                artifacts["template_requirements_part_dir"], f"{batch_id}.json"
+            )
+            if output_paths is not None:
+                if output_paths != [expected_part_path]:
+                    packet_errors.append(
+                        f"template_requirements_task_packet_output_path_mismatch:{batch_id}"
+                    )
+                for output_item in output_paths:
+                    if output_item in seen_output_paths:
+                        packet_errors.append(
+                            f"template_requirements_duplicate_task_packet_output_path:{output_item}"
+                        )
+                    seen_output_paths.add(output_item)
+            if write_scope_paths is not None:
+                if write_scope_paths != [expected_part_path]:
+                    packet_errors.append(
+                        f"template_requirements_task_packet_write_scope_mismatch:{batch_id}"
+                    )
+                for write_item in write_scope_paths:
+                    if write_item in seen_write_scope_paths:
+                        packet_errors.append(
+                            f"template_requirements_duplicate_task_packet_write_scope:{write_item}"
+                        )
+                    seen_write_scope_paths.add(write_item)
+            if (
+                not isinstance(lane_contract, dict)
+                or lane_contract.get("output_path") != expected_part_path
+            ):
+                packet_errors.append(
+                    f"template_requirements_task_packet_lane_contract_output_path_mismatch:{batch_id}"
+                )
+        if not isinstance(template_names, list) or any(
+            not isinstance(name, str) for name in template_names
+        ):
+            packet_errors.append("template_requirements_task_packet_template_names_invalid")
+        elif not _template_requirements_batch_size_is_valid(template_names):
+            packet_errors.append(
+                f"template_requirements_task_packet_template_count_invalid:{batch_id}"
+            )
+        if not isinstance(template_inventory, list) or any(
+            not isinstance(item, dict) for item in template_inventory
+        ):
+            packet_errors.append("template_requirements_task_packet_template_inventory_invalid")
+        elif not _template_requirements_batch_size_is_valid(template_inventory):
+            packet_errors.append(
+                f"template_requirements_task_packet_template_inventory_count_invalid:{batch_id}"
+            )
+        elif isinstance(template_names, list):
+            inventory_names = [item.get("template_name") for item in template_inventory]
+            if inventory_names != template_names:
+                packet_errors.append(
+                    f"template_requirements_task_packet_template_inventory_mismatch:{batch_id}"
+                )
+        if not isinstance(task_packet_path, str):
+            packet_errors.append("template_requirements_task_packet_path_invalid")
+        else:
+            _, task_packet_errors = _validated_artifact_path_list(
+                [task_packet_path],
+                f"template_requirements_packet_task_path:{batch_id}",
+            )
+            packet_errors.extend(task_packet_errors)
+            if task_packet_path != actual_packet_path:
+                packet_errors.append(
+                    f"template_requirements_task_packet_path_mismatch:{batch_id}"
+                )
+
+        if packet_errors:
+            errors.extend(packet_errors)
+            continue
+        packets.append(packet)
+
+    if errors:
+        return [], {"code": "template_requirements_part_invalid", "validation_errors": errors}
+    if not packets:
+        return [], {
+            "code": "template_requirements_part_invalid",
+            "validation_errors": ["template_requirements_task_packets_missing"],
+        }
+    sequence_errors = _template_requirements_batch_sequence_errors(
+        [packet["batch_id"] for packet in packets]
+    )
+    if sequence_errors:
+        return [], {
+            "code": "template_requirements_part_invalid",
+            "validation_errors": sequence_errors,
+        }
+    return packets, None
+
+
+def _template_requirements_batch_size_is_valid(items: list) -> bool:
+    return 1 <= len(items) <= 5
+
+
+def _template_requirements_batch_sequence_errors(batch_ids: list[str]) -> list[str]:
+    batch_numbers: list[int] = []
+    for batch_id in batch_ids:
+        prefix, _, suffix = batch_id.partition("-")
+        if prefix != "batch" or len(suffix) != 4 or not suffix.isdigit():
+            return ["template_requirements_batch_sequence_invalid"]
+        number = int(suffix)
+        if number < 1:
+            return ["template_requirements_batch_sequence_invalid"]
+        batch_numbers.append(number)
+
+    if sorted(batch_numbers) != list(range(1, max(batch_numbers) + 1)):
+        return ["template_requirements_batch_sequence_invalid"]
+    return []
+
+
+def _validated_artifact_path_list(
+    values: Any, label: str
+) -> tuple[list[str] | None, list[str]]:
+    if not isinstance(values, list):
+        return None, [f"invalid_path_list:{label}"]
+    normalized: list[str] = []
+    errors: list[str] = []
+    for value in values:
+        if not isinstance(value, str):
+            errors.append(f"invalid_path_item:{label}")
+            continue
+        try:
+            normalized.append(normalize_relative_output_path(value))
+        except OutputWriteError as exc:
+            errors.append(f"{exc.code}:{exc.path}")
+    return (normalized if not errors else None), errors
 
 
 def _read_lane_outputs(graph_dir: Path, config: dict) -> tuple[dict[str, list[dict]], list[str]]:
@@ -1023,6 +1504,7 @@ def _managed_outputs(config: dict) -> list[str]:
     derived = [
         artifacts["requirements"],
         _join_artifact(artifacts["task_packet_dir"], "*", "*.json"),
+        _join_artifact(artifacts["template_requirements_part_dir"], "*.json"),
         _join_artifact(artifacts["chunk_text_dir"], "*.txt"),
         _join_artifact(artifacts["lane_output_dir"], "*", "*", "*.json"),
         _join_artifact(artifacts["reviewed_bundle_dir"], "*.json"),

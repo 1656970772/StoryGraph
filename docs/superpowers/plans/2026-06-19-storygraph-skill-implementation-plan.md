@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 创建一个可安装的 `storygraph` Codex skill，用模板感知的方式为整部小说生成可追溯、可校验、可复用的知识图谱，并为阶段 2 的 37 个模板全文抽取建立结构化基础。
+**Goal:** 创建一个可安装的 `storygraph` Codex skill，用模板感知的方式为整部小说生成可追溯、可校验、可复用的知识图谱，并为阶段 2 的动态模板集合全文抽取建立结构化基础；当前 CultivationWorld 样例集成检查的模板数为 37，但通用完整性契约不得写死该数量。
 
 **Architecture:** 采用 Skill 指令层、配置层、脚本工具层分离的本地源码仓库方案。核心执行流使用 Pipeline 模式串联路径解析、模板需求、图构建、覆盖账本和验证；通过 Adapter 模式复用 graphify，通过 Strategy 配置分块、覆盖、写入和子 agent 策略。
 
@@ -87,7 +87,7 @@ Responsibility map:
 - `skill-src/storygraph/config/storygraph.default.json`: 便携默认配置；不包含本机绝对路径。
 - `storygraph_lib/config.py`: 默认配置、项目本地覆盖、命令参数覆盖的合并策略。
 - `storygraph_lib/paths.py`: 小说路径解析、图目录命名、源文件哈希和安全写入路径。
-- `storygraph_lib/templates.py`: 模板发现、README 缺失项告警、37 模板需求矩阵装配。
+- `storygraph_lib/templates.py`: 模板发现、README 缺失项告警、动态模板需求矩阵装配；37 仅作为当前 CultivationWorld 样例集成检查值。
 - `storygraph_lib/template_rules.py`: 可配置 Markdown 模板解析规则，提取字段、表格、卡片、案例、证据字段和 gap rules。
 - `storygraph_lib/template_aware.py`: 基于模板需求矩阵和小说分块生成补充节点、边、事件、evidence 和逐需求 coverage 状态。
 - `storygraph_lib/graphify_adapter.py`: graphify CLI/Python 能力的外层适配，不修改 graphify 源码。
@@ -680,7 +680,9 @@ Expected: `FAIL` because `storygraph_lib.config` is not defined.
 }
 ```
 
-真实 37 个模板的逐模板映射来自 `template_graph_mappings`、本地 override、或模板解析生成的配置化规则；不得把完整模板映射表写成 Python 常量。`default_mapping` 只允许作为临时配置 fallback，并且集成验证必须证明 37 个模板都有非空、非泛型、可配置 mapping。
+以上 `template_count_policy.expected_existing_templates: 37` 只用于当前 CultivationWorld 样例目录的集成检查；通用实现和单元测试必须以发现到的 `requirements.templates` 动态集合、`requirements.template_count` 和 readiness 记录为准。
+
+真实模板集合的逐模板映射来自 `template_graph_mappings`、本地 override、或模板解析生成的配置化规则；不得把完整模板映射表写成 Python 常量。`default_mapping` 只允许作为临时配置 fallback，并且集成验证必须证明动态发现到的模板都有非空、非泛型、可配置 mapping；当前 CultivationWorld 样例可配置检查值为 37，但实现逻辑不得写死该数量。
 
 - [ ] **Step 4: Implement recursive config merge**
 
@@ -885,7 +887,7 @@ Expected: `2 passed`.
 $env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; git -c core.quotePath=false add skill-src\storygraph\scripts\storygraph_lib tests\test_paths_manifest.py tests\fixtures; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; git commit -m "feat: add storygraph path context and manifest"; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
 
-### Task 5: Configurable Template Parsing And 37-Template Requirement Matrix
+### Task 5: Configurable Template Parsing And Dynamic Template Requirement Matrix
 
 **Files:**
 - Create: `E:\AI_Projects\StoryGraph\skill-src\storygraph\scripts\storygraph_lib\template_rules.py`
@@ -895,7 +897,7 @@ $env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UT
 - Test: `E:\AI_Projects\StoryGraph\tests\test_template_rules.py`
 - Test: `E:\AI_Projects\StoryGraph\tests\test_templates.py`
 
-- [ ] **Step 1: Write failing tests for rules-based parsing, README warnings, and real 37-template completeness**
+- [ ] **Step 1: Write failing tests for rules-based parsing, README warnings, and dynamic template completeness**
 
 ```python
 # tests/test_template_rules.py
@@ -990,7 +992,7 @@ def test_build_requirement_matrix_derives_non_generic_mapping_from_template_pars
     assert record["graph_event_mapping"] == ["丹药谱系.event"]
     assert record["graph_relation_mapping"] == ["丹药谱系.relation"]
 
-def test_real_37_templates_matrix_is_optional_integration_not_hermetic_pytest():
+def test_real_cultivationworld_templates_matrix_is_optional_integration_not_hermetic_pytest():
     template_root = os.environ.get("STORYGRAPH_REAL_TEMPLATE_DIR")
     if not template_root:
         pytest.skip("Set STORYGRAPH_REAL_TEMPLATE_DIR for local integration verification.")
@@ -1000,7 +1002,7 @@ def test_real_37_templates_matrix_is_optional_integration_not_hermetic_pytest():
     template_dir = Path(template_root)
     discovery = discover_templates(template_dir, glob="*模板.md", readme_index_file="README.md")
     matrix = build_requirement_matrix(discovery.templates, rules=None, mappings=json.loads(mappings_json))
-    assert matrix["template_count"] == 37
+    assert matrix["template_count"] == len(discovery.templates)
     for record in matrix["templates"]:
         assert record["required_fields"] or record["required_tables"] or record["required_cards"] or record["required_case_patterns"]
         assert record["required_evidence_fields"]
@@ -1213,7 +1215,7 @@ def main(argv=None):
         ]
         has_default_mapping = any(t["uses_default_mapping"] for t in template_details)
         _print_json({"template_count": matrix["template_count"], "warnings": discovery.warnings, "templates": template_details, "has_default_mapping": has_default_mapping})
-        return 2 if matrix["template_count"] == 37 and has_default_mapping else 0
+        return 2 if has_default_mapping else 0
     return 2
 ```
 
@@ -1223,7 +1225,7 @@ Run:
 $env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; python skill-src\storygraph\scripts\storygraph.py inspect-templates --template-dir 'E:\AI_Projects\CultivationWorld\docs\世界观参考\模板'; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
 
-Expected: JSON output contains `"template_count": 37`; README-only missing files are warning objects with `code` equal to `missing_template_file`; every template record includes `template_name`, `mapping_source`, `uses_default_mapping`, `graph_node_mapping`, `graph_event_mapping`, and `graph_relation_mapping`; every real template reports `mapping_source` as `configured` or `template_parse_result`, not `default_mapping`; the command exits nonzero if the real 37-template set uses any `default_mapping`.
+Expected: JSON output contains the dynamically discovered `template_count`; for the current CultivationWorld sample that count is `37`. README-only missing files are warning objects with `code` equal to `missing_template_file`; every template record includes `template_name`, `mapping_source`, `uses_default_mapping`, `graph_node_mapping`, `graph_event_mapping`, and `graph_relation_mapping`; every discovered template reports `mapping_source` as `configured` or `template_parse_result`, not `default_mapping`; the command exits nonzero if the current CultivationWorld sample set uses any `default_mapping`.
 
 - [ ] **Step 6: Run tests and commit template matrix**
 
@@ -1231,7 +1233,7 @@ Expected: JSON output contains `"template_count": 37`; README-only missing files
 $env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; python -m pytest tests\test_template_rules.py tests\test_templates.py -v; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; git -c core.quotePath=false add skill-src\storygraph\scripts\storygraph_lib skill-src\storygraph\references tests\test_template_rules.py tests\test_templates.py; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; git commit -m "feat: add configurable template requirement matrix"; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
 
-Expected: all hermetic tests in `test_template_rules.py` and `test_templates.py` pass. The real 37-template completeness check is run through `STORYGRAPH_REAL_TEMPLATE_DIR` or the Final Review Gate CLI, not as a normal local-path-dependent pytest.
+Expected: all hermetic tests in `test_template_rules.py` and `test_templates.py` pass. The real CultivationWorld sample completeness check is run through `STORYGRAPH_REAL_TEMPLATE_DIR` or the Final Review Gate CLI, not as a normal local-path-dependent pytest.
 
 ### Task 6: Canonical Graph Schema, Deep Validation, And Graphify Adapter
 
@@ -1773,7 +1775,7 @@ def extract_template_aware_supplements(novel_name, source_path, chunks, matrix, 
     return {"nodes": nodes, "edges": edges, "events": events, "evidence_index": evidences}, readiness
 ```
 
-- [ ] **Step 5: Add coverage assertions for complete 37-template readiness**
+- [ ] **Step 5: Add coverage assertions for complete dynamic-template readiness**
 
 ```python
 # add to tests/test_template_aware.py
@@ -1781,9 +1783,10 @@ def test_readiness_has_one_record_per_template_and_each_requirement_has_status(t
     source = tmp_path / "novel.txt"
     source.write_text("法宝 丹药 阵法", encoding="utf-8")
     chunks = make_chunk_ledger(source, {"mode": "chapter-aware", "fallback_mode": "bounded-chars", "max_chars": 200, "overlap_chars": 0}, processor="test")
-    matrix = {"templates": [{"template_name": f"模板{i}", "required_fields": ["法宝"], "required_tables": [], "required_cards": [], "required_case_patterns": [], "required_entity_types": ["entity"], "required_event_types": ["event"], "required_relation_types": ["relation"], "graph_node_mapping": ["entity"], "graph_event_mapping": ["event"], "graph_relation_mapping": ["relation"], "required_evidence_fields": ["source_range"], "gap_rules": {"status_enum": ["covered", "needs_review", "not_found_in_source"]}} for i in range(37)]}
+    template_count = 5
+    matrix = {"template_count": template_count, "templates": [{"template_name": f"模板{i}", "required_fields": ["法宝"], "required_tables": [], "required_cards": [], "required_case_patterns": [], "required_entity_types": ["entity"], "required_event_types": ["event"], "required_relation_types": ["relation"], "graph_node_mapping": ["entity"], "graph_event_mapping": ["event"], "graph_relation_mapping": ["relation"], "required_evidence_fields": ["source_range"], "gap_rules": {"status_enum": ["covered", "needs_review", "not_found_in_source"]}} for i in range(template_count)]}
     supplement, readiness = extract_template_aware_supplements("凡人修仙传", source, chunks, matrix, {"mode": "substring"})
-    assert len(readiness) == 37
+    assert len(readiness) == matrix["template_count"]
     assert all(record["requirement_statuses"] for record in readiness)
     assert supplement["nodes"] and supplement["events"] and supplement["evidence_index"]
 ```
@@ -2009,12 +2012,12 @@ import sys
 from pathlib import Path
 from storygraph_lib.stage1 import build_stage1_graph
 
-def _write_37_templates(template_dir: Path):
-    for index in range(37):
+def _write_sample_templates(template_dir: Path, template_count: int):
+    for index in range(template_count):
         (template_dir / f"模板{index:02d}模板.md").write_text(f"# 模板{index:02d}模板\n## 字段\n- 法宝\n## 证据要求\n- 原文位置", encoding="utf-8")
 
-def _config(template_dir: Path, graphify_repo: Path):
-    mappings = {f"模板{index:02d}": {"graph_node_mapping": [f"template_{index:02d}_node"], "graph_event_mapping": [f"template_{index:02d}_event"], "graph_relation_mapping": [f"template_{index:02d}_relation"]} for index in range(37)}
+def _config(template_dir: Path, graphify_repo: Path, template_count: int):
+    mappings = {f"模板{index:02d}": {"graph_node_mapping": [f"template_{index:02d}_node"], "graph_event_mapping": [f"template_{index:02d}_event"], "graph_relation_mapping": [f"template_{index:02d}_relation"]} for index in range(template_count)}
     mappings["default_mapping"] = {"graph_node_mapping": ["template_specific_node"], "graph_event_mapping": ["template_specific_event"], "graph_relation_mapping": ["template_specific_relation"]}
     return {
         "graph_dir_suffix": ".storygraph",
@@ -2034,9 +2037,10 @@ def test_stage1_reuses_graph_when_source_hash_is_unchanged(tmp_path):
     novel = tmp_path / "mini.txt"
     novel.write_text("法宝 小瓶", encoding="utf-8")
     template_dir = tmp_path / "templates"; template_dir.mkdir()
-    _write_37_templates(template_dir)
+    sample_template_count = 37  # 当前 CultivationWorld 样例 fixture 数量，不是通用契约。
+    _write_sample_templates(template_dir, sample_template_count)
     graphify_repo = tmp_path / "graphify"; graphify_repo.mkdir()
-    config = _config(template_dir, graphify_repo)
+    config = _config(template_dir, graphify_repo, sample_template_count)
     first = build_stage1_graph(novel, config)
     second = build_stage1_graph(novel, config)
     assert first["status"] == "success"
@@ -2046,9 +2050,10 @@ def test_stage1_marks_source_changed_when_hash_changes(tmp_path):
     novel = tmp_path / "mini.txt"
     novel.write_text("法宝", encoding="utf-8")
     template_dir = tmp_path / "templates"; template_dir.mkdir()
-    _write_37_templates(template_dir)
+    sample_template_count = 37  # 当前 CultivationWorld 样例 fixture 数量，不是通用契约。
+    _write_sample_templates(template_dir, sample_template_count)
     graphify_repo = tmp_path / "graphify"; graphify_repo.mkdir()
-    config = _config(template_dir, graphify_repo)
+    config = _config(template_dir, graphify_repo, sample_template_count)
     build_stage1_graph(novel, config)
     novel.write_text("法宝 小瓶", encoding="utf-8")
     result = build_stage1_graph(novel, config)
@@ -2058,9 +2063,10 @@ def test_stage1_marks_changed_when_template_file_hash_changes(tmp_path):
     novel = tmp_path / "mini.txt"
     novel.write_text("法宝", encoding="utf-8")
     template_dir = tmp_path / "templates"; template_dir.mkdir()
-    _write_37_templates(template_dir)
+    sample_template_count = 37  # 当前 CultivationWorld 样例 fixture 数量，不是通用契约。
+    _write_sample_templates(template_dir, sample_template_count)
     graphify_repo = tmp_path / "graphify"; graphify_repo.mkdir()
-    config = _config(template_dir, graphify_repo)
+    config = _config(template_dir, graphify_repo, sample_template_count)
     build_stage1_graph(novel, config)
     (template_dir / "模板00模板.md").write_text("# 模板00模板\n## 字段\n- 丹药\n## 证据要求\n- 原文位置", encoding="utf-8")
     result = build_stage1_graph(novel, config)
@@ -2070,10 +2076,11 @@ def test_stage1_marks_changed_when_graphify_source_changes(tmp_path):
     novel = tmp_path / "mini.txt"
     novel.write_text("法宝", encoding="utf-8")
     template_dir = tmp_path / "templates"; template_dir.mkdir()
-    _write_37_templates(template_dir)
+    sample_template_count = 37  # 当前 CultivationWorld 样例 fixture 数量，不是通用契约。
+    _write_sample_templates(template_dir, sample_template_count)
     graphify_a = tmp_path / "graphify-a"; graphify_a.mkdir()
     graphify_b = tmp_path / "graphify-b"; graphify_b.mkdir()
-    config = _config(template_dir, graphify_a)
+    config = _config(template_dir, graphify_a, sample_template_count)
     build_stage1_graph(novel, config)
     config["paths"]["graphify_repo"] = str(graphify_b)
     result = build_stage1_graph(novel, config)
@@ -2450,7 +2457,7 @@ def main(argv=None):
         ]
         has_default_mapping = any(t["uses_default_mapping"] for t in template_details)
         _print_json({"template_count": matrix["template_count"], "warnings": discovery.warnings, "templates": template_details, "has_default_mapping": has_default_mapping})
-        return 2 if matrix["template_count"] == 37 and has_default_mapping else 0
+        return 2 if has_default_mapping else 0
     if args.command == "build-stage1":
         config["paths"]["template_dir"] = args.template_dir
         config["paths"]["graphify_repo"] = args.graphify_repo
@@ -2498,10 +2505,19 @@ def validate_graph_dir(graph_dir: Path) -> GraphDirValidation:
     if not single_writer.ok:
         errors.extend(single_writer.errors)
     allowed_statuses = {"covered", "needs_review", "not_found_in_source"}
-    requirement_templates = {record["template_name"] for record in requirements["templates"]}
-    readiness_templates = {record["template_name"] for record in readiness}
-    if requirements.get("template_count") != 37 or len(readiness) != 37:
-        errors.append("template_readiness_count_not_37")
+    template_count = requirements.get("template_count")
+    requirement_records = requirements.get("templates", [])
+    requirement_templates = {record["template_name"] for record in requirement_records}
+    readiness_templates = set()
+    for record in readiness:
+        template_name = record["template_name"]
+        if template_name in readiness_templates:
+            errors.append(f"duplicate_readiness_template_name:{template_name}")
+        readiness_templates.add(template_name)
+    if template_count != len(requirement_records):
+        errors.append("requirements_template_count_mismatch")
+    if len(readiness) != template_count:
+        errors.append("requirements_readiness_count_mismatch")
     if requirement_templates != readiness_templates:
         errors.append("requirements_readiness_template_mismatch")
     expected_requirement_ids = set()
@@ -2608,12 +2624,12 @@ def test_stage2_extraction_record_requires_evidence_categories():
     assert record["coverage_scope"]["chunk_ranges"] == []
     assert validate_extraction_record(record).ok is True
 
-def test_stage2_scaffold_ledgers_cover_37_templates_and_evidence_usage():
-    templates = [f"模板{i:02d}" for i in range(37)]
+def test_stage2_scaffold_ledgers_cover_each_template_and_evidence_usage():
+    templates = [f"模板{i:02d}" for i in range(5)]
     ledger = make_template_run_ledger(templates, chunk_ranges=[{"chunk_id": "chunk-0001", "source_range": [0, 100]}])
     usage = make_template_evidence_usage("模板00", "evidence:abc", "chunk-0001", [0, 100])
     gap = make_template_gap_report("模板00", "模板00.required_fields.法宝", "not_found_in_source")
-    assert len(ledger["template_tasks"]) == 37
+    assert len(ledger["template_tasks"]) == len(templates)
     assert ledger["artifact_paths"]["template_run_ledger"] == "coverage/template-run-ledger.json"
     assert ledger["artifact_paths"]["template_evidence_usage"] == "coverage/template-evidence-usage.json"
     assert ledger["artifact_paths"]["template_gap_report"] == "coverage/template-gap-report.md"
@@ -2830,16 +2846,16 @@ $env:PYTHONIOENCODING = "utf-8"; [Console]::OutputEncoding = [Text.Encoding]::UT
 Expected review evidence:
 
 - `validate-skill` exits `0` and reports no missing skill structure.
-- `inspect-templates` reports `template_count` as `37` for existing `*模板.md` files, records README-only missing template files as `missing_template_file` warnings, and proves all 37 templates use non-empty, non-generic graph mappings from config or template parsing rules rather than Python constants or `default_mapping`.
+- `inspect-templates` reports `template_count` from the dynamically discovered existing `*模板.md` files; for the current CultivationWorld sample this value is `37`. It records README-only missing template files as `missing_template_file` warnings, and proves every discovered template uses non-empty, non-generic graph mappings from config or template parsing rules rather than Python constants or `default_mapping`.
 - `build-stage1` creates or reuses the intentional external `.storygraph` directory beside the CultivationWorld source novel and writes `manifest.json`, `graphify-out\graph.json`, `graphify-out\GRAPH_REPORT.md`, `graphify-out\graph.html`, `requirements\template-requirements.json`, `coverage\chunk-ledger.json`, `coverage\evidence-index.json`, `coverage\template-readiness.json`, `coverage\agent-run-ledger.json`, and `coverage\gap-report.md`.
-- `validate-graph` performs deep canonical validation for nodes, edges, events, evidence, `supports_templates`, status enums, stable ID prefixes, graphify-compatible fields, and 37-template readiness completeness.
+- `validate-graph` performs deep canonical validation for nodes, edges, events, evidence, `supports_templates`, status enums, stable ID prefixes, graphify-compatible fields, and readiness completeness against the dynamic requirements template set.
 - Error handling evidence covers unreadable source with `source_unreadable`, invalid UTF-8 source with `source_encoding_error`, missing graphify artifacts with `graphify_artifact_missing`, chunk extraction failure, readiness below threshold, template without reliable evidence, and unparsable sub-agent JSON; failures must set `manifest.stage_status.stage1` to `failed` and must not write a `graphify-out\graph.json` that appears successful after graphify failure.
 - The immediate second `build-stage1` run with unchanged source reports `"status": "reused"`, proving idempotent no-rebuild behavior.
 - The hash-change command reports `"source_state": "changed"` after the temporary source text is modified.
 - The missing graphify command exits nonzero, returns `"status": "failed"`, writes a failed graphify adapter record into `coverage\agent-run-ledger.json` with `graphify_unavailable`, `graphify_failed`, or `graphify_artifact_missing`, and `validate-graph` treats that ledger record as blocking via `blocking_ledger:<error_code>`.
 - `coverage\agent-run-ledger.json` includes at least the key Stage 1 roles: 模板需求分析、图抽取、覆盖审查、质量审查, with input paths, output paths, assigned chunks/templates, status, errors, and single-writer ownership.
 - `test_stage2_policy.py` proves default output goes to `drafts\`, existing formal Markdown is not overwritten, and formal overwrites happen only under `backup-and-overwrite` or `merge`.
-- Stage 2 scaffold evidence includes schemas or tests for `coverage\template-run-ledger.json`, `coverage\template-evidence-usage.json`, 37 template task records, chunk-ledger full-range references, and `coverage\template-gap-report.md`.
-- `template-readiness.json` contains 37 records, one per discovered template, and every requirement status is one of `covered`, `needs_review`, or `not_found_in_source`.
+- Stage 2 scaffold evidence includes schemas or tests for `coverage\template-run-ledger.json`, `coverage\template-evidence-usage.json`, one template task record per dynamically discovered template, chunk-ledger full-range references, and `coverage\template-gap-report.md`.
+- `template-readiness.json` contains one record per discovered template, has no duplicate `template_name`, and every requirement status is one of `covered`, `needs_review`, or `not_found_in_source`.
 - No implementation step modifies `E:\Github_Projects\graphify`; graphify is only read or invoked through adapter configuration.
 - No committed config file contains the local absolute template path, local graphify path, test novel path, repository name, or install destination as a global default.

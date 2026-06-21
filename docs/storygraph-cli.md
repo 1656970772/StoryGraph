@@ -28,10 +28,10 @@ python skill-src/storygraph/scripts/storygraph.py validate-graph --graph-dir pat
 ## Stage 1 agent-driven 内部流程
 
 1. Codex 主 agent 调用 `prepare-stage1` 读取 source、template dir 和配置，创建 graph dir，写入 manifest、chunk ledger、chunk text、agent task packets 和 pending ledger/状态。该命令成功时返回 `status: prepared`，下一步动作是调度 agent task packets。
-2. `template-requirements-analysis-agent` 在 `ingest-stage1` 前产出 `requirements/template-requirements.json`。缺少该文件时，`ingest-stage1` 会 fail closed，并返回 `status: failed`、`error.code: template_requirements_missing` 和对应 `validation_errors`。
+2. Codex 主 agent 读取 `intermediate/task-packets/template-requirements/batch-*.json`，按 `template_requirements_strategy.templates_per_packet` 调度多个 template requirements agents；默认 role 是 `template-requirements-analysis-agent`，每个 agent 负责 1-5 个模板，在 `ingest-stage1` 前输出到 `intermediate/template-requirements-parts/batch-*.json`。
 3. Codex 主 agent 读取 `intermediate/task-packets/<chunk>/<lane>.json`，调度 lane extraction agents。agent 输出写入 `intermediate/lane-outputs/<chunk>/<lane>/...json`。
 4. reviewer agents 审查 lane output、chunk 覆盖、全局合并、模板 readiness 和质量门禁，并把 findings 写入 `coverage/review-findings.json`。必修 finding 需要新的 repair/extraction agent 产出修复结果；repair agent 必须先复现 reviewer probe，记录 actual 输出，再把 probe 固化成 RED 测试，完成最小修复后运行目标测试和相关回归测试。
-5. Codex 主 agent 调用 `ingest-stage1` 读取 graph dir 中的 lane outputs、template requirements 和 review findings，校验 agent-produced 产物、路径边界、配置枚举和 reviewer gate，只把通过审查的内容写成 `intermediate/reviewed-bundles/*.json`。成功时返回 `status: ingested`。
+5. Codex 主 agent 调用 `ingest-stage1` 读取 graph dir 中的 template requirements 分片、lane outputs 和 review findings。若最终 `requirements/template-requirements.json` 不存在，CLI 会先校验所有分片并汇总写出最终文件；缺失或非法分片会 fail closed 并返回结构化错误。最终 requirements 不绑定某个固定 producer，但会拒绝 python/legacy 产物并继续校验模板字段。
 6. Codex 主 agent 调用 `merge-stage1` 只读取 reviewed bundles，生成 canonical `graphify-out/graph.json`、evidence index、template readiness、manifest 和 ledger。可选 graphify adapter 只消费 canonical graph path 或 graph dir，用于可视化和查询增强。成功时返回 `status: success`。
 7. Codex 主 agent 调用 `validate-graph` 检查必需 Stage 1 产物、失败 ledger、graph schema、template readiness、chunk coverage、evidence references、manifest stage status、review gate 和 single-writer scopes。
 

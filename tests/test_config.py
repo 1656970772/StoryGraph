@@ -103,6 +103,10 @@ def test_legacy_keys_only_appear_in_legacy_or_reject_config_tests():
 def test_stage1_agent_driven_config_contains_lanes_review_and_writer_policy(default_config):
     assert default_config["stage1_mode"] == "agent-driven"
     assert default_config["template_requirements_strategy"]["python_validate_only"] is True
+    assert default_config["template_requirements_strategy"]["agent_role"]
+    assert default_config["template_requirements_strategy"]["lane_id"]
+    assert default_config["template_requirements_strategy"]["schema"]
+    assert default_config["template_requirements_strategy"]["templates_per_packet"] == 5
     assert default_config["canonical_graph_writer"]["semantic_generation"] == "disabled"
     assert default_config["element_lanes"]
     assert all(
@@ -141,6 +145,7 @@ def test_writer_policy_manages_agent_driven_stage1_outputs(default_config):
     assert "coverage/review-findings.json" in managed
     assert "intermediate/merge-queue.json" in managed
     assert "requirements/template-requirements.json" in managed
+    assert "intermediate/template-requirements-parts/*.json" in managed
 
 
 def test_writer_policy_accepts_configured_stage1_artifact_samples(default_config, tmp_path):

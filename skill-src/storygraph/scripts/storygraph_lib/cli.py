@@ -4,8 +4,6 @@ from .config import ConfigLoadError, load_config
 from .stage1 import build_stage1_graph, ingest_stage1, merge_stage1, prepare_stage1
 from .templates import (
     TemplateDiscoveryError,
-    TemplateRequirementMatrixLegacyError,
-    build_requirement_matrix,
     discover_templates,
 )
 from .validation import validate_graph_dir, validate_skill_tree
@@ -193,45 +191,35 @@ def main(argv=None):
         except TemplateDiscoveryError as error:
             print(json.dumps(error.to_dict(), ensure_ascii=False))
             return 2
-        try:
-            matrix = build_requirement_matrix(
-                discovery.templates,
-                rules=config.get("template_parser_rules"),
-                mappings=config.get("template_graph_mappings", {}),
-                status_enums=config.get("status_enums"),
-                output_language=config.get("output_language", "zh-CN"),
-            )
-        except TemplateRequirementMatrixLegacyError as error:
-            print(json.dumps(error.to_dict(), ensure_ascii=False))
-            return 2
-        has_default_mapping = any(
-            record["mapping_source"] == "default_mapping" for record in matrix["templates"]
-        )
         count_policy = config.get("template_count_policy", {})
         expected_template_count = count_policy.get("expected_existing_templates")
         enforce_count = bool(count_policy.get("enforce_integration_count", False))
+        template_count = len(discovery.templates)
         count_matches_expected = (
             None
             if expected_template_count is None
-            else matrix["template_count"] == expected_template_count
+            else template_count == expected_template_count
         )
         payload = {
-            "template_count": matrix["template_count"],
+            "ok": True,
+            "template_count": template_count,
             "expected_template_count": expected_template_count,
             "enforce_integration_count": enforce_count,
             "count_matches_expected": count_matches_expected,
             "warnings": discovery.warnings,
-            "has_default_mapping": has_default_mapping,
-            "templates": matrix["templates"],
+            "templates": [
+                {
+                    "name": template.name,
+                    "file": template.path.name,
+                }
+                for template in discovery.templates
+            ],
         }
         if enforce_count and count_matches_expected is False:
+            payload["ok"] = False
             payload["error"] = "template_count_mismatch"
-        elif enforce_count and count_matches_expected and has_default_mapping:
-            payload["error"] = "default_mapping_used"
         print(json.dumps(payload, ensure_ascii=False, indent=2))
-        if enforce_count and expected_template_count is not None and (
-            not count_matches_expected or has_default_mapping
-        ):
+        if enforce_count and expected_template_count is not None and not count_matches_expected:
             return 2
         return 0
     if args.command == "build-stage1":

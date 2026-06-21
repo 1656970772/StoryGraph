@@ -4,8 +4,6 @@ from dataclasses import dataclass
 from typing import Any
 
 
-AGENT_PRODUCER = "template-requirements-analysis-agent"
-
 _REQUIRED_LIST_FIELDS = (
     "required_fields",
     "required_tables",
@@ -36,15 +34,25 @@ def validate_template_requirements_payload(
             ok=False, errors=["template_requirements_payload_not_object"]
         )
 
-    if payload.get("producer") != AGENT_PRODUCER:
+    producer = payload.get("producer")
+    if producer is not None and (
+        not isinstance(producer, str) or not producer or _is_legacy_producer(producer)
+    ):
         errors.append("template_requirements_not_agent_produced")
 
     templates = payload.get("templates")
     if not isinstance(templates, list):
         errors.append("template_requirements_templates_not_list")
         return TemplateRequirementsValidationResult(ok=False, errors=errors)
+    template_count = payload.get("template_count")
+    if template_count is not None:
+        if type(template_count) is not int:
+            errors.append("template_requirements_template_count_not_int")
+        elif template_count != len(templates):
+            errors.append("template_requirements_template_count_mismatch")
 
     actual_names: list[str] = []
+    seen_names: set[str] = set()
     for index, template in enumerate(templates):
         if not isinstance(template, dict):
             errors.append(f"template_requirements_template_not_object:{index}")
@@ -54,6 +62,9 @@ def validate_template_requirements_payload(
         if not isinstance(template_name, str) or not template_name:
             errors.append(f"template_requirements_missing_template_name:{index}")
         else:
+            if template_name in seen_names:
+                errors.append(f"template_requirements_duplicate_template_name:{template_name}")
+            seen_names.add(template_name)
             actual_names.append(template_name)
 
         mapping_source = template.get("mapping_source")
@@ -93,5 +104,14 @@ def validate_template_requirements_payload(
     for actual_name in actual_names:
         if expected_template_names is not None and actual_name not in expected_template_names:
             errors.append(f"template_requirements_unexpected_template:{actual_name}")
+    if expected_template_names is not None and actual_names != list(expected_template_names):
+        errors.append("template_requirements_template_names_mismatch")
 
     return TemplateRequirementsValidationResult(ok=not errors, errors=errors)
+
+
+def _is_legacy_producer(value: str) -> bool:
+    normalized = value.strip().lower().replace("_", "-")
+    return normalized in {"python", "legacy"} or normalized.startswith(
+        ("python-", "legacy-")
+    )

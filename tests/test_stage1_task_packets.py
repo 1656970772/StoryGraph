@@ -358,6 +358,128 @@ def test_build_task_packets_rejects_non_string_task_packet_dir():
         )
 
 
+def test_build_template_requirements_packet_rejects_unsafe_strategy_lane_id():
+    from storygraph_lib.stage1_packets import build_template_requirements_task_packet
+
+    with pytest.raises(ValueError, match="invalid_template_requirements_lane_id"):
+        build_template_requirements_task_packet(
+            source_path="book.txt",
+            chunks=[{"chunk_id": "chunk-0001", "source_range": [0, 1]}],
+            templates=[],
+            template_requirements_path="requirements/template-requirements.json",
+            task_packet_dir=_default_config()["stage1_artifacts"]["task_packet_dir"],
+            strategy={
+                "agent_role": "custom-template-agent",
+                "lane_id": "../custom",
+                "schema": "custom-template.schema.json",
+            },
+        )
+
+
+def test_build_template_requirements_task_packets_split_templates_into_batches():
+    from storygraph_lib.stage1_packets import build_template_requirements_task_packets
+
+    class Template:
+        def __init__(self, index):
+            self.name = f"模板{index}"
+            self.path = Path(f"templates/模板{index}模板.md")
+            self.file_hash = f"hash-{index}"
+
+    packets = build_template_requirements_task_packets(
+        source_path="book.txt",
+        chunks=[{"chunk_id": "chunk-0001", "source_range": [0, 1]}],
+        templates=[Template(index) for index in range(1, 7)],
+        template_requirements_path="requirements/template-requirements.json",
+        task_packet_dir="intermediate/task-packets",
+        template_requirements_part_dir="intermediate/template-requirements-parts",
+        strategy={
+            "agent_role": "template-requirements-analysis-agent",
+            "lane_id": "template_requirements",
+            "schema": "template-requirements.schema.json",
+            "templates_per_packet": 5,
+        },
+    )
+
+    assert [packet["batch_id"] for packet in packets] == ["batch-0001", "batch-0002"]
+    assert [packet["task_packet_path"] for packet in packets] == [
+        "intermediate/task-packets/template-requirements/batch-0001.json",
+        "intermediate/task-packets/template-requirements/batch-0002.json",
+    ]
+    assert [packet["template_names"] for packet in packets] == [
+        ["模板1", "模板2", "模板3", "模板4", "模板5"],
+        ["模板6"],
+    ]
+    assert packets[0]["output_path"] == (
+        "intermediate/template-requirements-parts/batch-0001.json"
+    )
+    assert packets[0]["write_scope"] == [
+        "intermediate/template-requirements-parts/batch-0001.json"
+    ]
+    assert packets[0]["relevant_template_requirements"] == {
+        "path": "requirements/template-requirements.json",
+    }
+
+
+def test_build_template_requirements_task_packets_allows_one_to_five_per_batch():
+    from storygraph_lib.stage1_packets import build_template_requirements_task_packets
+
+    class Template:
+        def __init__(self, index):
+            self.name = f"模板{index}"
+            self.path = Path(f"templates/模板{index}模板.md")
+            self.file_hash = f"hash-{index}"
+
+    packets = build_template_requirements_task_packets(
+        source_path="book.txt",
+        chunks=[{"chunk_id": "chunk-0001", "source_range": [0, 1]}],
+        templates=[Template(index) for index in range(1, 8)],
+        template_requirements_path="requirements/template-requirements.json",
+        task_packet_dir="intermediate/task-packets",
+        template_requirements_part_dir="intermediate/template-requirements-parts",
+        strategy={"templates_per_packet": 2},
+    )
+
+    assert [packet["template_names"] for packet in packets] == [
+        ["模板1", "模板2"],
+        ["模板3", "模板4"],
+        ["模板5", "模板6"],
+        ["模板7"],
+    ]
+
+
+def test_build_template_requirements_task_packets_rejects_empty_template_set():
+    from storygraph_lib.stage1_packets import build_template_requirements_task_packets
+
+    with pytest.raises(ValueError, match="invalid_template_requirements_template_set_empty"):
+        build_template_requirements_task_packets(
+            source_path="book.txt",
+            chunks=[{"chunk_id": "chunk-0001", "source_range": [0, 1]}],
+            templates=[],
+            template_requirements_path="requirements/template-requirements.json",
+            task_packet_dir="intermediate/task-packets",
+            template_requirements_part_dir="intermediate/template-requirements-parts",
+            strategy={"templates_per_packet": 5},
+        )
+
+
+@pytest.mark.parametrize("templates_per_packet", [0, 6, 3.5, "5"])
+def test_build_template_requirements_task_packets_rejects_bad_batch_size(
+    templates_per_packet,
+):
+    from storygraph_lib.stage1_packets import build_template_requirements_task_packets
+
+    with pytest.raises(ValueError, match="invalid_template_requirements_templates_per_packet"):
+        build_template_requirements_task_packets(
+            source_path="book.txt",
+            chunks=[{"chunk_id": "chunk-0001", "source_range": [0, 1]}],
+            templates=[],
+            template_requirements_path="requirements/template-requirements.json",
+            task_packet_dir="intermediate/task-packets",
+            template_requirements_part_dir="intermediate/template-requirements-parts",
+            strategy={"templates_per_packet": templates_per_packet},
+        )
+
+
 @pytest.mark.parametrize("source_path", [123, "", "book\0.txt"])
 def test_build_task_packets_rejects_invalid_source_path(source_path):
     from storygraph_lib.stage1_packets import build_task_packets

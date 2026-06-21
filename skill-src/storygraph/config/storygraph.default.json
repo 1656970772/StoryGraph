@@ -21,6 +21,7 @@
   "stage1_artifacts": {
     "requirements": "requirements/template-requirements.json",
     "task_packet_dir": "intermediate/task-packets",
+    "template_requirements_part_dir": "intermediate/template-requirements-parts",
     "chunk_text_dir": "intermediate/chunks",
     "lane_output_dir": "intermediate/lane-outputs",
     "reviewed_bundle_dir": "intermediate/reviewed-bundles",
@@ -64,6 +65,10 @@
   },
   "template_requirements_strategy": {
     "mode": "auto-from-templates",
+    "agent_role": "template-requirements-analysis-agent",
+    "lane_id": "template_requirements",
+    "schema": "template-requirements.schema.json",
+    "templates_per_packet": 5,
     "allow_manual_overrides": true,
     "python_validate_only": true
   },
@@ -150,6 +155,7 @@
       "graphify-out/graph.html",
       "requirements/template-requirements.json",
       "intermediate/task-packets/*/*.json",
+      "intermediate/template-requirements-parts/*.json",
       "intermediate/chunks/*.txt",
       "intermediate/lane-outputs/*/*/*.json",
       "intermediate/reviewed-bundles/*.json",

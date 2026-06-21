@@ -28,6 +28,17 @@ def test_discover_templates_uses_existing_files_and_warns_missing_readme_items(t
     assert result.warnings == [{"code": "missing_template_file", "file": "缺失模板.md"}]
 
 
+def test_discover_templates_strips_markdown_backticks_from_readme_items(tmp_path):
+    template_dir = tmp_path / "templates"
+    template_dir.mkdir()
+    (template_dir / "世界观设定模板.md").write_text("# 世界观设定模板\n", encoding="utf-8")
+    (template_dir / "README.md").write_text("- `世界观设定模板.md`\n", encoding="utf-8")
+
+    result = discover_templates(template_dir, readme_index_file="README.md")
+
+    assert result.warnings == []
+
+
 def test_discover_templates_remains_file_inventory_only(tmp_path):
     template_dir = tmp_path / "templates"
     template_dir.mkdir()

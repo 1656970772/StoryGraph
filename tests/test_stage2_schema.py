@@ -104,7 +104,8 @@ def test_stage2_validation_rejects_bad_allowed_policies_shape_and_unsupported_ov
 
 
 def test_stage2_scaffold_ledgers_use_input_templates_and_artifact_paths():
-    templates = [f"模板{i:02d}" for i in range(37)]
+    sample_template_count = 37
+    templates = [f"模板{i:02d}" for i in range(sample_template_count)]
     chunk_ranges = [{"chunk_id": "chunk-0001", "source_range": [0, 100]}]
 
     ledger = make_template_run_ledger(templates, chunk_ranges=chunk_ranges)

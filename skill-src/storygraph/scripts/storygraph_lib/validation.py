@@ -271,8 +271,15 @@ def _validate_requirements_readiness(
         errors.append("bad_requirements_template_count")
     elif template_count != len(requirement_records):
         errors.append("requirements_template_count_mismatch")
+    if _is_non_negative_int(template_count) and len(readiness) != template_count:
+        errors.append("requirements_readiness_count_mismatch")
     requirement_templates = _template_name_set(requirement_records, errors, "bad_requirement_template_name")
-    readiness_templates = _template_name_set(readiness, errors, "bad_readiness_template_name")
+    readiness_templates = _template_name_set(
+        readiness,
+        errors,
+        "bad_readiness_template_name",
+        duplicate_error_code="duplicate_readiness_template_name",
+    )
     if requirement_templates != readiness_templates:
         errors.append("requirements_readiness_template_mismatch")
 
@@ -282,8 +289,6 @@ def _validate_requirements_readiness(
         if count_policy.get("enforce_integration_count") and expected is not None:
             if requirements.get("template_count") != expected or len(readiness) != expected:
                 errors.append(f"template_readiness_count_not_{expected}")
-    elif requirements.get("template_count") == 37 and len(readiness) != 37:
-        errors.append("template_readiness_count_not_37")
 
     expected_ids = set()
     for record in requirement_records:
@@ -351,7 +356,13 @@ def _validate_requirements_readiness(
     return errors
 
 
-def _template_name_set(records: list, errors: list[str], error_code: str) -> set[str]:
+def _template_name_set(
+    records: list,
+    errors: list[str],
+    error_code: str,
+    *,
+    duplicate_error_code: str | None = None,
+) -> set[str]:
     names = set()
     for record in records:
         if not isinstance(record, dict):
@@ -360,6 +371,8 @@ def _template_name_set(records: list, errors: list[str], error_code: str) -> set
         if not isinstance(template_name, str):
             errors.append(error_code)
             continue
+        if duplicate_error_code is not None and template_name in names:
+            errors.append(f"{duplicate_error_code}:{template_name}")
         names.add(template_name)
     return names
 

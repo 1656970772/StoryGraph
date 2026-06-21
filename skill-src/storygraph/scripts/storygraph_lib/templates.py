@@ -136,7 +136,7 @@ def _readme_missing_warnings(
 def _readme_template_items(text: str) -> list[str]:
     items: list[str] = []
     for line in text.splitlines():
-        match = re.search(r"([^/\\\]\)\s]+模板\.md)", line)
+        match = re.search(r"([^`/\\\]\)\s]+模板\.md)", line)
         if match and match.group(1) not in items:
             items.append(match.group(1))
     return items

@@ -137,7 +137,7 @@ else { throw "rg failed with unexpected exit code $LASTEXITCODE" }
 
 6. 旧测试删除/重写对象
    - 删除 `tests/test_template_aware.py::test_extract_template_aware_supplements_creates_graph_items_readiness_and_evidence_links`
-   - 删除 `tests/test_template_aware.py::test_extract_template_aware_supplements_reports_one_readiness_record_per_37_templates`
+   - 删除旧的固定模板数量 readiness 断言；历史测试名 `tests/test_template_aware.py::test_extract_template_aware_supplements_reports_one_readiness_record_per_37_templates` 只反映旧样例数量，不作为新契约
    - 删除或重写 `tests/test_template_rules.py`
    - 重写 `tests/test_stage1.py::test_stage1_build_merges_real_template_aware_supplements`
    - 重写 `tests/test_stage1.py` 中依赖 `evidence_matching_strategy`、`template_graph_mappings` 的 fixture config
@@ -182,7 +182,6 @@ else { throw "rg failed with unexpected exit code $LASTEXITCODE" }
 <novel>.storygraph/
   manifest.json
   requirements/
-    template-requirements.task-packet.json
     template-requirements.json
   coverage/
     chunk-ledger.json
@@ -197,9 +196,14 @@ else { throw "rg failed with unexpected exit code $LASTEXITCODE" }
       chunk-0001/
         chunk-extraction-bundle.json
     task-packets/
-      template-requirements.json
+      template-requirements/
+        batch-0001.json
+        batch-0002.json
       chunk-0001/entities_resources.json
       chunk-0001/event_causality.json
+    template-requirements-parts/
+      batch-0001.json
+      batch-0002.json
     lane-outputs/
       chunk-0001/entities_resources/run-001.json
     review-findings/
@@ -221,11 +225,11 @@ else { throw "rg failed with unexpected exit code $LASTEXITCODE" }
    - 分块并写 chunk text files。
    - 根据配置 `element_lanes` 生成 task packets。
    - 初始化 chunk-ledger 和 agent-run-ledger pending records。
-3. 模板需求分析 agent：
-   - 读取 `requirements/template-requirements.task-packet.json`。
-   - 读取模板 Markdown。
-   - 输出 `requirements/template-requirements.json`。
-   - Python 只校验 schema、状态枚举、模板覆盖数量、requirement_id 唯一性。
+3. 模板需求分析 agents：
+   - 读取 `intermediate/task-packets/template-requirements/batch-*.json`。
+   - 每个分片 agent 负责 1-5 个模板，读取对应模板 Markdown。
+   - 输出 `intermediate/template-requirements-parts/batch-*.json`。
+   - `ingest-stage1` 校验所有分片并汇总写出 `requirements/template-requirements.json`；最终汇总文件不绑定固定 producer。
 4. chunk-lane extraction agents：
    - 每个 agent 只读取自己的 task packet 和 chunk text。
    - 输出 lane JSON 到 `intermediate/lane-outputs/<chunk_id>/<lane_id>/<run_id>.json`。
@@ -266,6 +270,7 @@ else { throw "rg failed with unexpected exit code $LASTEXITCODE" }
   "stage1_mode": "agent-driven",
   "stage1_artifacts": {
     "task_packet_dir": "intermediate/task-packets",
+    "template_requirements_part_dir": "intermediate/template-requirements-parts",
     "chunk_text_dir": "intermediate/chunks",
     "lane_output_dir": "intermediate/lane-outputs",
     "review_finding_dir": "intermediate/review-findings",
@@ -273,7 +278,8 @@ else { throw "rg failed with unexpected exit code $LASTEXITCODE" }
   },
   "template_requirements_strategy": {
     "mode": "agent-produced",
-    "producer": "template-requirements-analysis-agent",
+    "agent_role": "template-requirements-analysis-agent",
+    "templates_per_packet": 5,
     "allow_manual_overrides": true,
     "python_validate_only": true
   },
@@ -360,7 +366,7 @@ else { throw "rg failed with unexpected exit code $LASTEXITCODE" }
 - review 角色来自 `review_policy.reviewers`。
 - retry/repair 策略来自 `retry_repair_policy`。
 - artifact 路径来自 `stage1_artifacts` 和 `writer_policy.managed_outputs`。
-- 模板数量来自 `template_count_policy`，不写死 37；默认可配置为 37。
+- 模板数量来自模板发现结果和 `template_count_policy`，不写死固定数量；当前 CultivationWorld 样例/默认集成检查值可配置为 37。
 - graphify adapter 的 `failure_policy`、allowed failure policies、adapter 输入策略必须来自 `graphify_adapter`，且 adapter 只能接受 canonical graph path 或 graph dir。
 - lane output statuses、reviewer statuses、finding statuses/severities、structured failure statuses 必须来自 `status_enums`，实现逻辑不得在函数体内另写一套枚举。
 - 上方 `element_lanes` 是最小默认/测试默认示例；正式默认配置应以配置项为准，允许项目规则定义完整 spec lane 列表。
@@ -443,7 +449,8 @@ def config(tmp_path):
         },
         "template_requirements_strategy": {
             "mode": "agent-produced",
-            "producer": "template-requirements-analysis-agent",
+            "agent_role": "template-requirements-analysis-agent",
+            "templates_per_packet": 5,
             "python_validate_only": True,
             "allow_manual_overrides": True,
         },
@@ -511,7 +518,6 @@ def _write_agent_template_requirements(graph_dir: Path) -> Path:
     _write_json(
         path,
         {
-            "producer": "template-requirements-analysis-agent",
             "templates": [
                 {
                     "template_name": "法宝分析",
@@ -867,7 +873,6 @@ def test_template_requirements_must_come_from_agent_payload():
     from storygraph_lib.template_requirements import validate_template_requirements_payload
 
     payload = {
-        "producer": "template-requirements-analysis-agent",
         "templates": [
             {
                 "template_name": "法宝分析",
@@ -1409,7 +1414,7 @@ def test_ingest_stage1_writes_reviewed_chunk_bundle_from_reviewed_agent_artifact
 **Task 9B 实现步骤:**
 
 - [ ] `ingest_stage1(graph_dir, config)` 读取 `requirements/template-requirements.json`、lane outputs、review findings。
-- [ ] 校验 agent producer、lane id、状态枚举、source range、source locator、review finding 状态。
+- [ ] 校验 agent 产物来源、lane id、状态枚举、source range、source locator、review finding 状态；template requirements 最终汇总文件不校验固定 producer。
 - [ ] 只有 review passed/closed 且 required lane 已满足或有合格 structured failure 的 chunk 才生成 reviewed bundle。
 - [ ] 写 reviewed chunk bundles 和 merge queue；不写 canonical graph。
 
@@ -1908,7 +1913,7 @@ else { throw "rg failed with unexpected exit code $LASTEXITCODE" }
 
 - 结构：模块职责是否清晰，是否把读取/校验/写盘/merge 混成一个大函数。
 - 架构质量：Orchestrator、Fan-out/Fan-in、Adapter、Strategy、Single-writer、Review/Repair Loop 是否落实。
-- 通用架构：是否避免为当前测试小说/当前 37 模板写一次性硬编码。
+- 通用架构：是否避免为当前测试小说或当前动态发现到的模板集合写一次性硬编码。
 - 设计模式适配：是否只在有实际边界收益处新增模块，没有无意义过度抽象。
 - 配置化覆盖范围：lane、reviewer、状态枚举、artifact path、failure policy、retry policy、writer policy 是否配置化。
 - 删除质量：旧代码删除是否连带清理导入、测试 fixture、文档描述。
@@ -1992,7 +1997,6 @@ New-Item -ItemType Directory -Force -Path (Join-Path $graphDir "intermediate/rev
 
 $requirements = @'
 {
-  "producer": "template-requirements-analysis-agent",
   "templates": [
     {
       "template_name": "法宝分析",

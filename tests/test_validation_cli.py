@@ -372,7 +372,7 @@ def test_cli_commands_bad_config_returns_structured_error(
     assert payload["error"] == expected_error
 
 
-def test_inspect_templates_uses_disabled_legacy_requirement_matrix(capsys, tmp_path):
+def test_inspect_templates_returns_discovery_inventory_without_legacy_matrix(capsys, tmp_path):
     from storygraph_lib.cli import main
 
     template_dir = tmp_path / "templates"
@@ -407,11 +407,21 @@ def test_inspect_templates_uses_disabled_legacy_requirement_matrix(capsys, tmp_p
         encoding="utf-8",
     )
 
-    assert main(["inspect-templates", "--config", str(config), "--template-dir", str(template_dir)]) == 2
+    assert main(["inspect-templates", "--config", str(config), "--template-dir", str(template_dir)]) == 0
     payload = json.loads(capsys.readouterr().out)
 
-    assert payload["ok"] is False
-    assert payload["error"] == "legacy_requirement_matrix_disabled"
+    assert payload["ok"] is True
+    assert payload["template_count"] == 1
+    assert payload["expected_template_count"] == 1
+    assert payload["enforce_integration_count"] is True
+    assert payload["count_matches_expected"] is True
+    assert payload["warnings"] == []
+    assert payload["templates"] == [
+        {
+            "name": "可配置",
+            "file": "可配置模板.md",
+        }
+    ]
 
 
 def test_inspect_templates_bad_utf8_template_returns_structured_error(capsys, tmp_path):
@@ -1207,6 +1217,68 @@ def test_validate_graph_dir_rejects_malformed_readiness_link_fields(tmp_path):
     assert "bad_readiness_linked_event_ids:法宝分析.required_fields.法宝" in result.errors
     assert "bad_readiness_evidence_ids:法宝分析.required_fields.法宝" in result.errors
     assert "bad_readiness_notes:法宝分析.required_fields.法宝" in result.errors
+
+
+def test_validate_graph_dir_uses_dynamic_template_readiness_count(tmp_path):
+    from storygraph_lib.validation import validate_graph_dir
+
+    graph_dir = tmp_path / "mini.storygraph"
+    sample_template_count = 37
+    requirements = {
+        "template_count": sample_template_count,
+        "templates": [
+            {"template_name": f"模板{index:02d}", "required_fields": ["字段"]}
+            for index in range(sample_template_count)
+        ],
+    }
+    readiness = [
+        {
+            "template_name": f"模板{index:02d}",
+            "requirement_statuses": [
+                {
+                    "requirement_id": f"模板{index:02d}.required_fields.字段",
+                    "status": "covered",
+                }
+            ],
+        }
+        for index in range(36)
+    ]
+    _write_minimal_valid_graph_dir(
+        graph_dir, requirements=requirements, readiness=readiness
+    )
+
+    result = validate_graph_dir(graph_dir)
+
+    assert result.ok is False
+    assert "requirements_readiness_template_mismatch" in result.errors
+    assert "requirements_readiness_id_mismatch" in result.errors
+    assert not any(error.startswith("template_readiness_count_not_") for error in result.errors)
+
+
+def test_validate_graph_dir_rejects_duplicate_readiness_template_names(tmp_path):
+    from storygraph_lib.validation import validate_graph_dir
+
+    graph_dir = tmp_path / "mini.storygraph"
+    readiness = [
+        {
+            "template_name": "法宝分析",
+            "requirement_statuses": [
+                {"requirement_id": "法宝分析.required_fields.法宝", "status": "covered"}
+            ],
+        },
+        {
+            "template_name": "法宝分析",
+            "requirement_statuses": [
+                {"requirement_id": "法宝分析.required_fields.法宝", "status": "covered"}
+            ],
+        },
+    ]
+    _write_minimal_valid_graph_dir(graph_dir, readiness=readiness)
+
+    result = validate_graph_dir(graph_dir)
+
+    assert result.ok is False
+    assert "duplicate_readiness_template_name:法宝分析" in result.errors
 
 
 @pytest.mark.parametrize(
