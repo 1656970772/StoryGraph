@@ -31,9 +31,9 @@ python skill-src/storygraph/scripts/storygraph.py validate-graph --graph-dir pat
 
 ## Stage 1 agent-driven 内部流程
 
-1. Codex 主 agent 调用 `prepare-stage1` 读取 source、template dir 和配置，创建 graph dir，写入 manifest、chunk ledger、chunk text、agent task packets、`intermediate/agent-dispatch-plan.json` 和 pending ledger/状态。dispatch plan 包含 `execution_batches`；该命令成功时返回 `status: prepared`，下一步动作是 `dispatch_template_requirements_agents`。
-2. Codex 主 agent 循环调用 `next-agent-batches --phase template_requirements`，按 `agent_policy.max_parallel` 并行调度多个 template requirements agents；默认 role 是 `template-requirements-analysis-agent`，每个 agent 负责 1-5 个模板，在 `ingest-stage1` 前输出到 `intermediate/template-requirements-parts/batch-*.json`。
-3. Codex 主 agent 等待所有 template requirements 分片产物后调用 `ingest-template-requirements`，只校验并汇总分片为 `requirements/template-requirements.json`，不要求 lane outputs 或 review findings 已存在。
+1. Codex 主 agent 调用 `prepare-stage1` 读取 source、template dir 和配置，创建 graph dir，写入 manifest、`intermediate/stage1-input-cache.json`、chunk ledger、chunk text、agent task packets、`intermediate/agent-dispatch-plan.json` 和 pending ledger/状态。dispatch plan 包含 `execution_batches`；该命令成功时返回 `status: prepared`，并在 `cache.template_requirements`、`cache.source_flow` 中报告 `reused`、`refreshed` 或 `partial_refreshed`。
+2. 如果 `cache.template_requirements` 不是 `reused`，Codex 主 agent 循环调用 `next-agent-batches --phase template_requirements`，按 `agent_policy.max_parallel` 并行调度多个 template requirements agents；默认 role 是 `template-requirements-analysis-agent`，每个 agent 负责 1-5 个发生变化或新增的模板，在 `ingest-stage1` 前输出到 `intermediate/template-requirements-parts/batch-*.json`。如果模板只发生删除，`prepare-stage1` 会返回 `next_action: ingest_template_requirements`，无需派发 template requirements agent。
+3. Codex 主 agent 等待所有 template requirements 分片产物后调用 `ingest-template-requirements`，只校验并汇总分片为 `requirements/template-requirements.json`，不要求 lane outputs 或 review findings 已存在。增量模式按模板文件 key 替换或追加条目，并移除已删除模板；如果既有总 JSON 缺失、损坏或包含重复模板 key，本轮只覆盖部分模板时会 fail closed。
 4. Codex 主 agent 循环调用 `next-agent-batches --phase lane_extraction`，按默认 `comprehensive_extraction` lane 和 `agent_orchestration.lane_chunks_per_agent` 聚合的 batch 并行调度 extraction agents。默认规模是 `chunks * 1`，例如 2452 chunks 只对应 2452 个 lane output JSON；多 lane 仅在 local config 显式开启时使用。
 5. Codex 主 agent 调用 `ingest-stage1` 读取 graph dir 中的 template requirements 和 lane outputs。默认 `post_merge_incremental` 模式不要求 `coverage/review-findings.json`，但缺少真实 completed lane output、坏 JSON、伪造 producer 或越界路径会 fail closed。
 6. Codex 主 agent 调用 `merge-stage1` 只读取通过 merge gate 的 bundles，生成 canonical `graphify-out/graph.json`、evidence index、template readiness、manifest 和 ledger。未复查但可用的结果写入 `review_status: unreviewed_usable`，不得伪装成 reviewer `passed`。可选 graphify adapter 只消费 canonical graph path 或 graph dir，用于可视化和查询增强。
@@ -48,7 +48,11 @@ python skill-src/storygraph/scripts/storygraph.py validate-graph --graph-dir pat
 
 常见结构化失败码示例包括 `source_unreadable`、`template_requirements_missing`、`graphify_unavailable`、`graphify_failed` 和 `graphify_artifact_missing`。未在实现和测试中固定的错误类别不作为稳定失败码承诺；调用方应以当前 JSON payload 中的 `error`、`errors` 或 `status` 字段为准。
 
-Stage 1 只有在 source hash、stage input hash、task packet schema hash、reviewed output manifest hash、manifest status、必需文件、deep graph validation 和 graphify adapter ledger 都匹配时才复用既有输出。source、template、config、graphify source、graphify command、chunk strategy 或 agent 输出变化会触发重建或重新合并。
+`prepare-stage1` 的输入缓存清单位于 `intermediate/stage1-input-cache.json`，记录 source path/hash/size、模板 inventory（模板名、相对模板文件、MD5、SHA-256）、chunk strategy hash 和 lane/task packet 相关配置 hash。
+
+模板 requirements 是模板文件级增量：全部模板 MD5 未变时跳过 template requirements phase 并复用 `requirements/template-requirements.json`；部分模板变更或新增时只生成对应模板 task packet；模板删除时从总 JSON 中移除对应条目。
+
+原文流程是整体级重建：source hash、chunk strategy 或 lane/task packet 配置未变且 chunk ledger、chunk text、lane task packets 完整时复用这些产物；source hash 变化时完整重建 chunk ledger、chunk text、lane task packets 和 lane dispatch batches，并隔离旧 lane outputs、reviewed bundles、merge queue 与 canonical graph，避免新一轮 ingest/merge 误用旧结果。
 
 ## Stage 2 Scaffold
 

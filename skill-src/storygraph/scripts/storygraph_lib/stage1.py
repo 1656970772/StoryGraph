@@ -22,6 +22,13 @@ from .manifest import write_manifest
 from .output_writer import OutputWriteError, OutputWriter, normalize_relative_output_path
 from .paths import NovelContext, file_sha256
 from .state import compute_stage1_input_hash
+from .stage1_cache import (
+    build_stage1_input_cache,
+    requirement_key,
+    template_key,
+    template_name_to_key,
+    templates_by_key,
+)
 from .template_requirements import validate_template_requirements_payload
 from .templates import discover_templates
 
@@ -38,6 +45,7 @@ DEFAULT_STAGE1_ARTIFACTS = {
     "canonical_graph": "graphify-out/graph.json",
     "agent_run_ledger": "coverage/agent-run-ledger.json",
     "template_requirements_part_dir": "intermediate/template-requirements-parts",
+    "input_cache": "intermediate/stage1-input-cache.json",
 }
 
 def prepare_stage1(
@@ -67,35 +75,80 @@ def prepare_stage1(
         )
         writer = OutputWriter(ctx.graph_dir, _managed_outputs(active_config))
         artifacts = _artifact_paths(active_config)
-        chunks = make_chunk_ledger(
-            ctx.source_path,
-            active_config.get("chunk_strategy", {}),
-            processor="storygraph-stage1",
+        previous_cache = _load_stage1_input_cache(ctx.graph_dir, artifacts)
+        current_cache = build_stage1_input_cache(
+            ctx=ctx,
+            template_dir=template_dir,
+            templates=discovery.templates,
+            config=active_config,
+        )
+        template_decision = _template_requirements_cache_decision(
+            previous_cache,
+            current_cache,
+            ctx.graph_dir,
+            artifacts,
+        )
+        source_reusable, chunks, packets = _try_reuse_source_flow(
+            ctx.graph_dir,
+            previous_cache,
+            current_cache,
+            artifacts,
+            source_path=ctx.source_path,
+            chunk_strategy=active_config.get("chunk_strategy", {}),
+            lanes=lanes,
             target_lane_ids=lane_ids,
             required_lane_ids=required_lane_ids,
+            required_evidence_policy=active_config.get("required_evidence_policy"),
         )
-        chunks = _write_chunk_texts(writer, chunks, artifacts["chunk_text_dir"])
-        template_requirements_packets = _build_template_requirements_task_packets(
-            ctx.source_path,
-            chunks,
-            discovery.templates,
-            artifacts,
-            active_config,
-        )
-        packets = _build_task_packets(
-            ctx.source_path,
-            chunks,
-            lanes,
-            artifacts,
-            active_config,
-        )
-        for template_requirements_packet in template_requirements_packets:
-            writer.write_json(
-                template_requirements_packet["task_packet_path"],
-                template_requirements_packet,
+        source_flow_status = "reused" if source_reusable else "refreshed"
+        if not source_reusable:
+            _remove_source_flow_artifacts(ctx.graph_dir, artifacts)
+            chunks = make_chunk_ledger(
+                ctx.source_path,
+                active_config.get("chunk_strategy", {}),
+                processor="storygraph-stage1",
+                target_lane_ids=lane_ids,
+                required_lane_ids=required_lane_ids,
             )
-        for packet in packets:
-            writer.write_json(packet["task_packet_path"], packet)
+            chunks = _write_chunk_texts(writer, chunks, artifacts["chunk_text_dir"])
+            packets = _build_task_packets(
+                ctx.source_path,
+                chunks,
+                lanes,
+                artifacts,
+                active_config,
+            )
+            for packet in packets:
+                writer.write_json(packet["task_packet_path"], packet)
+
+        template_requirements_packets: list[dict] = []
+        if template_decision["status"] != "reused":
+            _remove_extraction_flow_artifacts(ctx.graph_dir, artifacts)
+        if template_decision["status"] == "reused":
+            _remove_template_requirements_work_artifacts(ctx.graph_dir, artifacts)
+        else:
+            _remove_template_requirements_work_artifacts(ctx.graph_dir, artifacts)
+            templates_for_requirements = _templates_for_requirement_refresh(
+                discovery.templates,
+                template_dir,
+                template_decision["changed_template_keys"],
+            )
+            if templates_for_requirements:
+                template_requirements_packets = _build_template_requirements_task_packets(
+                    ctx.source_path,
+                    chunks,
+                    templates_for_requirements,
+                    artifacts,
+                    active_config,
+                )
+                for template_requirements_packet in template_requirements_packets:
+                    writer.write_json(
+                        template_requirements_packet["task_packet_path"],
+                        template_requirements_packet,
+                    )
+        current_cache["template_requirements"] = template_decision
+        current_cache["source_flow"] = {"status": source_flow_status}
+        writer.write_json(artifacts["input_cache"], current_cache)
 
         agent_runs = _pending_agent_run_ledger(
             chunks,
@@ -131,23 +184,34 @@ def prepare_stage1(
             active_config,
         )
         writer.write_json(artifacts["agent_dispatch_plan"], dispatch_plan)
-        write_coverage_outputs(
-            writer,
-            chunks,
-            [],
-            [],
-            agent_runs,
-            ["- pending_agent_outputs: dispatch template requirements agents"],
-        )
+        if source_reusable:
+            writer.write_json(artifacts["agent_run_ledger"], agent_runs)
+        else:
+            write_coverage_outputs(
+                writer,
+                chunks,
+                [],
+                [],
+                agent_runs,
+                ["- pending_agent_outputs: dispatch template requirements agents"],
+            )
         _update_manifest_stage(manifest_path, "prepared")
+        next_action = _prepare_next_action(
+            template_requirements_packets,
+            template_decision["status"],
+        )
         return _stage_result(
             "prepared",
             ctx.graph_dir,
             discovery.warnings,
             [],
             None,
-            next_action="dispatch_template_requirements_agents",
+            next_action=next_action,
             extra={
+                "cache": {
+                    "template_requirements": template_decision["status"],
+                    "source_flow": source_flow_status,
+                },
                 "agent_dispatch": {
                     "dispatch_plan_path": artifacts["agent_dispatch_plan"],
                     "max_parallel": dispatch_plan["max_parallel"],
@@ -688,6 +752,411 @@ def stable_stage_input_hash(
     )
 
 
+def _load_stage1_input_cache(graph_dir: Path, artifacts: dict[str, str]) -> dict | None:
+    path = _artifact_path(graph_dir, artifacts["input_cache"])
+    payload, error = _read_json_artifact(
+        path,
+        missing_code="stage1_input_cache_missing",
+        bad_code="stage1_input_cache_invalid",
+    )
+    if error or not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def _template_requirements_cache_decision(
+    previous_cache: dict | None,
+    current_cache: dict,
+    graph_dir: Path,
+    artifacts: dict[str, str],
+) -> dict:
+    current_templates = templates_by_key(current_cache.get("templates", []))
+    current_keys = list(current_templates)
+    refreshed = {
+        "status": "refreshed",
+        "changed_template_keys": current_keys,
+        "deleted_template_keys": [],
+        "current_template_keys": current_keys,
+    }
+    if not previous_cache:
+        return refreshed
+    if (
+        previous_cache.get("template_requirements_config_hash")
+        != current_cache.get("template_requirements_config_hash")
+    ):
+        return refreshed
+    requirements_state = _requirements_total_key_state(
+        graph_dir,
+        artifacts,
+        current_keys=current_keys,
+        current_templates=current_cache.get("templates", []),
+    )
+    if not requirements_state["readable"]:
+        return refreshed
+
+    previous_templates = templates_by_key(previous_cache.get("templates", []))
+    previous_keys = set(previous_templates)
+    changed_keys = [
+        key
+        for key, template in current_templates.items()
+        if key not in previous_templates
+        or previous_templates[key].get("md5") != template.get("md5")
+        or previous_templates[key].get("sha256") != template.get("sha256")
+    ]
+    for key in requirements_state["missing_keys"]:
+        if key not in changed_keys:
+            changed_keys.append(key)
+    if requirements_state["duplicate_keys"] and not changed_keys:
+        changed_keys = current_keys.copy()
+    deleted_keys = sorted(previous_keys - set(current_templates))
+    status = "reused" if not changed_keys and not deleted_keys else "partial_refreshed"
+    return {
+        "status": status,
+        "changed_template_keys": changed_keys,
+        "deleted_template_keys": deleted_keys,
+        "current_template_keys": current_keys,
+    }
+
+
+def _requirements_total_is_readable(graph_dir: Path, artifacts: dict[str, str]) -> bool:
+    payload, error = _read_json_artifact(
+        _artifact_path(graph_dir, artifacts["requirements"]),
+        missing_code="template_requirements_missing",
+        bad_code="template_requirements_invalid",
+    )
+    if error:
+        return False
+    validation = validate_template_requirements_payload(payload)
+    return validation.ok
+
+
+def _requirements_total_key_state(
+    graph_dir: Path,
+    artifacts: dict[str, str],
+    *,
+    current_keys: list[str],
+    current_templates: list,
+) -> dict:
+    payload, error = _read_json_artifact(
+        _artifact_path(graph_dir, artifacts["requirements"]),
+        missing_code="template_requirements_missing",
+        bad_code="template_requirements_invalid",
+    )
+    if error:
+        return {"readable": False, "missing_keys": current_keys, "duplicate_keys": []}
+    validation = validate_template_requirements_payload(payload)
+    if not validation.ok:
+        return {"readable": False, "missing_keys": current_keys, "duplicate_keys": []}
+    templates = payload.get("templates", []) if isinstance(payload, dict) else []
+    name_to_current_key = template_name_to_key(
+        [item for item in current_templates if isinstance(item, dict)]
+    )
+    requirements_by_key, errors = _requirements_by_key(
+        templates,
+        name_to_current_key=name_to_current_key,
+    )
+    duplicate_keys = [
+        error.split(":", 1)[1]
+        for error in errors
+        if error.startswith("template_requirements_duplicate_template_key:")
+    ]
+    if errors:
+        return {
+            "readable": True,
+            "missing_keys": current_keys,
+            "duplicate_keys": duplicate_keys,
+        }
+    missing_keys = [key for key in current_keys if key not in requirements_by_key]
+    return {
+        "readable": True,
+        "missing_keys": missing_keys,
+        "duplicate_keys": duplicate_keys,
+    }
+
+
+def _templates_for_requirement_refresh(
+    templates: list,
+    template_dir: str | Path,
+    changed_template_keys: list[str],
+) -> list:
+    selected = set(changed_template_keys)
+    root = Path(template_dir).resolve()
+    return [
+        template
+        for template in templates
+        if template_key(
+            {
+                "template_name": template.name,
+                "template_file": _template_file_relative(root, template.path),
+            }
+        )
+        in selected
+    ]
+
+
+def _template_file_relative(template_dir: Path, path: Path) -> str:
+    try:
+        return path.resolve().relative_to(template_dir).as_posix()
+    except ValueError:
+        return path.name
+
+
+def _try_reuse_source_flow(
+    graph_dir: Path,
+    previous_cache: dict | None,
+    current_cache: dict,
+    artifacts: dict[str, str],
+    *,
+    source_path: Path,
+    chunk_strategy: dict,
+    lanes: list[dict],
+    target_lane_ids: list[str],
+    required_lane_ids: list[str],
+    required_evidence_policy: dict | None,
+) -> tuple[bool, list[dict], list[dict]]:
+    if not previous_cache:
+        return False, [], []
+    source = previous_cache.get("source")
+    if not isinstance(source, dict):
+        return False, [], []
+    current_source = current_cache.get("source")
+    if source != current_source:
+        return False, [], []
+    for key in ["chunk_strategy_hash", "lane_task_packet_config_hash"]:
+        if previous_cache.get(key) != current_cache.get(key):
+            return False, [], []
+    chunks = _read_reusable_chunks(graph_dir)
+    if chunks is None:
+        return False, [], []
+    expected_chunks = make_chunk_ledger(
+        source_path,
+        chunk_strategy,
+        processor="storygraph-stage1",
+        target_lane_ids=target_lane_ids,
+        required_lane_ids=required_lane_ids,
+    )
+    if _chunk_manifest(chunks) != _chunk_manifest(expected_chunks):
+        return False, [], []
+    if not _chunk_text_artifacts_complete(graph_dir, chunks):
+        return False, [], []
+    packets = _read_reusable_lane_task_packets(
+        graph_dir,
+        artifacts,
+        chunks,
+        lanes=lanes,
+        required_evidence_policy=required_evidence_policy,
+    )
+    if not packets:
+        return False, [], []
+    return True, chunks, packets
+
+
+def _chunk_manifest(chunks: list[dict]) -> list[dict]:
+    manifest = []
+    for chunk in chunks:
+        manifest.append(
+            {
+                "chunk_id": chunk.get("chunk_id"),
+                "source_path": chunk.get("source_path"),
+                "source_range": chunk.get("source_range"),
+                "chapter_hint": chunk.get("chapter_hint"),
+                "hash": chunk.get("hash"),
+                "target_lane_ids": chunk.get("target_lane_ids"),
+                "required_lane_ids": chunk.get("required_lane_ids"),
+            }
+        )
+    return manifest
+
+
+def _read_reusable_chunks(graph_dir: Path) -> list[dict] | None:
+    chunks, error = _read_json_artifact(
+        _artifact_path(graph_dir, "coverage/chunk-ledger.json"),
+        missing_code="chunk_ledger_missing",
+        bad_code="chunk_ledger_invalid",
+    )
+    if error or not isinstance(chunks, list):
+        return None
+    if any(not isinstance(chunk, dict) for chunk in chunks):
+        return None
+    return chunks
+
+
+def _chunk_text_artifacts_complete(graph_dir: Path, chunks: list[dict]) -> bool:
+    for chunk in chunks:
+        chunk_text_path = chunk.get("chunk_text_path")
+        expected_hash = chunk.get("hash")
+        if not isinstance(chunk_text_path, str) or not isinstance(expected_hash, str):
+            return False
+        path = _artifact_path(graph_dir, chunk_text_path)
+        if not path.is_file():
+            return False
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return False
+        if sha256(text.encode("utf-8")).hexdigest() != expected_hash:
+            return False
+    return True
+
+
+def _read_reusable_lane_task_packets(
+    graph_dir: Path,
+    artifacts: dict[str, str],
+    chunks: list[dict],
+    *,
+    lanes: list[dict],
+    required_evidence_policy: dict | None,
+) -> list[dict]:
+    try:
+        root = _artifact_path(graph_dir, artifacts["task_packet_dir"])
+    except OutputWriteError:
+        return []
+    if not root.exists():
+        return []
+    lanes_by_id = {
+        lane.get("lane_id"): lane
+        for lane in lanes
+        if isinstance(lane, dict) and isinstance(lane.get("lane_id"), str)
+    }
+    packets: list[dict] = []
+    for chunk in chunks:
+        chunk_id = chunk.get("chunk_id")
+        required_lane_ids = chunk.get("required_lane_ids")
+        if not isinstance(chunk_id, str) or not chunk_id:
+            return []
+        if not isinstance(required_lane_ids, list) or not required_lane_ids:
+            return []
+        for lane_id in required_lane_ids:
+            if not isinstance(lane_id, str) or not lane_id:
+                return []
+            relative_path = _join_artifact(
+                artifacts["task_packet_dir"],
+                chunk_id,
+                f"{lane_id}.json",
+            )
+            path = _artifact_path(graph_dir, relative_path)
+            packet, error = _read_json_artifact(
+                path,
+                missing_code="task_packet_missing",
+                bad_code="task_packet_invalid",
+            )
+            if error or not isinstance(packet, dict):
+                return []
+            if packet.get("chunk_id") != chunk_id or packet.get("lane_id") != lane_id:
+                return []
+            lane = lanes_by_id.get(lane_id, {})
+            expected_required_evidence_policy = lane.get(
+                "required_evidence_policy", required_evidence_policy
+            )
+            if not _reusable_lane_task_packet_is_complete(
+                packet,
+                chunk,
+                lane_id,
+                template_requirements_path=artifacts["requirements"],
+                task_packet_path=relative_path,
+                expected_required_evidence_policy=expected_required_evidence_policy,
+            ):
+                return []
+            packets.append(packet)
+    for path in sorted(root.glob("*/*.json")):
+        if path.parent.name == "template-requirements":
+            continue
+        packet, error = _read_json_artifact(
+            path,
+            missing_code="task_packet_missing",
+            bad_code="task_packet_invalid",
+        )
+        if error or not isinstance(packet, dict):
+            return []
+    return packets
+
+
+def _reusable_lane_task_packet_is_complete(
+    packet: dict,
+    chunk: dict,
+    lane_id: str,
+    *,
+    template_requirements_path: str,
+    task_packet_path: str,
+    expected_required_evidence_policy: Any,
+) -> bool:
+    from .stage1_packets import validate_task_packet_contract
+
+    return validate_task_packet_contract(
+        packet,
+        chunk=chunk,
+        lane_id=lane_id,
+        template_requirements_path=template_requirements_path,
+        task_packet_path=task_packet_path,
+        expected_required_evidence_policy=expected_required_evidence_policy,
+    )
+
+
+def _remove_template_requirements_work_artifacts(
+    graph_dir: Path, artifacts: dict[str, str]
+) -> None:
+    for relative in [
+        _join_artifact(artifacts["task_packet_dir"], "template-requirements"),
+        artifacts["template_requirements_part_dir"],
+    ]:
+        _remove_artifact_path(graph_dir, relative)
+
+
+def _remove_source_flow_artifacts(graph_dir: Path, artifacts: dict[str, str]) -> None:
+    _remove_extraction_flow_artifacts(graph_dir, artifacts)
+    for relative in [
+        artifacts["chunk_text_dir"],
+    ]:
+        _remove_artifact_path(graph_dir, relative)
+    task_root = _artifact_path(graph_dir, artifacts["task_packet_dir"])
+    if task_root.exists():
+        for child in task_root.iterdir():
+            if child.name == "template-requirements":
+                continue
+            _remove_path_within_graph(graph_dir, child)
+
+
+def _remove_extraction_flow_artifacts(graph_dir: Path, artifacts: dict[str, str]) -> None:
+    for relative in [
+        artifacts["lane_output_dir"],
+        artifacts["reviewed_bundle_dir"],
+        artifacts["merge_queue"],
+        artifacts["review_findings"],
+        artifacts["canonical_graph"],
+    ]:
+        _remove_artifact_path(graph_dir, relative)
+
+
+def _remove_artifact_path(graph_dir: Path, relative_path: str | Path) -> None:
+    try:
+        path = _artifact_path(graph_dir, relative_path)
+    except OutputWriteError:
+        return
+    _remove_path_within_graph(graph_dir, path)
+
+
+def _remove_path_within_graph(graph_dir: Path, path: Path) -> None:
+    root = graph_dir.resolve()
+    target = path.resolve()
+    if not (target == root or target.is_relative_to(root)):
+        return
+    if target.is_dir():
+        shutil.rmtree(target)
+    elif target.exists():
+        target.unlink()
+
+
+def _prepare_next_action(
+    template_requirements_packets: list[dict],
+    template_requirements_status: str,
+) -> str:
+    if template_requirements_packets:
+        return "dispatch_template_requirements_agents"
+    if template_requirements_status == "partial_refreshed":
+        return "ingest_template_requirements"
+    return "dispatch_lane_agents"
+
+
 def _build_task_packets(
     source_path: Path,
     chunks: list[dict],
@@ -724,6 +1193,7 @@ def _build_template_requirements_task_packets(
         task_packet_dir=artifacts["task_packet_dir"],
         template_requirements_part_dir=artifacts["template_requirements_part_dir"],
         strategy=config.get("template_requirements_strategy"),
+        template_dir=config.get("paths", {}).get("template_dir"),
     )
 
 
@@ -878,8 +1348,10 @@ def _build_agent_dispatch_plan(
 ) -> dict:
     template_batches = _template_execution_batches(template_requirements_packets)
     lane_batches = _lane_execution_batches(lane_packets, artifacts, config)
-    phases = [
-        {
+    phases = []
+    if template_requirements_packets:
+        phases.append(
+            {
             "phase": "template_requirements",
             "next_action": "dispatch_template_requirements_agents",
             "task_packets": [
@@ -889,7 +1361,9 @@ def _build_agent_dispatch_plan(
             "wait_for_outputs": [
                 packet["output_path"] for packet in template_requirements_packets
             ],
-        },
+            }
+        )
+    phases.append(
         {
             "phase": "lane_extraction",
             "next_action": "dispatch_lane_agents",
@@ -899,7 +1373,7 @@ def _build_agent_dispatch_plan(
             "execution_batches": lane_batches,
             "wait_for_outputs_root": artifacts["lane_output_dir"],
         },
-    ]
+    )
     if _require_review_before_merge(config):
         phases.append(
             {
@@ -1100,7 +1574,25 @@ def _aggregate_template_requirements_from_parts(
         and isinstance(record.get("run_id"), str)
         and record["run_id"].startswith("stage1-template-requirements:")
     ]
+    cache_payload = _load_stage1_input_cache(graph_root, artifacts)
+    template_cache = (
+        cache_payload.get("template_requirements")
+        if isinstance(cache_payload, dict)
+        else None
+    )
+    incremental = (
+        isinstance(template_cache, dict)
+        and template_cache.get("status") == "partial_refreshed"
+    )
     if not records:
+        if incremental:
+            return _write_incremental_template_requirements(
+                graph_root,
+                config,
+                writer,
+                [],
+                template_cache,
+            )
         return {"code": "template_requirements_missing"}
 
     record_by_batch: dict[str, dict] = {}
@@ -1231,6 +1723,14 @@ def _aggregate_template_requirements_from_parts(
         expected_template_names.extend(assigned_names)
 
     payload = {"template_count": len(merged_templates), "templates": merged_templates}
+    if incremental:
+        return _write_incremental_template_requirements(
+            graph_root,
+            config,
+            writer,
+            merged_templates,
+            template_cache,
+        )
     validation = validate_template_requirements_payload(
         payload, expected_template_names=expected_template_names
     )
@@ -1247,6 +1747,128 @@ def _aggregate_template_requirements_from_parts(
             "validation_errors": [f"{exc.code}:{exc.path}"],
         }
     return None
+
+
+def _write_incremental_template_requirements(
+    graph_root: Path,
+    config: dict,
+    writer: OutputWriter,
+    refreshed_templates: list[dict],
+    template_cache: dict,
+) -> dict | None:
+    artifacts = _artifact_paths(config)
+    current_keys = [
+        key
+        for key in template_cache.get("current_template_keys", [])
+        if isinstance(key, str) and key
+    ]
+    cache_payload = _load_stage1_input_cache(graph_root, artifacts) or {}
+    current_templates = (
+        cache_payload.get("templates") if isinstance(cache_payload, dict) else []
+    )
+    if not isinstance(current_templates, list):
+        current_templates = []
+    name_to_current_key = template_name_to_key(
+        [item for item in current_templates if isinstance(item, dict)]
+    )
+
+    existing, existing_error = _read_json_artifact(
+        _artifact_path(graph_root, artifacts["requirements"]),
+        missing_code="template_requirements_existing_total_missing",
+        bad_code="template_requirements_existing_total_invalid",
+    )
+    if existing_error:
+        code = existing_error["code"]
+        canonical = (
+            "template_requirements_existing_total_missing"
+            if code == "template_requirements_existing_total_missing"
+            else "template_requirements_existing_total_invalid"
+        )
+        return {"code": canonical, "validation_errors": [canonical]}
+    validation = validate_template_requirements_payload(existing)
+    if not validation.ok:
+        return {
+            "code": "template_requirements_existing_total_invalid",
+            "validation_errors": validation.errors,
+        }
+    existing_templates = existing.get("templates", []) if isinstance(existing, dict) else []
+    existing_by_key, existing_errors = _requirements_by_key(
+        existing_templates,
+        name_to_current_key=name_to_current_key,
+    )
+    if existing_errors:
+        return {
+            "code": "template_requirements_existing_total_invalid",
+            "validation_errors": existing_errors,
+        }
+    refreshed_by_key, refreshed_errors = _requirements_by_key(
+        refreshed_templates,
+        name_to_current_key=name_to_current_key,
+    )
+    if refreshed_errors:
+        return {
+            "code": "template_requirements_part_invalid",
+            "validation_errors": refreshed_errors,
+        }
+
+    merged_by_key = {
+        key: value for key, value in existing_by_key.items() if key in set(current_keys)
+    }
+    merged_by_key.update(refreshed_by_key)
+    missing_keys = [key for key in current_keys if key not in merged_by_key]
+    if missing_keys:
+        return {
+            "code": "template_requirements_existing_total_invalid",
+            "validation_errors": [
+                f"template_requirements_missing_existing_template:{key}"
+                for key in missing_keys
+            ],
+        }
+    merged_templates = [merged_by_key[key] for key in current_keys]
+    expected_names = [
+        template.get("template_name")
+        for template in merged_templates
+        if isinstance(template.get("template_name"), str)
+    ]
+    payload = {"template_count": len(merged_templates), "templates": merged_templates}
+    validation = validate_template_requirements_payload(
+        payload, expected_template_names=expected_names
+    )
+    if not validation.ok:
+        return {
+            "code": "template_requirements_invalid",
+            "validation_errors": validation.errors,
+        }
+    try:
+        writer.write_json(artifacts["requirements"], payload)
+    except OutputWriteError as exc:
+        return {
+            "code": "template_requirements_invalid",
+            "validation_errors": [f"{exc.code}:{exc.path}"],
+        }
+    return None
+
+
+def _requirements_by_key(
+    templates: list,
+    *,
+    name_to_current_key: dict[str, str],
+) -> tuple[dict[str, dict], list[str]]:
+    by_key: dict[str, dict] = {}
+    errors: list[str] = []
+    for index, item in enumerate(templates):
+        if not isinstance(item, dict):
+            errors.append(f"template_requirements_template_not_object:{index}")
+            continue
+        key = requirement_key(item, name_to_current_key=name_to_current_key)
+        if not key:
+            errors.append(f"template_requirements_template_key_missing:{index}")
+            continue
+        if key in by_key:
+            errors.append(f"template_requirements_duplicate_template_key:{key}")
+            continue
+        by_key[key] = item
+    return by_key, errors
 
 
 def _read_template_requirements_packets(
@@ -1814,6 +2436,7 @@ def _managed_outputs(config: dict) -> list[str]:
         artifacts["review_findings"],
         artifacts["canonical_graph"],
         artifacts["agent_run_ledger"],
+        artifacts["input_cache"],
     ]
     return _dedupe([*configured, *derived])
 

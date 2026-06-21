@@ -7,6 +7,9 @@ from typing import Any, Iterable
 from .output_writer import OutputWriteError, normalize_relative_output_path
 
 
+_UNSET = object()
+
+
 DEFAULT_TEMPLATE_REQUIREMENTS_STRATEGY = {
     "agent_role": "template-requirements-analysis-agent",
     "lane_id": "template_requirements",
@@ -90,6 +93,99 @@ def build_task_packets(
     return packets
 
 
+def validate_task_packet_contract(
+    packet: Any,
+    *,
+    chunk: dict,
+    lane_id: str,
+    template_requirements_path: str | Path,
+    task_packet_path: str | Path,
+    expected_required_evidence_policy: Any = _UNSET,
+) -> bool:
+    if not isinstance(packet, dict):
+        return False
+    try:
+        chunk_record = _required_record(chunk, "chunk")
+        expected_chunk_id = _safe_path_segment(
+            _required_field(chunk_record, "chunk_id"), "invalid_chunk_id"
+        )
+        expected_lane_id = _safe_path_segment(lane_id, "invalid_lane_id")
+        expected_source_range = _source_range(chunk_record)
+        expected_chunk_text_path = _optional_artifact_path(
+            chunk_record.get("chunk_text_path"), "invalid_chunk_text_path"
+        )
+        expected_source_path = None
+        if chunk_record.get("source_path") is not None:
+            expected_source_path = _safe_source_path(chunk_record.get("source_path"))
+        expected_template_requirements_path = _safe_artifact_path(
+            template_requirements_path, "invalid_template_requirements_path"
+        )
+        expected_task_packet_path = _safe_task_packet_path(task_packet_path)
+        source_path = _safe_source_path(packet.get("source_path"))
+    except ValueError:
+        return False
+
+    if not source_path:
+        return False
+    if expected_source_path is not None and source_path != expected_source_path:
+        return False
+    if packet.get("stage") != "stage1":
+        return False
+    if packet.get("chunk_id") != expected_chunk_id:
+        return False
+    if packet.get("lane_id") != expected_lane_id:
+        return False
+    if packet.get("source_range") != expected_source_range:
+        return False
+    if packet.get("chapter_hint") != chunk_record.get("chapter_hint"):
+        return False
+    if packet.get("chunk_text_path") != expected_chunk_text_path:
+        return False
+    if packet.get("task_packet_path") != expected_task_packet_path:
+        return False
+    attempt = packet.get("attempt")
+    if type(attempt) is not int or attempt < 1:
+        return False
+    if packet.get("task_packet_id") != _task_packet_id(
+        expected_chunk_id, expected_lane_id, attempt
+    ):
+        return False
+
+    requirements = packet.get("relevant_template_requirements")
+    if not isinstance(requirements, dict):
+        return False
+    if requirements.get("path") != expected_template_requirements_path:
+        return False
+
+    lane_contract = packet.get("lane_contract")
+    if not isinstance(lane_contract, dict):
+        return False
+    if lane_contract.get("lane_id") != expected_lane_id:
+        return False
+    if lane_contract.get("required") is not True:
+        return False
+    agent_role = lane_contract.get("agent_role")
+    if not isinstance(agent_role, str) or not agent_role:
+        return False
+    if packet.get("agent_role") != agent_role:
+        return False
+    schema = lane_contract.get("schema")
+    if not isinstance(schema, str) or not schema:
+        return False
+    if packet.get("allowed_output_schema") != schema:
+        return False
+    if "required_evidence_policy" not in packet:
+        return False
+    if (
+        expected_required_evidence_policy is not _UNSET
+        and packet.get("required_evidence_policy") != expected_required_evidence_policy
+    ):
+        return False
+    if _is_comprehensive_lane(lane_contract):
+        return packet.get("stage1_output_contract") == _comprehensive_output_contract()
+    return True
+
+
 def _is_comprehensive_lane(lane: dict) -> bool:
     if lane.get("lane_id") == "comprehensive_extraction":
         return True
@@ -128,6 +224,7 @@ def build_template_requirements_task_packet(
     task_packet_dir: str | Path,
     attempt: int = 1,
     strategy: dict | None = None,
+    template_dir: str | Path | None = None,
 ) -> dict:
     return build_template_requirements_task_packets(
         source_path=source_path,
@@ -138,6 +235,7 @@ def build_template_requirements_task_packet(
         template_requirements_part_dir="intermediate/template-requirements-parts",
         attempt=attempt,
         strategy=strategy,
+        template_dir=template_dir,
     )[0]
 
 
@@ -151,13 +249,18 @@ def build_template_requirements_task_packets(
     template_requirements_part_dir: str | Path,
     attempt: int = 1,
     strategy: dict | None = None,
+    template_dir: str | Path | None = None,
 ) -> list[dict]:
     safe_source_path = _safe_source_path(source_path)
     safe_template_requirements_path = _safe_artifact_path(
         template_requirements_path, "invalid_template_requirements_path"
     )
     chunk_summaries = [_chunk_summary(_required_record(chunk, "chunk")) for chunk in chunks]
-    template_inventory = [_template_inventory_item(template) for template in templates]
+    template_root = Path(template_dir).resolve() if template_dir is not None else None
+    template_inventory = [
+        _template_inventory_item(template, template_root=template_root)
+        for template in templates
+    ]
     resolved_strategy = _template_requirements_strategy(strategy)
     lane_id = resolved_strategy["lane_id"]
     agent_role = resolved_strategy["agent_role"]
@@ -371,10 +474,25 @@ def _chunk_summary(chunk: dict) -> dict:
     return summary
 
 
-def _template_inventory_item(template: Any) -> dict:
+def _template_inventory_item(template: Any, *, template_root: Path | None = None) -> dict:
     path = getattr(template, "path", None)
+    template_file = _template_file_key(path, template_root=template_root)
     return {
         "template_name": str(getattr(template, "name", "")),
-        "template_file": str(path) if path is not None else "",
+        "template_file": template_file,
         "template_file_hash": str(getattr(template, "file_hash", "")),
     }
+
+
+def _template_file_key(path: Any, *, template_root: Path | None) -> str:
+    if path is None:
+        return ""
+    template_path = Path(path)
+    if template_root is not None:
+        try:
+            return template_path.resolve().relative_to(template_root).as_posix()
+        except ValueError:
+            return template_path.name
+    if template_path.is_absolute():
+        return template_path.name
+    return template_path.as_posix()
