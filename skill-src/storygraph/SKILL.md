@@ -25,6 +25,8 @@ graphify 只作为可选的可视化和查询适配层，输入必须是 StoryGr
 
 ## Stage 2 边界
 
-Stage 2 当前仍是 schema scaffold 和输出策略层。使用配置中的 `stage2_categories`、`stage2_output_policy` 和 `overwrite_policy`；默认 `draft` 策略写入 graph draft 目录，不得覆盖已有正式 Markdown 文档。
+Stage 2 是 agent-driven 模板文档生成工具链。主 agent 先运行 `prepare-stage2`，按 template requirements summary 的 category 生成 `intermediate/stage2/task-packets/*.json`；Stage 2 agents 读取 task packet 和 Stage 1 证据，写入 `intermediate/stage2/extraction-records/<模板名>/run-001.json`。Python 只负责 schema 校验、证据闭合、ledger、路径策略和 Markdown 渲染，不负责自动编写模板正文。
+
+默认输出策略仍是 draft-first。`render-stage2` 使用配置中的 `stage2_categories`、`stage2_output_policy`、`overwrite_policy` 和 `stage2_render_policy`，在 `draft` 策略下写入 graph draft 目录，不覆盖已有正式 Markdown 文档。正式覆盖或 merge 需要单独 contract 和复核流程。
 
 汇报 skill source ready 前必须运行 `scripts/storygraph.py validate-skill`。

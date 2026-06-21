@@ -179,6 +179,20 @@
     "allowed_policies": ["draft", "backup-and-overwrite", "merge"],
     "draft_action": "write_draft"
   },
+  "stage2_artifacts": {
+    "task_packet_dir": "intermediate/stage2/task-packets",
+    "dispatch_state": "intermediate/stage2/dispatch-state.json",
+    "extraction_record_dir": "intermediate/stage2/extraction-records"
+  },
+  "stage2_agent_orchestration": {
+    "grouping_strategy": "by_requirement_category",
+    "agent_role": "stage2-template-document-agent",
+    "max_parallel_agents": 6
+  },
+  "stage2_render_policy": {
+    "citation_format": "[{evidence_id}]",
+    "include_unreviewed_warning": true
+  },
   "writer_policy": {
     "mode": "single-writer",
     "managed_outputs": [
@@ -206,7 +220,11 @@
       "coverage/gap-report.md",
       "coverage/template-run-ledger.json",
       "coverage/template-evidence-usage.json",
-      "coverage/template-gap-report.md"
+      "coverage/template-gap-report.md",
+      "intermediate/stage2/task-packets/*.json",
+      "intermediate/stage2/dispatch-state.json",
+      "intermediate/stage2/extraction-records/*/*.json",
+      "drafts/*.md"
     ]
   },
   "agent_policy": {

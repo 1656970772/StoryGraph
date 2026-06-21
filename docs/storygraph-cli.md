@@ -67,6 +67,19 @@ python skill-src/storygraph/scripts/storygraph.py validate-graph --graph-dir pat
 
 ## Stage 2 Scaffold
 
-Stage 2 当前只暴露 schema 和输出策略辅助能力，不渲染完整模板文档。抽取记录使用配置中的 `stage2_categories`，Stage 1 覆盖范围来自 `coverage/chunk-ledger.json`，未来运行产物写入 `coverage/template-run-ledger.json`、`coverage/template-evidence-usage.json` 和 `coverage/template-gap-report.md`。
+Stage 2 是 agent-driven 模板文档生成工具链。Python CLI 只负责确定性的准备、调度状态、schema/证据闭合校验、ledger、路径策略和 Markdown 渲染；模板正文、归纳判断和章节内容必须来自 Stage 2 agent 写入的 `stage2-extraction-record.v1`，不得由 Python 根据图谱自动编造。
 
-默认输出策略是 draft-first：`draft` 解析到 `<graph_dir>/<stage2_output_policy.default_dir>/<template_name>.md`，不会覆盖小说目录中同名正式 Markdown。正式文档目标只能由 `backup-and-overwrite` 或经过独立 contract 的 `merge` 选择。
+```powershell
+python skill-src/storygraph/scripts/storygraph.py prepare-stage2 --graph-dir path/to/novel.storygraph --template-dir path/to/templates --overwrite-policy draft
+python skill-src/storygraph/scripts/storygraph.py inspect-stage2-dispatch --graph-dir path/to/novel.storygraph
+python skill-src/storygraph/scripts/storygraph.py claim-stage2-batches --graph-dir path/to/novel.storygraph --limit 6
+python skill-src/storygraph/scripts/storygraph.py ingest-stage2 --graph-dir path/to/novel.storygraph
+python skill-src/storygraph/scripts/storygraph.py render-stage2 --graph-dir path/to/novel.storygraph
+python skill-src/storygraph/scripts/storygraph.py validate-stage2 --graph-dir path/to/novel.storygraph
+```
+
+`prepare-stage2` 读取 `requirements/template-requirements.json`、`coverage/template-readiness.json`、`coverage/evidence-index.json`、`intermediate/stage1-input-cache.json` 和模板目录，按 requirement category 生成 `intermediate/stage2/task-packets/*.json` 与 `intermediate/stage2/dispatch-state.json`。每个 task packet 包含模板标题、相关 requirement、可用 evidence id 和预期 agent 输出路径 `intermediate/stage2/extraction-records/<模板名>/run-001.json`。
+
+`claim-stage2-batches` 只维护 `pending` / `running` / `completed` 状态；当 running batch 的全部预期 extraction record 已落盘时才标记完成。`ingest-stage2` 校验每个 extraction record 的 `document_sections`、`facts`、分类标签、overwrite policy 和 evidence id 是否闭合到 Stage 1 evidence index，并更新 `coverage/template-run-ledger.json`、`coverage/template-evidence-usage.json` 和 `coverage/template-gap-report.md`。
+
+默认输出策略是 draft-first：`render-stage2` 在 `draft` 策略下写入 `<graph_dir>/<stage2_output_policy.default_dir>/<template_name>.md`，不会覆盖小说目录中同名正式 Markdown。正式文档目标只能由 `backup-and-overwrite` 或经过独立 contract 的 `merge` 选择；本轮工具链不自动合并或覆盖正式文档。

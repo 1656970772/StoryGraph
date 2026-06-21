@@ -11,6 +11,14 @@ from .stage1 import (
     next_agent_batches,
     prepare_stage1,
 )
+from .stage2 import (
+    claim_stage2_batches,
+    ingest_stage2,
+    inspect_stage2_dispatch,
+    prepare_stage2,
+    render_stage2,
+    validate_stage2,
+)
 from .templates import (
     TemplateDiscoveryError,
     discover_templates,
@@ -159,6 +167,31 @@ def main(argv=None):
     merge.add_argument("--graph-dir", required=True)
     validate_graph = sub.add_parser("validate-graph")
     validate_graph.add_argument("--graph-dir", required=True)
+    prepare_stage2_parser = sub.add_parser("prepare-stage2")
+    prepare_stage2_parser.add_argument("--config")
+    prepare_stage2_parser.add_argument("--local-override")
+    prepare_stage2_parser.add_argument("--graph-dir", required=True)
+    prepare_stage2_parser.add_argument("--template-dir", required=True)
+    prepare_stage2_parser.add_argument("--overwrite-policy", default="draft")
+    inspect_stage2_parser = sub.add_parser("inspect-stage2-dispatch")
+    inspect_stage2_parser.add_argument("--config")
+    inspect_stage2_parser.add_argument("--local-override")
+    inspect_stage2_parser.add_argument("--graph-dir", required=True)
+    claim_stage2_parser = sub.add_parser("claim-stage2-batches")
+    claim_stage2_parser.add_argument("--config")
+    claim_stage2_parser.add_argument("--local-override")
+    claim_stage2_parser.add_argument("--graph-dir", required=True)
+    claim_stage2_parser.add_argument("--limit", type=int, required=True)
+    ingest_stage2_parser = sub.add_parser("ingest-stage2")
+    ingest_stage2_parser.add_argument("--config")
+    ingest_stage2_parser.add_argument("--local-override")
+    ingest_stage2_parser.add_argument("--graph-dir", required=True)
+    render_stage2_parser = sub.add_parser("render-stage2")
+    render_stage2_parser.add_argument("--config")
+    render_stage2_parser.add_argument("--local-override")
+    render_stage2_parser.add_argument("--graph-dir", required=True)
+    validate_stage2_parser = sub.add_parser("validate-stage2")
+    validate_stage2_parser.add_argument("--graph-dir", required=True)
     try:
         args = parser.parse_args(argv)
     except _CliArgumentError as error:
@@ -355,5 +388,74 @@ def main(argv=None):
             }
         )
         return 0 if result.ok else 2
+    if args.command == "prepare-stage2":
+        local = _local_override_arg(args)
+        if local and not local.exists():
+            _print_json(_missing_local_override_payload(local))
+            return 2
+        config, error_code = _load_config_for_cli(args, local)
+        if error_code is not None:
+            return error_code
+        config["overwrite_policy"] = args.overwrite_policy
+        result = prepare_stage2(
+            graph_dir=Path(args.graph_dir),
+            template_dir=Path(args.template_dir),
+            config=config,
+            overwrite_policy=args.overwrite_policy,
+        )
+        _print_json(result)
+        return 0 if result.get("status") == "prepared" else 2
+    if args.command == "inspect-stage2-dispatch":
+        local = _local_override_arg(args)
+        if local and not local.exists():
+            _print_json(_missing_local_override_payload(local))
+            return 2
+        config, error_code = _load_config_for_cli(args, local)
+        if error_code is not None:
+            return error_code
+        result = inspect_stage2_dispatch(graph_dir=Path(args.graph_dir), config=config)
+        _print_json(result)
+        return 0
+    if args.command == "claim-stage2-batches":
+        local = _local_override_arg(args)
+        if local and not local.exists():
+            _print_json(_missing_local_override_payload(local))
+            return 2
+        config, error_code = _load_config_for_cli(args, local)
+        if error_code is not None:
+            return error_code
+        result = claim_stage2_batches(
+            graph_dir=Path(args.graph_dir),
+            limit=args.limit,
+            config=config,
+        )
+        _print_json(result)
+        return 0 if result.get("status") == "stage2_batches_claimed" else 2
+    if args.command == "ingest-stage2":
+        local = _local_override_arg(args)
+        if local and not local.exists():
+            _print_json(_missing_local_override_payload(local))
+            return 2
+        config, error_code = _load_config_for_cli(args, local)
+        if error_code is not None:
+            return error_code
+        result = ingest_stage2(graph_dir=Path(args.graph_dir), config=config)
+        _print_json(result)
+        return 0 if result.get("status") == "ingested" else 2
+    if args.command == "render-stage2":
+        local = _local_override_arg(args)
+        if local and not local.exists():
+            _print_json(_missing_local_override_payload(local))
+            return 2
+        config, error_code = _load_config_for_cli(args, local)
+        if error_code is not None:
+            return error_code
+        result = render_stage2(graph_dir=Path(args.graph_dir), config=config)
+        _print_json(result)
+        return 0 if result.get("status") == "rendered" else 2
+    if args.command == "validate-stage2":
+        result = validate_stage2(graph_dir=Path(args.graph_dir))
+        _print_json(result)
+        return 0 if result.get("ok") else 2
     _print_json({"ok": False, "error": "cli_argument_error", "missing": ["command"]})
     return 2

@@ -103,6 +103,66 @@ def test_stage2_validation_rejects_bad_allowed_policies_shape_and_unsupported_ov
     assert "overwrite_policy.unsupported" in result.errors
 
 
+def test_stage2_validation_accepts_document_sections_with_known_evidence():
+    record = _record()
+    record["document_sections"] = [
+        {
+            "heading": "法宝来源",
+            "markdown": "小瓶来自可靠原文证据。",
+            "evidence_ids": ["evidence:abc"],
+            "requirement_ids": ["法宝分析.required_fields.法宝"],
+            "confidence": "EXTRACTED",
+        }
+    ]
+
+    result = validate_extraction_record(record, evidence_ids={"evidence:abc"})
+
+    assert result.ok is True
+
+
+def test_stage2_validation_rejects_document_section_with_unknown_evidence():
+    record = _record()
+    record["document_sections"] = [
+        {
+            "heading": "法宝来源",
+            "markdown": "小瓶来自可靠原文证据。",
+            "evidence_ids": ["evidence:missing"],
+            "requirement_ids": ["法宝分析.required_fields.法宝"],
+            "confidence": "EXTRACTED",
+        }
+    ]
+
+    result = validate_extraction_record(record, evidence_ids={"evidence:abc"})
+
+    assert result.ok is False
+    assert "document_sections[0].evidence_ids.unknown:evidence:missing" in result.errors
+
+
+def test_stage2_validation_rejects_unknown_fact_and_citation_evidence():
+    record = _record()
+    record["facts"][0]["evidence_ids"] = ["evidence:missing-fact"]
+    record["evidence_citations"] = ["evidence:missing-citation"]
+
+    result = validate_extraction_record(record, evidence_ids={"evidence:abc"})
+
+    assert result.ok is False
+    assert "facts[0].evidence_ids.unknown:evidence:missing-fact" in result.errors
+    assert "evidence_citations[0].unknown:evidence:missing-citation" in result.errors
+
+
+def test_stage2_validation_can_require_document_sections_for_ingest():
+    record = _record()
+
+    result = validate_extraction_record(
+        record,
+        evidence_ids={"evidence:abc"},
+        require_document_sections=True,
+    )
+
+    assert result.ok is False
+    assert "document_sections.required" in result.errors
+
+
 def test_stage2_scaffold_ledgers_use_input_templates_and_artifact_paths():
     sample_template_count = 37
     templates = [f"模板{i:02d}" for i in range(sample_template_count)]

@@ -211,12 +211,18 @@ def resolve_render_target(
     raise ValueError(f"unsupported overwrite_policy: {overwrite_policy}")
 
 
-def validate_extraction_record(record):
+def validate_extraction_record(
+    record,
+    evidence_ids=None,
+    *,
+    require_document_sections: bool = False,
+):
     errors = []
     if not isinstance(record, dict):
         return ExtractionValidation(ok=False, errors=["record.must_be_object"])
 
     required = [
+        "schema",
         "template_name",
         "template_file",
         "source_graph",
@@ -234,11 +240,20 @@ def validate_extraction_record(record):
     for key in required:
         if key not in record:
             errors.append(f"missing:{key}")
+    if record.get("schema") != "stage2-extraction-record.v1":
+        errors.append("schema.unsupported")
 
     _validate_coverage_scope(record.get("coverage_scope"), errors)
     categories = _validate_stage2_policy(record.get("stage2_policy"), record, errors)
     _validate_category_sections(record, categories, errors)
-    _validate_facts(record.get("facts"), errors)
+    _validate_facts(record.get("facts"), evidence_ids, errors)
+    _validate_evidence_citations(record.get("evidence_citations"), evidence_ids, errors)
+    _validate_document_sections(
+        record.get("document_sections", []),
+        evidence_ids,
+        errors,
+        require_document_sections=require_document_sections,
+    )
 
     return ExtractionValidation(ok=not errors, errors=errors)
 
@@ -328,12 +343,73 @@ def _validate_category_sections(record, categories, errors):
                 errors.append(f"{section}[{index}].category_invalid")
 
 
-def _validate_facts(facts, errors):
+def _validate_facts(facts, evidence_ids, errors):
     if not isinstance(facts, list):
         return
+    known_evidence = set(evidence_ids or [])
     for index, fact in enumerate(facts):
-        if isinstance(fact, dict) and not fact.get("evidence_ids"):
+        if not isinstance(fact, dict):
+            continue
+        fact_evidence_ids = fact.get("evidence_ids")
+        if not fact_evidence_ids:
             errors.append(f"facts[{index}].evidence_ids_required")
+            continue
+        if not isinstance(fact_evidence_ids, list):
+            errors.append(f"facts[{index}].evidence_ids_must_be_list")
+            continue
+        if evidence_ids is not None:
+            for evidence_id in fact_evidence_ids:
+                if evidence_id not in known_evidence:
+                    errors.append(f"facts[{index}].evidence_ids.unknown:{evidence_id}")
+
+
+def _validate_evidence_citations(citations, evidence_ids, errors):
+    if citations is None:
+        return
+    if not isinstance(citations, list):
+        errors.append("evidence_citations.must_be_list")
+        return
+    if evidence_ids is None:
+        return
+    known_evidence = set(evidence_ids)
+    for index, evidence_id in enumerate(citations):
+        if evidence_id not in known_evidence:
+            errors.append(f"evidence_citations[{index}].unknown:{evidence_id}")
+
+
+def _validate_document_sections(
+    sections,
+    evidence_ids,
+    errors,
+    *,
+    require_document_sections: bool = False,
+):
+    if sections in (None, []):
+        if require_document_sections:
+            errors.append("document_sections.required")
+        return
+    if not isinstance(sections, list):
+        errors.append("document_sections.must_be_list")
+        return
+    known_evidence = set(evidence_ids or [])
+    required = ("heading", "markdown", "evidence_ids", "requirement_ids", "confidence")
+    for index, section in enumerate(sections):
+        if not isinstance(section, dict):
+            errors.append(f"document_sections[{index}].must_be_object")
+            continue
+        for key in required:
+            if key not in section:
+                errors.append(f"document_sections[{index}].missing:{key}")
+        section_evidence = section.get("evidence_ids")
+        if not isinstance(section_evidence, list):
+            errors.append(f"document_sections[{index}].evidence_ids_must_be_list")
+            continue
+        if evidence_ids is not None:
+            for evidence_id in section_evidence:
+                if evidence_id not in known_evidence:
+                    errors.append(
+                        f"document_sections[{index}].evidence_ids.unknown:{evidence_id}"
+                    )
 
 
 def _safe_template_name(template_name):
