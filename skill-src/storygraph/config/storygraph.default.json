@@ -20,6 +20,8 @@
   },
   "stage1_artifacts": {
     "requirements": "requirements/template-requirements.json",
+    "raw_template_requirements": "intermediate/template-requirements-raw.json",
+    "template_requirements_refinement_dir": "intermediate/template-requirements-refinement",
     "agent_dispatch_plan": "intermediate/agent-dispatch-plan.json",
     "dispatch_state": "intermediate/agent-dispatch-state.json",
     "task_packet_dir": "intermediate/task-packets",
@@ -80,6 +82,16 @@
     "templates_per_packet": 5,
     "allow_manual_overrides": true,
     "python_validate_only": true
+  },
+  "template_requirements_refinement": {
+    "enabled": true,
+    "passes": 3,
+    "agent_roles": [
+      "template-requirements-refine-pass-1-agent",
+      "template-requirements-refine-pass-2-agent",
+      "template-requirements-refine-pass-3-agent"
+    ],
+    "summary_schema": "template-requirements-summary.schema.json"
   },
   "element_lanes": [
     {
@@ -174,11 +186,13 @@
       "graphify-out/GRAPH_REPORT.md",
       "graphify-out/graph.html",
       "requirements/template-requirements.json",
+      "intermediate/template-requirements-raw.json",
       "intermediate/agent-dispatch-plan.json",
       "intermediate/agent-dispatch-state.json",
       "intermediate/stage1-input-cache.json",
       "intermediate/task-packets/*/*.json",
       "intermediate/template-requirements-parts/*.json",
+      "intermediate/template-requirements-refinement/*.json",
       "intermediate/chunks/*.txt",
       "intermediate/lane-outputs/*/*/*.json",
       "intermediate/reviewed-bundles/*.json",

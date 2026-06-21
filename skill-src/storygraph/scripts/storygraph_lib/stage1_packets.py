@@ -17,6 +17,17 @@ DEFAULT_TEMPLATE_REQUIREMENTS_STRATEGY = {
     "templates_per_packet": 5,
 }
 
+DEFAULT_TEMPLATE_REQUIREMENTS_REFINEMENT = {
+    "enabled": False,
+    "passes": 3,
+    "agent_roles": [
+        "template-requirements-refine-pass-1-agent",
+        "template-requirements-refine-pass-2-agent",
+        "template-requirements-refine-pass-3-agent",
+    ],
+    "summary_schema": "template-requirements-summary.schema.json",
+}
+
 
 def build_task_packets(
     source_path: str | Path,
@@ -314,6 +325,71 @@ def build_template_requirements_task_packets(
     return packets
 
 
+def build_template_requirements_refinement_task_packets(
+    *,
+    raw_template_requirements_path: str | Path,
+    final_template_requirements_path: str | Path,
+    refinement_dir: str | Path,
+    task_packet_dir: str | Path,
+    template_names: Iterable[str],
+    strategy: dict | None = None,
+    attempt: int = 1,
+) -> list[dict]:
+    resolved = _template_requirements_refinement_strategy(strategy)
+    raw_path = _safe_artifact_path(
+        raw_template_requirements_path, "invalid_raw_template_requirements_path"
+    )
+    final_path = _safe_artifact_path(
+        final_template_requirements_path, "invalid_template_requirements_path"
+    )
+    safe_refinement_dir = _safe_artifact_path(
+        refinement_dir, "invalid_template_requirements_refinement_dir"
+    )
+    safe_task_dir = _safe_artifact_path(
+        task_packet_dir, "invalid_template_requirements_task_packet_dir"
+    )
+    names = [name for name in template_names if isinstance(name, str) and name]
+    packets = []
+    previous_path = raw_path
+    for pass_number, agent_role in enumerate(resolved["agent_roles"], start=1):
+        pass_id = f"pass-{pass_number}"
+        output_path = _join_artifact(safe_refinement_dir, f"{pass_id}.json")
+        task_packet_path = _join_artifact(
+            safe_task_dir,
+            "template-requirements-refinement",
+            f"{pass_id}.json",
+        )
+        packet = {
+            "task_packet_id": f"template-requirements-refinement:{pass_id}:attempt-{attempt:03d}",
+            "stage": "stage1",
+            "chunk_id": f"stage1-template-requirements-refinement-{pass_id}",
+            "batch_id": pass_id,
+            "phase": "template_requirements_refinement",
+            "lane_id": "template_requirements_refinement",
+            "agent_role": agent_role,
+            "allowed_output_schema": resolved["summary_schema"],
+            "raw_template_requirements": {"path": raw_path},
+            "previous_refinement": {"path": previous_path},
+            "final_template_requirements": {"path": final_path},
+            "template_names": list(names),
+            "refinement_pass": pass_number,
+            "refinement_passes": resolved["passes"],
+            "instructions": [
+                "读取 raw_template_requirements.path 作为完整模板全集。",
+                "读取 previous_refinement.path 作为上一轮输入；pass 1 时它等于 raw 全集。",
+                "输出分类总结归纳后的 template requirements summary JSON。",
+                "允许精简、合并同类项和补充归纳，但 source_coverage 必须覆盖全部 template_names。",
+            ],
+            "output_path": output_path,
+            "write_scope": [output_path],
+            "attempt": attempt,
+            "task_packet_path": _safe_task_packet_path(task_packet_path),
+        }
+        packets.append(packet)
+        previous_path = output_path
+    return packets
+
+
 def _template_requirements_strategy(strategy: dict | None) -> dict[str, Any]:
     if strategy is not None and not isinstance(strategy, dict):
         raise ValueError("invalid_template_requirements_strategy")
@@ -348,6 +424,44 @@ def _template_requirements_strategy(strategy: dict | None) -> dict[str, Any]:
         ),
         "templates_per_packet": templates_per_packet,
     }
+
+
+def _template_requirements_refinement_strategy(strategy: dict | None) -> dict[str, Any]:
+    if strategy is not None and not isinstance(strategy, dict):
+        raise ValueError("invalid_template_requirements_refinement")
+    configured = dict(DEFAULT_TEMPLATE_REQUIREMENTS_REFINEMENT)
+    if strategy:
+        configured.update(strategy)
+    passes = configured.get("passes")
+    if passes != 3:
+        raise ValueError("invalid_template_requirements_refinement_passes")
+    agent_roles = configured.get("agent_roles")
+    if not isinstance(agent_roles, list) or len(agent_roles) != 3:
+        raise ValueError("invalid_template_requirements_refinement_agent_roles")
+    roles = [
+        _safe_path_segment(str(role), "invalid_template_requirements_refinement_agent_role")
+        for role in agent_roles
+        if isinstance(role, str) and role
+    ]
+    if len(roles) != 3:
+        raise ValueError("invalid_template_requirements_refinement_agent_role")
+    return {
+        "enabled": configured.get("enabled") is True,
+        "passes": passes,
+        "agent_roles": roles,
+        "summary_schema": _required_string_field(
+            configured,
+            "summary_schema",
+            "invalid_template_requirements_refinement_summary_schema",
+        ),
+    }
+
+
+def _join_artifact(*parts: str | Path) -> str:
+    path = PurePosixPath(str(parts[0]).replace("\\", "/"))
+    for part in parts[1:]:
+        path = path / str(part).replace("\\", "/")
+    return path.as_posix()
 
 
 def _required_record(record: Any, record_type: str) -> dict:

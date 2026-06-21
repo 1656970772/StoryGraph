@@ -29,12 +29,17 @@ from .stage1_cache import (
     template_name_to_key,
     templates_by_key,
 )
-from .template_requirements import validate_template_requirements_payload
+from .template_requirements import (
+    validate_template_requirements_payload,
+    validate_template_requirements_summary_payload,
+)
 from .templates import discover_templates
 
 
 DEFAULT_STAGE1_ARTIFACTS = {
     "requirements": "requirements/template-requirements.json",
+    "raw_template_requirements": "intermediate/template-requirements-raw.json",
+    "template_requirements_refinement_dir": "intermediate/template-requirements-refinement",
     "agent_dispatch_plan": "intermediate/agent-dispatch-plan.json",
     "dispatch_state": "intermediate/agent-dispatch-state.json",
     "task_packet_dir": "intermediate/task-packets",
@@ -123,6 +128,7 @@ def prepare_stage1(
                 writer.write_json(packet["task_packet_path"], packet)
 
         template_requirements_packets: list[dict] = []
+        template_requirements_refinement_packets: list[dict] = []
         if template_decision["status"] != "reused":
             _remove_extraction_flow_artifacts(ctx.graph_dir, artifacts)
         if template_decision["status"] == "reused":
@@ -147,6 +153,19 @@ def prepare_stage1(
                         template_requirements_packet["task_packet_path"],
                         template_requirements_packet,
                     )
+            if _template_requirements_refinement_enabled(active_config):
+                template_requirements_refinement_packets = (
+                    _build_template_requirements_refinement_task_packets(
+                        discovery.templates,
+                        artifacts,
+                        active_config,
+                    )
+                )
+                for refinement_packet in template_requirements_refinement_packets:
+                    writer.write_json(
+                        refinement_packet["task_packet_path"],
+                        refinement_packet,
+                    )
         current_cache["template_requirements"] = template_decision
         current_cache["source_flow"] = {"status": source_flow_status}
         writer.write_json(artifacts["input_cache"], current_cache)
@@ -154,6 +173,7 @@ def prepare_stage1(
         agent_runs = _pending_agent_run_ledger(
             chunks,
             template_requirements_packets,
+            template_requirements_refinement_packets,
             packets,
             artifacts,
         )
@@ -180,6 +200,7 @@ def prepare_stage1(
 
         dispatch_plan = _build_agent_dispatch_plan(
             template_requirements_packets,
+            template_requirements_refinement_packets,
             packets,
             artifacts,
             active_config,
@@ -270,7 +291,7 @@ def ingest_stage1(*, graph_dir: str | Path, config: dict) -> dict:
     if requirements_error:
         return _failure_response(graph_root, requirements_error, _manifest_exists(graph_root))
 
-    requirement_validation = validate_template_requirements_payload(requirements)
+    requirement_validation = _validate_final_template_requirements(requirements)
     if not requirement_validation.ok:
         return _failure_response(
             graph_root,
@@ -428,6 +449,18 @@ def ingest_template_requirements(*, graph_dir: str | Path, config: dict) -> dict
     aggregate_error = _aggregate_template_requirements_from_parts(
         graph_root, config, writer
     )
+    if (
+        aggregate_error is not None
+        and aggregate_error.get("code") == "template_requirements_refinement_pending"
+    ):
+        return _stage_result(
+            "requirements_refinement_pending",
+            graph_root,
+            [],
+            [],
+            None,
+            next_action="dispatch_template_requirements_refinement_agents",
+        )
     if aggregate_error is not None:
         return _failure_response(
             graph_root,
@@ -442,7 +475,17 @@ def ingest_template_requirements(*, graph_dir: str | Path, config: dict) -> dict
         [],
         None,
         next_action="dispatch_lane_agents",
-    )
+        )
+
+
+def _validate_final_template_requirements(requirements: Any):
+    detail_validation = validate_template_requirements_payload(requirements)
+    if detail_validation.ok:
+        return detail_validation
+    summary_validation = validate_template_requirements_summary_payload(requirements)
+    if summary_validation.ok:
+        return summary_validation
+    return detail_validation
 
 
 def inspect_dispatch(*, graph_dir: str | Path) -> dict:
@@ -500,6 +543,8 @@ def next_agent_batches(
         for batch in batches
         if isinstance(batch, dict) and not _batch_outputs_exist(graph_root, batch)
     ]
+    if phase == "template_requirements_refinement" and pending:
+        pending = pending[:1]
     selected = pending[:limit] if limit is not None and limit >= 0 else pending
     return {
         "status": "pending_agent_batches",
@@ -609,6 +654,8 @@ def claim_agent_batches(
         if batch["batch_id"] not in running_ids
         and batch["batch_id"] not in completed_ids
     ]
+    if phase == "template_requirements_refinement" and pending:
+        pending = pending[:1]
     available_slots = _claim_available_slots(
         limit, len(running_ids), len(pending), dispatch.get("max_parallel")
     )
@@ -1230,7 +1277,10 @@ def _remove_template_requirements_work_artifacts(
 ) -> None:
     for relative in [
         _join_artifact(artifacts["task_packet_dir"], "template-requirements"),
+        _join_artifact(artifacts["task_packet_dir"], "template-requirements-refinement"),
         artifacts["template_requirements_part_dir"],
+        artifacts["raw_template_requirements"],
+        artifacts["template_requirements_refinement_dir"],
     ]:
         _remove_artifact_path(graph_dir, relative)
 
@@ -1330,6 +1380,28 @@ def _build_template_requirements_task_packets(
     )
 
 
+def _build_template_requirements_refinement_task_packets(
+    templates: list,
+    artifacts: dict[str, str],
+    config: dict,
+) -> list[dict]:
+    from .stage1_packets import build_template_requirements_refinement_task_packets
+
+    return build_template_requirements_refinement_task_packets(
+        raw_template_requirements_path=artifacts["raw_template_requirements"],
+        final_template_requirements_path=artifacts["requirements"],
+        refinement_dir=artifacts["template_requirements_refinement_dir"],
+        task_packet_dir=artifacts["task_packet_dir"],
+        template_names=[str(getattr(template, "name", "")) for template in templates],
+        strategy=config.get("template_requirements_refinement"),
+    )
+
+
+def _template_requirements_refinement_enabled(config: dict) -> bool:
+    refinement = config.get("template_requirements_refinement")
+    return isinstance(refinement, dict) and refinement.get("enabled") is True
+
+
 def _discover_templates(config: dict, template_dir: str | Path):
     template_config = config.get("template_discovery", {})
     return discover_templates(
@@ -1421,6 +1493,7 @@ def _write_chunk_texts(
 def _pending_agent_run_ledger(
     chunks: list[dict],
     template_requirements_packets: list[dict],
+    template_requirements_refinement_packets: list[dict],
     packets: list[dict],
     artifacts: dict[str, str],
 ) -> list[dict]:
@@ -1445,6 +1518,26 @@ def _pending_agent_run_ledger(
         template_record["lane_id"] = template_requirements_packet["lane_id"]
         template_record["attempt"] = template_requirements_packet.get("attempt", 1)
         records.append(template_record)
+    for refinement_packet in template_requirements_refinement_packets:
+        refinement_record = make_agent_run_record(
+            f"stage1-template-requirements-refinement:{refinement_packet['batch_id']}",
+            refinement_packet["agent_role"],
+            "stage1",
+            [],
+            refinement_packet.get("template_names", []),
+            [
+                refinement_packet["task_packet_path"],
+                refinement_packet["raw_template_requirements"]["path"],
+                refinement_packet["previous_refinement"]["path"],
+            ],
+            [refinement_packet["output_path"]],
+            refinement_packet["write_scope"],
+        )
+        refinement_record["prompt_or_input_packet"] = refinement_packet["task_packet_path"]
+        refinement_record["batch_id"] = refinement_packet["batch_id"]
+        refinement_record["lane_id"] = refinement_packet["lane_id"]
+        refinement_record["attempt"] = refinement_packet.get("attempt", 1)
+        records.append(refinement_record)
     for packet in packets:
         chunk_id = packet["chunk_id"]
         lane_id = packet["lane_id"]
@@ -1475,11 +1568,15 @@ def _pending_agent_run_ledger(
 
 def _build_agent_dispatch_plan(
     template_requirements_packets: list[dict],
+    template_requirements_refinement_packets: list[dict],
     lane_packets: list[dict],
     artifacts: dict[str, str],
     config: dict,
 ) -> dict:
     template_batches = _template_execution_batches(template_requirements_packets)
+    refinement_batches = _template_refinement_execution_batches(
+        template_requirements_refinement_packets
+    )
     lane_batches = _lane_execution_batches(lane_packets, artifacts, config)
     phases = []
     if template_requirements_packets:
@@ -1494,6 +1591,22 @@ def _build_agent_dispatch_plan(
             "wait_for_outputs": [
                 packet["output_path"] for packet in template_requirements_packets
             ],
+            }
+        )
+    if template_requirements_refinement_packets:
+        phases.append(
+            {
+                "phase": "template_requirements_refinement",
+                "next_action": "dispatch_template_requirements_refinement_agents",
+                "task_packets": [
+                    _dispatch_task_packet(packet)
+                    for packet in template_requirements_refinement_packets
+                ],
+                "execution_batches": refinement_batches,
+                "wait_for_outputs": [
+                    packet["output_path"]
+                    for packet in template_requirements_refinement_packets
+                ],
             }
         )
     phases.append(
@@ -1537,6 +1650,27 @@ def _template_execution_batches(packets: list[dict]) -> list[dict]:
                 "agent_role": packet["agent_role"],
                 "lane_id": packet["lane_id"],
                 "chunk_ids": packet.get("chunk_ids", []),
+                "template_names": packet.get("template_names", []),
+                "task_packet_paths": [packet["task_packet_path"]],
+                "expected_output_paths": output_paths,
+                "write_scope": output_paths,
+            }
+        )
+    return batches
+
+
+def _template_refinement_execution_batches(packets: list[dict]) -> list[dict]:
+    batches = []
+    for packet in packets:
+        output_paths = [packet["output_path"]]
+        pass_number = packet["refinement_pass"]
+        batches.append(
+            {
+                "batch_id": f"template-requirements-refinement-pass-{pass_number}",
+                "phase": "template_requirements_refinement",
+                "agent_role": packet["agent_role"],
+                "lane_id": packet["lane_id"],
+                "refinement_pass": pass_number,
                 "template_names": packet.get("template_names", []),
                 "task_packet_paths": [packet["task_packet_path"]],
                 "expected_output_paths": output_paths,
@@ -1873,11 +2007,96 @@ def _aggregate_template_requirements_from_parts(
             "code": "template_requirements_invalid",
             "validation_errors": validation.errors,
         }
+    return _write_template_requirements_payload(graph_root, config, writer, payload)
+
+
+def _write_template_requirements_payload(
+    graph_root: Path,
+    config: dict,
+    writer: OutputWriter,
+    payload: dict,
+) -> dict | None:
+    artifacts = _artifact_paths(config)
+    if not _template_requirements_refinement_enabled(config):
+        try:
+            writer.write_json(artifacts["requirements"], payload)
+        except OutputWriteError as exc:
+            return {
+                "code": "template_requirements_invalid",
+                "validation_errors": [f"{exc.code}:{exc.path}"],
+            }
+        return None
     try:
-        writer.write_json(artifacts["requirements"], payload)
+        writer.write_json(artifacts["raw_template_requirements"], payload)
     except OutputWriteError as exc:
         return {
             "code": "template_requirements_invalid",
+            "validation_errors": [f"{exc.code}:{exc.path}"],
+        }
+    expected_template_names = [
+        template["template_name"]
+        for template in payload.get("templates", [])
+        if isinstance(template, dict) and isinstance(template.get("template_name"), str)
+    ]
+    return _finalize_template_requirements_refinement(
+        graph_root, config, writer, expected_template_names
+    )
+
+
+def _finalize_template_requirements_refinement(
+    graph_root: Path,
+    config: dict,
+    writer: OutputWriter,
+    expected_template_names: list[str],
+) -> dict | None:
+    artifacts = _artifact_paths(config)
+    refinement_dir = artifacts["template_requirements_refinement_dir"]
+    pass_paths = [
+        _join_artifact(refinement_dir, f"pass-{index}.json") for index in range(1, 4)
+    ]
+    pass_exists = [_artifact_path(graph_root, path).exists() for path in pass_paths]
+    if not any(pass_exists):
+        return {"code": "template_requirements_refinement_pending"}
+    if pass_exists != [True, True, True]:
+        missing = [
+            f"template_requirements_refinement_pass_missing:pass-{index}"
+            for index, exists in enumerate(pass_exists, start=1)
+            if not exists
+        ]
+        return {
+            "code": "template_requirements_summary_invalid",
+            "validation_errors": missing,
+        }
+
+    summaries = []
+    validation_errors: list[str] = []
+    for index, relative_path in enumerate(pass_paths, start=1):
+        summary, summary_error = _read_json_artifact(
+            _artifact_path(graph_root, relative_path),
+            missing_code="template_requirements_refinement_pass_missing",
+            bad_code="template_requirements_summary_invalid",
+        )
+        if summary_error:
+            validation_errors.append(
+                f"{summary_error['code']}:pass-{index}"
+            )
+            continue
+        validation = validate_template_requirements_summary_payload(
+            summary, expected_template_names=expected_template_names
+        )
+        if not validation.ok:
+            validation_errors.extend(validation.errors)
+        summaries.append(summary)
+    if validation_errors:
+        return {
+            "code": "template_requirements_summary_invalid",
+            "validation_errors": _dedupe(validation_errors),
+        }
+    try:
+        writer.write_json(artifacts["requirements"], summaries[-1])
+    except OutputWriteError as exc:
+        return {
+            "code": "template_requirements_summary_invalid",
             "validation_errors": [f"{exc.code}:{exc.path}"],
         }
     return None
@@ -1906,8 +2125,13 @@ def _write_incremental_template_requirements(
         [item for item in current_templates if isinstance(item, dict)]
     )
 
+    existing_requirements_path = (
+        artifacts["raw_template_requirements"]
+        if _template_requirements_refinement_enabled(config)
+        else artifacts["requirements"]
+    )
     existing, existing_error = _read_json_artifact(
-        _artifact_path(graph_root, artifacts["requirements"]),
+        _artifact_path(graph_root, existing_requirements_path),
         missing_code="template_requirements_existing_total_missing",
         bad_code="template_requirements_existing_total_invalid",
     )
@@ -1973,14 +2197,7 @@ def _write_incremental_template_requirements(
             "code": "template_requirements_invalid",
             "validation_errors": validation.errors,
         }
-    try:
-        writer.write_json(artifacts["requirements"], payload)
-    except OutputWriteError as exc:
-        return {
-            "code": "template_requirements_invalid",
-            "validation_errors": [f"{exc.code}:{exc.path}"],
-        }
-    return None
+    return _write_template_requirements_payload(graph_root, config, writer, payload)
 
 
 def _requirements_by_key(
@@ -2684,10 +2901,12 @@ def _managed_outputs(config: dict) -> list[str]:
     artifacts = _artifact_paths(config)
     derived = [
         artifacts["requirements"],
+        artifacts["raw_template_requirements"],
         artifacts["agent_dispatch_plan"],
         artifacts["dispatch_state"],
         _join_artifact(artifacts["task_packet_dir"], "*", "*.json"),
         _join_artifact(artifacts["template_requirements_part_dir"], "*.json"),
+        _join_artifact(artifacts["template_requirements_refinement_dir"], "*.json"),
         _join_artifact(artifacts["chunk_text_dir"], "*.txt"),
         _join_artifact(artifacts["lane_output_dir"], "*", "*", "*.json"),
         _join_artifact(artifacts["reviewed_bundle_dir"], "*.json"),

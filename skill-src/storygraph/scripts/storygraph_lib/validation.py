@@ -280,17 +280,31 @@ def _validate_requirements_readiness(
     requirements: dict, readiness: list[dict], status_enums: dict | None
 ) -> list[str]:
     errors: list[str] = []
+    summary_template_names = _summary_template_names(requirements, errors)
+    is_summary = summary_template_names is not None
     requirement_records = requirements.get("templates", [])
-    if not isinstance(requirement_records, list):
+    if not is_summary and not isinstance(requirement_records, list):
         return ["requirements_templates_not_list"]
-    template_count = requirements.get("template_count")
+    if is_summary:
+        requirement_records = []
+    template_count = (
+        requirements.get("source_template_count")
+        if is_summary
+        else requirements.get("template_count")
+    )
     if not _is_non_negative_int(template_count):
         errors.append("bad_requirements_template_count")
-    elif template_count != len(requirement_records):
+    elif is_summary and template_count != len(summary_template_names):
+        errors.append("requirements_template_count_mismatch")
+    elif not is_summary and template_count != len(requirement_records):
         errors.append("requirements_template_count_mismatch")
     if _is_non_negative_int(template_count) and len(readiness) != template_count:
         errors.append("requirements_readiness_count_mismatch")
-    requirement_templates = _template_name_set(requirement_records, errors, "bad_requirement_template_name")
+    requirement_templates = (
+        set(summary_template_names)
+        if is_summary
+        else _template_name_set(requirement_records, errors, "bad_requirement_template_name")
+    )
     readiness_templates = _template_name_set(
         readiness,
         errors,
@@ -347,7 +361,7 @@ def _validate_requirements_readiness(
                 errors.append(f"bad_readiness_requirement_id:{record.get('template_name')}")
                 continue
             actual_ids.add(requirement_id)
-    if expected_ids != actual_ids:
+    if not is_summary and expected_ids != actual_ids:
         errors.append("requirements_readiness_id_mismatch")
 
     allowed_statuses = _allowed_status_values(status_enums, "requirement_statuses", errors)
@@ -371,6 +385,31 @@ def _validate_requirements_readiness(
                 errors.append(f"bad_readiness_status:{status_value}")
             _validate_readiness_status_shape(status, record.get("template_name"), errors)
     return errors
+
+
+def _summary_template_names(requirements: dict, errors: list[str]) -> list[str] | None:
+    if requirements.get("schema_version") != "storygraph.template-requirements-summary.v1":
+        return None
+    source_coverage = requirements.get("source_coverage")
+    if not isinstance(source_coverage, dict):
+        errors.append("requirements_summary_source_coverage_invalid")
+        return []
+    template_names = source_coverage.get("template_names")
+    if not isinstance(template_names, list):
+        errors.append("requirements_summary_template_names_invalid")
+        return []
+    names: list[str] = []
+    seen: set[str] = set()
+    for item in template_names:
+        if not isinstance(item, str) or not item:
+            errors.append("requirements_summary_template_name_invalid")
+            continue
+        if item in seen:
+            errors.append("requirements_summary_duplicate_template_name")
+            continue
+        seen.add(item)
+        names.append(item)
+    return names
 
 
 def _template_name_set(
@@ -406,6 +445,10 @@ def _safe_string_set(values: list, errors: list[str], error_code: str) -> set[st
 
 def _normalized_status_enums(requirements: dict, errors: list[str]) -> dict | None:
     status_enums = requirements.get("status_enums")
+    if status_enums is None and isinstance(requirements.get("global_rules"), dict):
+        statuses = requirements["global_rules"].get("requirement_statuses")
+        if statuses is not None:
+            status_enums = {"requirement_statuses": statuses}
     if status_enums is None:
         return None
     if not isinstance(status_enums, dict):

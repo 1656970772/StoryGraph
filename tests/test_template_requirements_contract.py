@@ -186,3 +186,81 @@ def test_template_requirements_reject_duplicate_template_names():
 
     assert result.ok is False
     assert "template_requirements_duplicate_template_name:法宝分析" in result.errors
+
+
+def test_template_requirements_summary_accepts_three_pass_category_payload():
+    from storygraph_lib.template_requirements import (
+        validate_template_requirements_summary_payload,
+    )
+
+    payload = {
+        "schema_version": "storygraph.template-requirements-summary.v1",
+        "source_template_count": 2,
+        "summary_passes": 3,
+        "categories": [
+            {
+                "category_id": "characters_and_artifacts",
+                "category_name": "人物与法宝",
+                "purpose": "归纳人物、法宝和相关事件的抽取要求。",
+                "required_extraction_targets": ["人物", "法宝", "获得事件"],
+                "evidence_requirements": ["原文位置", "判断依据"],
+                "graph_mapping_summary": {
+                    "nodes": ["character", "artifact"],
+                    "events": ["artifact_gain"],
+                    "relations": ["character_owns_artifact"],
+                },
+                "template_coverage": ["人物关系", "法宝分析"],
+            }
+        ],
+        "global_rules": {
+            "requirement_statuses": ["covered", "needs_review", "not_found_in_source"]
+        },
+        "refinement_notes": ["三轮归纳后合并同类模板。"],
+        "source_coverage": {
+            "template_names": ["人物关系", "法宝分析"],
+            "covered_template_count": 2,
+        },
+    }
+
+    result = validate_template_requirements_summary_payload(
+        payload, expected_template_names=["人物关系", "法宝分析"]
+    )
+
+    assert result.ok is True
+    assert result.errors == []
+
+
+def test_template_requirements_summary_rejects_missing_template_coverage():
+    from storygraph_lib.template_requirements import (
+        validate_template_requirements_summary_payload,
+    )
+
+    payload = {
+        "schema_version": "storygraph.template-requirements-summary.v1",
+        "source_template_count": 2,
+        "summary_passes": 2,
+        "categories": [
+            {
+                "category_id": "artifacts",
+                "category_name": "法宝",
+                "template_coverage": ["法宝分析"],
+            }
+        ],
+        "global_rules": {
+            "requirement_statuses": ["covered", "needs_review", "not_found_in_source"]
+        },
+        "refinement_notes": [],
+        "source_coverage": {
+            "template_names": ["法宝分析"],
+            "covered_template_count": 1,
+        },
+    }
+
+    result = validate_template_requirements_summary_payload(
+        payload, expected_template_names=["人物关系", "法宝分析"]
+    )
+
+    assert result.ok is False
+    assert "template_requirements_summary_passes_invalid" in result.errors
+    assert "template_requirements_summary_missing_expected_template:人物关系" in result.errors
+    assert "template_requirements_summary_source_template_count_mismatch" in result.errors
