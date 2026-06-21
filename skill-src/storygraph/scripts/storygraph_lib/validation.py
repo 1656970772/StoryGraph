@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 from pathlib import Path
 from typing import Any
@@ -27,6 +27,8 @@ class ValidationResult:
 class GraphDirValidation:
     ok: bool
     errors: list[str]
+    warnings: list[str] = field(default_factory=list)
+    review_status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -150,6 +152,7 @@ def validate_external_json_artifact(
 def validate_graph_dir(graph_dir: Path) -> GraphDirValidation:
     graph_dir = Path(graph_dir)
     errors: list[str] = []
+    warnings: list[str] = []
     for item in REQUIRED_STAGE1_FILES:
         if (graph_dir / item).exists():
             continue
@@ -219,14 +222,23 @@ def validate_graph_dir(graph_dir: Path) -> GraphDirValidation:
     errors.extend(_validate_chunks(manifest, chunks))
     errors.extend(_validate_evidence_links(graph, coverage_evidence, status_enums))
     errors.extend(_validate_readiness_references(graph, coverage_evidence, readiness))
-    errors.extend(_validate_stage1_agent_driven_artifacts(graph_dir, graph, agent_ledger))
+    review_status = _review_status_from_graph(graph)
+    errors.extend(
+        _validate_stage1_agent_driven_artifacts(
+            graph_dir, graph, agent_ledger, warnings=warnings
+        )
+    )
 
     stage1_status = _stage1_status(manifest, errors)
     if stage1_status != "success":
         errors.append(f"stage1_not_success:{stage1_status}")
     if stage1_status == "success":
         errors.extend(_validate_agent_driven_manifest(manifest))
-        errors.extend(_validate_required_agent_roles(agent_ledger))
+        errors.extend(
+            _validate_required_agent_roles(
+                agent_ledger, _required_agent_roles_for_graph(graph)
+            )
+        )
         errors.extend(_validate_success_agent_ledger_contract(agent_ledger))
     if stage1_status == "success" and any(
         not isinstance(record, dict) or record.get("status") != "completed"
@@ -234,7 +246,12 @@ def validate_graph_dir(graph_dir: Path) -> GraphDirValidation:
     ):
         errors.append("agent_run_not_completed")
 
-    return GraphDirValidation(ok=not errors, errors=_dedupe(errors))
+    return GraphDirValidation(
+        ok=not errors,
+        errors=_dedupe(errors),
+        warnings=_dedupe(warnings),
+        review_status=review_status,
+    )
 
 
 def _safe_agent_ledger_errors(record: dict, errors: list[str]) -> list:
@@ -737,17 +754,27 @@ def _valid_coverage_source_location(value: object) -> bool:
     return isinstance(value, list) and _valid_source_range(value) is not None
 
 
-def _validate_required_agent_roles(agent_ledger: list[dict]) -> list[str]:
+def _validate_required_agent_roles(
+    agent_ledger: list[dict], required_roles: list[str] | None = None
+) -> list[str]:
     seen_roles = {
         record.get("agent_role")
         for record in agent_ledger
         if isinstance(record, dict) and isinstance(record.get("agent_role"), str)
     }
+    roles = required_roles or REQUIRED_STAGE1_AGENT_ROLES
     return [
         f"missing_agent_role:{role}"
-        for role in REQUIRED_STAGE1_AGENT_ROLES
+        for role in roles
         if role not in seen_roles
     ]
+
+
+def _required_agent_roles_for_graph(graph: dict) -> list[str]:
+    metadata = graph.get("metadata")
+    if isinstance(metadata, dict) and metadata.get("review_policy_mode") == "post_merge_incremental":
+        return ["模板需求分析", "图抽取"]
+    return REQUIRED_STAGE1_AGENT_ROLES
 
 
 def _validate_agent_driven_manifest(manifest: dict) -> list[str]:
@@ -905,7 +932,7 @@ def _read_json(graph_dir: Path, relative_path: str, default, errors: list[str]):
 
 
 def _validate_stage1_agent_driven_artifacts(
-    graph_dir: Path, graph: dict, agent_ledger: list
+    graph_dir: Path, graph: dict, agent_ledger: list, *, warnings: list[str]
 ) -> list[str]:
     errors: list[str] = []
     if not (graph_dir / "coverage" / "agent-run-ledger.json").exists():
@@ -941,9 +968,13 @@ def _validate_stage1_agent_driven_artifacts(
                 continue
             errors.extend(_validate_task_packet_payload(payload, relative_path))
 
+    post_merge_incremental = _is_post_merge_incremental_graph(graph)
     review_findings = graph_dir / "coverage" / "review-findings.json"
     if not review_findings.exists():
-        errors.append("missing_review_findings")
+        if post_merge_incremental:
+            warnings.append("review_not_performed")
+        else:
+            errors.append("missing_review_findings")
     else:
         before = len(errors)
         payload = _read_json(
@@ -954,6 +985,19 @@ def _validate_stage1_agent_driven_artifacts(
 
     errors.extend(_validate_lane_output_artifacts(graph_dir, graph, agent_ledger))
     return errors
+
+
+def _is_post_merge_incremental_graph(graph: dict) -> bool:
+    metadata = graph.get("metadata")
+    return isinstance(metadata, dict) and metadata.get("review_policy_mode") == "post_merge_incremental"
+
+
+def _review_status_from_graph(graph: dict) -> str | None:
+    metadata = graph.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    status = metadata.get("review_status")
+    return status if isinstance(status, str) and status else None
 
 
 def _validate_task_packet_payload(payload: Any, relative_path: str) -> list[str]:

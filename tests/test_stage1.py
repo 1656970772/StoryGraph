@@ -420,6 +420,104 @@ def test_prepare_stage1_writes_agent_dispatch_plan(
     assert dispatch["phases"][2]["review_findings_path"] == "coverage/review-findings.json"
 
 
+def test_default_config_prepares_one_comprehensive_packet_per_chunk(
+    tmp_path, template_dir, graph_dir
+):
+    from storygraph_lib.stage1 import prepare_stage1
+
+    default_config_path = (
+        Path(__file__).resolve().parents[1]
+        / "skill-src"
+        / "storygraph"
+        / "config"
+        / "storygraph.default.json"
+    )
+    config = json.loads(default_config_path.read_text(encoding="utf-8"))
+    config["template_count_policy"]["expected_existing_templates"] = 1
+    config["template_count_policy"]["enforce_integration_count"] = False
+    novel = _write_five_chapter_novel(tmp_path / "five_chapters.txt")
+
+    result = prepare_stage1(
+        source_path=novel,
+        template_dir=template_dir,
+        graph_dir=graph_dir,
+        config=config,
+    )
+    dispatch = json.loads(
+        (graph_dir / "intermediate" / "agent-dispatch-plan.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    lane_phase = next(phase for phase in dispatch["phases"] if phase["phase"] == "lane_extraction")
+
+    assert result["status"] == "prepared"
+    assert [phase["phase"] for phase in dispatch["phases"]] == [
+        "template_requirements",
+        "lane_extraction",
+    ]
+    assert len(lane_phase["task_packets"]) == 5
+    assert len(lane_phase["execution_batches"]) == 1
+    assert {
+        packet["lane_id"] for packet in lane_phase["task_packets"]
+    } == {"comprehensive_extraction"}
+    assert lane_phase["execution_batches"][0]["expected_output_paths"] == [
+        f"intermediate/lane-outputs/chunk-000{index}/comprehensive_extraction/run-001.json"
+        for index in range(1, 6)
+    ]
+
+
+def test_default_config_large_corpus_batches_are_chunks_not_chunks_times_lanes(
+    tmp_path, template_dir, graph_dir
+):
+    from storygraph_lib.stage1 import prepare_stage1
+
+    default_config_path = (
+        Path(__file__).resolve().parents[1]
+        / "skill-src"
+        / "storygraph"
+        / "config"
+        / "storygraph.default.json"
+    )
+    config = json.loads(default_config_path.read_text(encoding="utf-8"))
+    config["template_count_policy"]["expected_existing_templates"] = 1
+    config["template_count_policy"]["enforce_integration_count"] = False
+    config["chunk_strategy"]["overlap_chars"] = 0
+    novel = tmp_path / "many_chapters.txt"
+    novel.write_text(
+        "\n".join(f"第{index}章\n韩立记录第{index}段。" for index in range(1, 2453)),
+        encoding="utf-8",
+    )
+
+    result = prepare_stage1(
+        source_path=novel,
+        template_dir=template_dir,
+        graph_dir=graph_dir,
+        config=config,
+    )
+    dispatch = json.loads(
+        (graph_dir / "intermediate" / "agent-dispatch-plan.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    lane_phase = next(phase for phase in dispatch["phases"] if phase["phase"] == "lane_extraction")
+    output_paths = [
+        path
+        for batch in lane_phase["execution_batches"]
+        for path in batch["expected_output_paths"]
+    ]
+
+    assert result["status"] == "prepared"
+    assert len(lane_phase["task_packets"]) == 2452
+    assert len(output_paths) == len(set(output_paths)) == 2452
+    assert len(lane_phase["execution_batches"]) == 307
+    assert output_paths[0] == (
+        "intermediate/lane-outputs/chunk-0001/comprehensive_extraction/run-001.json"
+    )
+    assert output_paths[-1] == (
+        "intermediate/lane-outputs/chunk-2452/comprehensive_extraction/run-001.json"
+    )
+
+
 def test_prepare_stage1_groups_lane_execution_batches_by_configured_chunk_count(
     tmp_path, template_dir, graph_dir, config
 ):
@@ -1182,6 +1280,45 @@ def test_ingest_stage1_writes_reviewed_chunk_bundle_from_reviewed_agent_artifact
     assert not (graph_dir / "graphify-out" / "graph.json").exists()
 
 
+def test_ingest_stage1_allows_unreviewed_outputs_in_post_merge_incremental_mode(
+    graph_dir,
+    config,
+    write_agent_template_requirements,
+    write_lane_output,
+):
+    from storygraph_lib.stage1 import ingest_stage1
+
+    config["review_policy"] = {
+        "mode": "post_merge_incremental",
+        "require_review_before_canonical_merge": False,
+        "unreviewed_merge_status": "unreviewed_usable",
+    }
+    write_agent_template_requirements(graph_dir)
+    write_lane_output(
+        graph_dir,
+        chunk_id="chunk-0001",
+        lane_id="entities_resources",
+        status="completed",
+    )
+
+    result = ingest_stage1(graph_dir=graph_dir, config=config)
+
+    assert result["status"] == "ingested"
+    bundle = json.loads(
+        (graph_dir / "intermediate" / "reviewed-bundles" / "chunk-0001.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert bundle["merge_gate_status"] == "unreviewed_usable"
+    assert bundle["review_state"] == "unreviewed_usable"
+    assert bundle.get("reviewer_status") != "passed"
+    queue = json.loads(
+        (graph_dir / "intermediate" / "merge-queue.json").read_text(encoding="utf-8")
+    )
+    assert queue["review_policy_mode"] == "post_merge_incremental"
+    assert queue["review_state_summary"] == {"unreviewed_usable": 1}
+
+
 def test_ingest_stage1_rejects_reviewer_status_outside_config(
     graph_dir, config, write_agent_template_requirements, write_lane_output, write_review_finding
 ):
@@ -1530,6 +1667,114 @@ def test_stage1_merge_success_uses_reviewed_agent_outputs(
     assert merge["status"] == "success"
     graph = json.loads((graph_dir / "graphify-out" / "graph.json").read_text(encoding="utf-8"))
     assert graph["metadata"]["semantic_generation"] == "agent-produced"
+
+
+def test_stage1_merge_success_records_unreviewed_post_merge_status(
+    novel,
+    template_dir,
+    graph_dir,
+    config,
+    write_lane_output,
+):
+    from storygraph_lib.stage1 import ingest_stage1, merge_stage1, prepare_stage1
+
+    config["review_policy"] = {
+        "mode": "post_merge_incremental",
+        "require_review_before_canonical_merge": False,
+        "unreviewed_merge_status": "unreviewed_usable",
+    }
+    prepare_stage1(
+        source_path=novel,
+        template_dir=template_dir,
+        graph_dir=graph_dir,
+        config=config,
+    )
+    _write_template_requirement_parts(graph_dir)
+    write_lane_output(
+        graph_dir,
+        chunk_id="chunk-0001",
+        lane_id="entities_resources",
+        status="completed",
+    )
+
+    ingest = ingest_stage1(graph_dir=graph_dir, config=config)
+    merge = merge_stage1(graph_dir=graph_dir, config=config)
+
+    assert ingest["status"] == "ingested"
+    assert merge["status"] == "success"
+    graph = json.loads((graph_dir / "graphify-out" / "graph.json").read_text(encoding="utf-8"))
+    assert graph["metadata"]["review_policy_mode"] == "post_merge_incremental"
+    assert graph["metadata"]["review_status"] == "unreviewed_usable"
+    assert graph["metadata"]["unreviewed_bundle_count"] == 1
+
+
+def test_stage1_incremental_attempt_uses_latest_valid_lane_output(
+    graph_dir,
+    config,
+    write_agent_template_requirements,
+    write_lane_output,
+):
+    from storygraph_lib.stage1 import ingest_stage1, merge_stage1
+
+    config["review_policy"] = {
+        "mode": "post_merge_incremental",
+        "require_review_before_canonical_merge": False,
+        "unreviewed_merge_status": "unreviewed_usable",
+    }
+    write_agent_template_requirements(graph_dir)
+    write_lane_output(graph_dir, lane_id="entities_resources", status="completed")
+    second = graph_dir / "intermediate" / "lane-outputs" / "chunk-0001" / "entities_resources" / "run-002.json"
+    payload = json.loads(
+        (
+            graph_dir
+            / "intermediate"
+            / "lane-outputs"
+            / "chunk-0001"
+            / "entities_resources"
+            / "run-001.json"
+        ).read_text(encoding="utf-8")
+    )
+    payload["run_id"] = "run-002"
+    payload["task_packet_id"] = "chunk-0001:entities_resources:attempt-002"
+    payload["extracted_nodes"] = [
+        {
+            "id": "node:character:hanli",
+            "label": "韩立",
+            "node_type": "character",
+            "source_range": [0, 2],
+            "evidence_ids": ["evidence:hanli"],
+            "supports_templates": [
+                {"template_name": "法宝分析", "requirement_id": "r1", "status": "covered"}
+            ],
+            "confidence": "EXTRACTED",
+            "verification_status": "verified",
+        }
+    ]
+    payload["extracted_evidence"] = [
+        {
+            "evidence_id": "evidence:hanli",
+            "source_range": [0, 2],
+            "source_locator": "mini_novel.txt#char=0-2",
+            "chunk_id": "chunk-0001",
+            "fact_summary": "韩立出现",
+            "supports_templates": [
+                {"template_name": "法宝分析", "requirement_id": "r1", "status": "covered"}
+            ],
+            "confidence": "EXTRACTED",
+            "verification_status": "verified",
+        }
+    ]
+    second.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    ingest = ingest_stage1(graph_dir=graph_dir, config=config)
+    merge = merge_stage1(graph_dir=graph_dir, config=config)
+
+    assert ingest["status"] == "ingested"
+    assert merge["status"] == "success"
+    graph = json.loads((graph_dir / "graphify-out" / "graph.json").read_text(encoding="utf-8"))
+    assert graph["nodes"][0]["provenance"]["lane_output_paths"] == [
+        "intermediate/lane-outputs/chunk-0001/entities_resources/run-002.json"
+    ]
 
 
 def test_build_stage1_cli_returns_pending_when_agent_outputs_missing(

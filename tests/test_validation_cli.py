@@ -1904,6 +1904,52 @@ def test_validate_graph_dir_requires_agent_driven_artifacts(tmp_path):
     assert "canonical_graph_without_agent_provenance" in result.errors
 
 
+def test_validate_graph_dir_allows_post_merge_incremental_without_review_findings(tmp_path):
+    from storygraph_lib.validation import validate_graph_dir
+
+    graph_dir = tmp_path / "mini.storygraph"
+    agent_ledger = [
+        record
+        for record in _agent_driven_success_ledger()
+        if record["agent_role"] not in {"覆盖审查", "质量审查"}
+    ]
+    _write_agent_driven_success_graph_dir(
+        graph_dir,
+        manifest={
+            "schema_version": "storygraph.manifest.v1",
+            "stage1_mode": "agent-driven",
+            "stage1_agent_schema_version": "stage1-agent-driven.v1",
+            "canonical_writer_version": "1.0",
+        },
+        agent_ledger=agent_ledger,
+        write_lane_output=True,
+    )
+    (graph_dir / "coverage" / "review-findings.json").unlink()
+    (graph_dir / "coverage" / "quality-review.json").unlink()
+    graph_path = graph_dir / "graphify-out" / "graph.json"
+    graph = json.loads(graph_path.read_text(encoding="utf-8"))
+    graph["metadata"].update(
+        {
+            "review_policy_mode": "post_merge_incremental",
+            "review_status": "unreviewed_usable",
+            "unreviewed_bundle_count": 1,
+        }
+    )
+    graph_path.write_text(json.dumps(graph, ensure_ascii=False), encoding="utf-8")
+    queue_path = graph_dir / "intermediate" / "merge-queue.json"
+    queue = json.loads(queue_path.read_text(encoding="utf-8"))
+    queue["review_policy_mode"] = "post_merge_incremental"
+    queue["review_state_summary"] = {"unreviewed_usable": 1}
+    queue_path.write_text(json.dumps(queue, ensure_ascii=False), encoding="utf-8")
+
+    result = validate_graph_dir(graph_dir)
+
+    assert result.ok is True
+    assert result.errors == []
+    assert result.review_status == "unreviewed_usable"
+    assert "review_not_performed" in result.warnings
+
+
 def test_validate_graph_dir_rejects_corrupt_agent_driven_artifacts(tmp_path):
     from storygraph_lib.validation import validate_graph_dir
 

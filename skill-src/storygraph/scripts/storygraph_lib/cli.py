@@ -328,7 +328,14 @@ def main(argv=None):
         return 0 if result.get("status") == "success" else 2
     if args.command == "validate-graph":
         result = validate_graph_dir(Path(args.graph_dir))
-        _print_json({"ok": result.ok, "errors": result.errors})
+        _print_json(
+            {
+                "ok": result.ok,
+                "errors": result.errors,
+                "warnings": result.warnings,
+                "review_status": result.review_status,
+            }
+        )
         return 0 if result.ok else 2
     _print_json({"ok": False, "error": "cli_argument_error", "missing": ["command"]})
     return 2

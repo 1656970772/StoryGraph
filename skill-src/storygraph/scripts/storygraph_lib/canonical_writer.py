@@ -44,6 +44,8 @@ def build_canonical_graph_from_bundles(
         errors.append("novel_name_not_string")
 
     allowed_reviewer_statuses = _allowed_reviewer_statuses(status_enums)
+    allowed_merge_gate_statuses = _allowed_merge_gate_statuses(status_enums)
+    review_state_counts: dict[str, int] = {}
 
     if not isinstance(bundles, list):
         errors.append("bundles_not_list")
@@ -62,9 +64,16 @@ def build_canonical_graph_from_bundles(
         chunk_id = _chunk_id(bundle, bundle_index, errors)
         lane_output_paths = _lane_output_paths(bundle, chunk_id, errors)
 
-        if not _is_reviewed_bundle(bundle, allowed_reviewer_statuses):
-            errors.append(f"bundle_not_reviewed:{chunk_id}")
+        merge_gate_status = _merge_gate_status(
+            bundle,
+            allowed_reviewer_statuses=allowed_reviewer_statuses,
+            allowed_merge_gate_statuses=allowed_merge_gate_statuses,
+        )
+        if merge_gate_status is None:
+            code = "bundle_not_merge_gated" if allowed_merge_gate_statuses is not None else "bundle_not_reviewed"
+            errors.append(f"{code}:{chunk_id}")
             continue
+        review_state_counts[merge_gate_status] = review_state_counts.get(merge_gate_status, 0) + 1
 
         for source_field, graph_field, owner in NORMALIZED_COLLECTIONS:
             normalized_items = _normalized_items(bundle, source_field, owner, chunk_id, errors)
@@ -86,6 +95,11 @@ def build_canonical_graph_from_bundles(
     for key in GRAPH_COLLECTION_FIELDS:
         graph[key] = indexes[key].items()
     graph["metadata"]["conflicts"] = conflicts
+    if review_state_counts:
+        graph["metadata"]["review_status"] = _graph_review_status(review_state_counts)
+        graph["metadata"]["unreviewed_bundle_count"] = review_state_counts.get(
+            "unreviewed_usable", 0
+        )
 
     validation = validate_canonical_graph(graph, status_enums)
     errors.extend(validation.errors)
@@ -183,6 +197,18 @@ def _allowed_reviewer_statuses(status_enums: Any) -> set[str]:
     return allowed or set(DEFAULT_REVIEWER_STATUSES)
 
 
+def _allowed_merge_gate_statuses(status_enums: Any) -> set[str] | None:
+    if not isinstance(status_enums, dict):
+        return None
+    values = status_enums.get("bundle_review_statuses")
+    if values is None:
+        return None
+    if not isinstance(values, list):
+        return None
+    allowed = {value for value in values if isinstance(value, str) and value}
+    return allowed or None
+
+
 def _chunk_id(bundle: dict[str, Any], bundle_index: int, errors: list[str]) -> str:
     value = bundle.get("chunk_id")
     if isinstance(value, str) and value:
@@ -201,11 +227,33 @@ def _lane_output_paths(bundle: dict[str, Any], chunk_id: str, errors: list[str])
     )
 
 
-def _is_reviewed_bundle(bundle: dict[str, Any], allowed_reviewer_statuses: set[str]) -> bool:
+def _merge_gate_status(
+    bundle: dict[str, Any],
+    *,
+    allowed_reviewer_statuses: set[str],
+    allowed_merge_gate_statuses: set[str] | None,
+) -> str | None:
+    if bundle.get("ready_for_merge") is not True:
+        return None
+    if allowed_merge_gate_statuses is not None:
+        status = bundle.get("merge_gate_status")
+        if isinstance(status, str) and status in allowed_merge_gate_statuses:
+            return status
+        return None
     reviewer_status = bundle.get("reviewer_status")
-    return bundle.get("ready_for_merge") is True and (
-        isinstance(reviewer_status, str) and reviewer_status in allowed_reviewer_statuses
-    )
+    if isinstance(reviewer_status, str) and reviewer_status in allowed_reviewer_statuses:
+        return "reviewed_passed"
+    return None
+
+
+def _graph_review_status(review_state_counts: dict[str, int]) -> str:
+    if review_state_counts.get("needs_incremental_review"):
+        return "needs_incremental_review"
+    if review_state_counts.get("review_failed"):
+        return "needs_incremental_review"
+    if review_state_counts.get("unreviewed_usable"):
+        return "unreviewed_usable"
+    return "reviewed"
 
 
 def _normalized_items(

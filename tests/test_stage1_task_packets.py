@@ -60,6 +60,49 @@ def test_prepare_task_packets_writes_one_packet_per_required_lane(tmp_path):
     )
 
 
+def test_comprehensive_task_packet_declares_full_stage1_output_contract():
+    from storygraph_lib.stage1_packets import build_task_packets
+
+    packets = build_task_packets(
+        source_path="book.txt",
+        chunks=[{"chunk_id": "chunk-0001", "source_range": [0, 10]}],
+        lanes=[
+            {
+                "lane_id": "comprehensive_extraction",
+                "required": True,
+                "agent_role": "comprehensive-stage1-extraction-agent",
+                "schema": "lane-output.schema.json",
+                "extraction_scope": [
+                    "nodes",
+                    "edges",
+                    "events",
+                    "evidence",
+                    "supports_templates",
+                    "uncertainties",
+                    "rejected_candidates",
+                    "structured_failures",
+                ],
+            }
+        ],
+        template_requirements_path="requirements/template-requirements.json",
+        task_packet_dir="intermediate/task-packets",
+    )
+
+    assert packets[0]["stage1_output_contract"] == {
+        "required_collections": [
+            "extracted_nodes",
+            "extracted_edges",
+            "extracted_events",
+            "extracted_evidence",
+            "supports_templates",
+            "uncertainties",
+            "rejected_candidates",
+            "structured_failures",
+        ],
+        "summary": "single-pass comprehensive Stage 1 extraction for the assigned chunk",
+    }
+
+
 def test_build_task_packets_copies_required_evidence_policy_per_packet():
     from storygraph_lib.stage1_packets import build_task_packets
 

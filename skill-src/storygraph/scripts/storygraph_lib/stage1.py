@@ -308,7 +308,9 @@ def ingest_stage1(*, graph_dir: str | Path, config: dict) -> dict:
             bundle,
             lane_payloads,
             output_paths,
-            reviewer_status="passed",
+            reviewer_status="passed" if _require_review_before_merge(config) else None,
+            review_state=_bundle_review_state(config, reviewed=_require_review_before_merge(config)),
+            review_policy_mode=_review_policy_mode(config),
         )
         bundle_path = _join_artifact(
             artifacts["reviewed_bundle_dir"],
@@ -338,6 +340,10 @@ def ingest_stage1(*, graph_dir: str | Path, config: dict) -> dict:
             "status": "ready",
             "bundle_paths": bundle_paths,
             "required_lane_ids": required_lane_ids,
+            "review_policy_mode": _review_policy_mode(config),
+            "review_state_summary": _review_state_summary_from_paths(
+                graph_root, bundle_paths
+            ),
         },
     )
     return _stage_result(
@@ -530,7 +536,7 @@ def merge_stage1(*, graph_dir: str | Path, config: dict) -> dict:
     result = build_canonical_graph_from_bundles(
         bundles,
         novel_name=novel_name,
-        status_enums=config.get("status_enums"),
+        status_enums=_status_enums_for_merge(config),
         source_bundle_paths=bundle_paths,
     )
     if not result.ok:
@@ -543,6 +549,13 @@ def merge_stage1(*, graph_dir: str | Path, config: dict) -> dict:
 
     writer = OutputWriter(graph_root, _managed_outputs(config))
     canonical_graph = _graph_with_graphify_metadata(result.graph, config)
+    metadata = canonical_graph.setdefault("metadata", {})
+    if isinstance(metadata, dict):
+        metadata["review_policy_mode"] = _review_policy_mode(config)
+        metadata.setdefault(
+            "incremental_review_queue_path",
+            _artifact_paths(config)["review_findings"],
+        )
     writer.write_json(artifacts["canonical_graph"], canonical_graph)
     graphify_warnings: list[str] = []
     result_status = "success"
@@ -865,38 +878,43 @@ def _build_agent_dispatch_plan(
 ) -> dict:
     template_batches = _template_execution_batches(template_requirements_packets)
     lane_batches = _lane_execution_batches(lane_packets, artifacts, config)
-    return {
-        "schema_version": "storygraph.agent-dispatch.v1",
-        "stage": "stage1",
-        "max_parallel": _agent_max_parallel(config),
-        "phases": [
-            {
-                "phase": "template_requirements",
-                "next_action": "dispatch_template_requirements_agents",
-                "task_packets": [
-                    _dispatch_task_packet(packet) for packet in template_requirements_packets
-                ],
-                "execution_batches": template_batches,
-                "wait_for_outputs": [
-                    packet["output_path"] for packet in template_requirements_packets
-                ],
-            },
-            {
-                "phase": "lane_extraction",
-                "next_action": "dispatch_lane_agents",
-                "task_packets": [
-                    _dispatch_task_packet(packet) for packet in lane_packets
-                ],
-                "execution_batches": lane_batches,
-                "wait_for_outputs_root": artifacts["lane_output_dir"],
-            },
+    phases = [
+        {
+            "phase": "template_requirements",
+            "next_action": "dispatch_template_requirements_agents",
+            "task_packets": [
+                _dispatch_task_packet(packet) for packet in template_requirements_packets
+            ],
+            "execution_batches": template_batches,
+            "wait_for_outputs": [
+                packet["output_path"] for packet in template_requirements_packets
+            ],
+        },
+        {
+            "phase": "lane_extraction",
+            "next_action": "dispatch_lane_agents",
+            "task_packets": [
+                _dispatch_task_packet(packet) for packet in lane_packets
+            ],
+            "execution_batches": lane_batches,
+            "wait_for_outputs_root": artifacts["lane_output_dir"],
+        },
+    ]
+    if _require_review_before_merge(config):
+        phases.append(
             {
                 "phase": "review",
                 "next_action": "dispatch_reviewer_agents",
                 "review_findings_path": artifacts["review_findings"],
                 "wait_for_outputs": [artifacts["review_findings"]],
-            },
-        ],
+            }
+        )
+    return {
+        "schema_version": "storygraph.agent-dispatch.v1",
+        "stage": "stage1",
+        "max_parallel": _agent_max_parallel(config),
+        "review_policy_mode": _review_policy_mode(config),
+        "phases": phases,
     }
 
 
@@ -1474,7 +1492,7 @@ def _read_lane_outputs(graph_dir: Path, config: dict) -> tuple[dict[str, list[di
     allowed_lane_ids = set(_lane_ids(_configured_lanes(config)))
     allowed_statuses = _lane_output_statuses(config)
     chunk_ranges = _chunk_ranges(graph_dir)
-    outputs: dict[str, list[dict]] = {}
+    latest_by_lane: dict[tuple[str, str], dict] = {}
     errors: list[str] = []
     for path in sorted(root.glob("*/*/*.json")):
         payload, error = _read_json_artifact(
@@ -1497,9 +1515,14 @@ def _read_lane_outputs(graph_dir: Path, config: dict) -> tuple[dict[str, list[di
         if not validation.ok:
             errors.extend(validation.errors)
             continue
-        outputs.setdefault(payload["chunk_id"], []).append(
-            {"payload": payload, "relative_path": relative_path}
-        )
+        key = (payload["chunk_id"], payload["lane_id"])
+        record = {"payload": payload, "relative_path": relative_path}
+        existing = latest_by_lane.get(key)
+        if existing is None or relative_path > existing["relative_path"]:
+            latest_by_lane[key] = record
+    outputs: dict[str, list[dict]] = {}
+    for (chunk_id, _lane_id), record in sorted(latest_by_lane.items()):
+        outputs.setdefault(chunk_id, []).append(record)
     return outputs, _dedupe(errors)
 
 
@@ -1632,11 +1655,19 @@ def _reviewed_bundle(
     lane_outputs: list[dict],
     lane_output_paths: list[str],
     *,
-    reviewer_status: str,
+    reviewer_status: str | None,
+    review_state: str,
+    review_policy_mode: str,
 ) -> dict:
     reviewed = dict(bundle)
     reviewed["ready_for_merge"] = True
-    reviewed["reviewer_status"] = reviewer_status
+    if reviewer_status is not None:
+        reviewed["reviewer_status"] = reviewer_status
+    else:
+        reviewed.pop("reviewer_status", None)
+    reviewed["merge_gate_status"] = review_state
+    reviewed["review_state"] = review_state
+    reviewed["review_policy_mode"] = review_policy_mode
     reviewed["lane_output_paths"] = lane_output_paths
     reviewed["normalized_nodes"] = _flatten_lane_items(lane_outputs, "extracted_nodes")
     reviewed["normalized_edges"] = _flatten_lane_items(lane_outputs, "extracted_edges")
@@ -1844,8 +1875,72 @@ def _accepted_review_statuses(config: dict) -> set[str]:
 def _require_review_before_merge(config: dict) -> bool:
     review_policy = config.get("review_policy", {})
     if isinstance(review_policy, dict):
+        mode = review_policy.get("mode")
+        if mode == "pre_merge_required":
+            return True
+        if mode in {"post_merge_incremental", "disabled"}:
+            return False
         return bool(review_policy.get("require_review_before_canonical_merge", True))
     return True
+
+
+def _review_policy_mode(config: dict) -> str:
+    review_policy = config.get("review_policy", {})
+    if isinstance(review_policy, dict):
+        mode = review_policy.get("mode")
+        if mode in {"pre_merge_required", "post_merge_incremental", "disabled"}:
+            return mode
+        if review_policy.get("require_review_before_canonical_merge") is False:
+            return "post_merge_incremental"
+    return "pre_merge_required"
+
+
+def _bundle_review_state(config: dict, *, reviewed: bool) -> str:
+    if reviewed:
+        return "reviewed_passed"
+    review_policy = config.get("review_policy", {})
+    if isinstance(review_policy, dict):
+        status = review_policy.get("unreviewed_merge_status")
+        if isinstance(status, str) and status:
+            return status
+    return "unreviewed_usable"
+
+
+def _review_state_summary_from_paths(graph_root: Path, bundle_paths: list[str]) -> dict[str, int]:
+    summary: dict[str, int] = {}
+    for relative_path in bundle_paths:
+        payload, error = _read_json_artifact(
+            _artifact_path(graph_root, relative_path),
+            missing_code="reviewed_bundle_missing",
+            bad_code="reviewed_bundle_invalid",
+        )
+        if error or not isinstance(payload, dict):
+            continue
+        state = payload.get("review_state") or payload.get("merge_gate_status")
+        if not isinstance(state, str) or not state:
+            state = "unknown"
+        summary[state] = summary.get(state, 0) + 1
+    return summary
+
+
+def _status_enums_for_merge(config: dict) -> dict:
+    status_enums = dict(config.get("status_enums", {}))
+    if _require_review_before_merge(config):
+        return status_enums
+    status_enums.setdefault(
+        "bundle_review_statuses",
+        [
+            "reviewed_passed",
+            "unreviewed_usable",
+            "needs_incremental_review",
+            "review_failed",
+        ],
+    )
+    status_enums.setdefault(
+        "graph_review_statuses",
+        ["reviewed", "unreviewed_usable", "needs_incremental_review"],
+    )
+    return status_enums
 
 
 def _canonical_validation_errors(errors: list[str]) -> list[str]:

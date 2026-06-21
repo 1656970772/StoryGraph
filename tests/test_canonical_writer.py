@@ -59,6 +59,56 @@ def test_canonical_writer_defaults_to_passed_only_for_default_reviewer_status_en
     assert result.errors == []
 
 
+def test_canonical_writer_accepts_configured_unreviewed_merge_gate_status():
+    from storygraph_lib.canonical_writer import build_canonical_graph_from_bundles
+
+    bundle = _reviewed_bundle(
+        reviewer_status=None,
+        merge_gate_status="unreviewed_usable",
+        review_state="unreviewed_usable",
+    )
+
+    result = build_canonical_graph_from_bundles(
+        [bundle],
+        novel_name="book",
+        status_enums={
+            "bundle_review_statuses": [
+                "reviewed_passed",
+                "unreviewed_usable",
+                "needs_incremental_review",
+                "review_failed",
+            ]
+        },
+    )
+
+    assert result.ok is True
+    assert result.errors == []
+    assert result.graph["metadata"]["review_status"] == "unreviewed_usable"
+    assert result.graph["metadata"]["unreviewed_bundle_count"] == 1
+
+
+def test_canonical_writer_rejects_passed_reviewer_status_without_merge_gate():
+    from storygraph_lib.canonical_writer import build_canonical_graph_from_bundles
+
+    bundle = _reviewed_bundle()
+
+    result = build_canonical_graph_from_bundles(
+        [bundle],
+        novel_name="book",
+        status_enums={
+            "bundle_review_statuses": [
+                "reviewed_passed",
+                "unreviewed_usable",
+                "needs_incremental_review",
+                "review_failed",
+            ]
+        },
+    )
+
+    assert result.ok is False
+    assert result.errors == ["bundle_not_merge_gated:chunk-0001"]
+
+
 def test_canonical_writer_preserves_agent_output_provenance():
     from storygraph_lib.canonical_writer import build_canonical_graph_from_bundles
 

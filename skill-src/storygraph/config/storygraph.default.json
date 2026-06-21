@@ -49,6 +49,8 @@
     "reviewer_statuses": ["pending", "passed", "failed", "blocked"],
     "finding_statuses": ["open", "closed", "waived"],
     "finding_severities": ["must_fix", "should_fix", "note"],
+    "bundle_review_statuses": ["reviewed_passed", "unreviewed_usable", "needs_incremental_review", "review_failed"],
+    "graph_review_statuses": ["reviewed", "unreviewed_usable", "needs_incremental_review"],
     "structured_failure_statuses": ["blocking", "rebuild_required", "degraded", "not_applicable"]
   },
   "template_count_policy": {
@@ -75,25 +77,21 @@
   },
   "element_lanes": [
     {
-      "lane_id": "characters",
-      "agent_role": "character-element-agent",
+      "lane_id": "comprehensive_extraction",
+      "agent_role": "comprehensive-stage1-extraction-agent",
       "required": true,
       "schema": "lane-output.schema.json",
-      "status_enum_ref": "status_enums.lane_output_statuses"
-    },
-    {
-      "lane_id": "events",
-      "agent_role": "event-element-agent",
-      "required": true,
-      "schema": "lane-output.schema.json",
-      "status_enum_ref": "status_enums.lane_output_statuses"
-    },
-    {
-      "lane_id": "relations",
-      "agent_role": "relation-element-agent",
-      "required": true,
-      "schema": "lane-output.schema.json",
-      "status_enum_ref": "status_enums.lane_output_statuses"
+      "status_enum_ref": "status_enums.lane_output_statuses",
+      "extraction_scope": [
+        "nodes",
+        "edges",
+        "events",
+        "evidence",
+        "supports_templates",
+        "uncertainties",
+        "rejected_candidates",
+        "structured_failures"
+      ]
     }
   ],
   "agent_orchestration": {
@@ -107,7 +105,12 @@
     "merge_queue_artifact": "intermediate/merge-queue.json"
   },
   "review_policy": {
-    "require_review_before_canonical_merge": true,
+    "mode": "post_merge_incremental",
+    "allowed_modes": ["pre_merge_required", "post_merge_incremental", "disabled"],
+    "require_review_before_canonical_merge": false,
+    "merge_unreviewed_completed_outputs": true,
+    "unreviewed_merge_status": "unreviewed_usable",
+    "incremental_review_status": "needs_incremental_review",
     "reviewers": [
       {
         "reviewer_id": "contract-reviewer",
@@ -121,7 +124,13 @@
       }
     ],
     "finding_status_enum_ref": "status_enums.finding_statuses",
-    "finding_severity_enum_ref": "status_enums.finding_severities"
+    "finding_severity_enum_ref": "status_enums.finding_severities",
+    "incremental_review_triggers": [
+      "open_must_fix_finding",
+      "canonical_conflict",
+      "lane_uncertainty",
+      "template_requirement_needs_review"
+    ]
   },
   "retry_repair_policy": {
     "max_repair_attempts": 1,

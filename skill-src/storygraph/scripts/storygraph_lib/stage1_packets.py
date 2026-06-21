@@ -75,6 +75,8 @@ def build_task_packets(
                 "required_evidence_policy": copy.deepcopy(evidence_policy),
                 "attempt": attempt,
             }
+            if _is_comprehensive_lane(lane):
+                packet["stage1_output_contract"] = _comprehensive_output_contract()
             packet_path = lane.get("task_packet_path")
             if packet_path is None:
                 packet_path = lane.get("packet_path")
@@ -86,6 +88,35 @@ def build_task_packets(
                 )
             packets.append(packet)
     return packets
+
+
+def _is_comprehensive_lane(lane: dict) -> bool:
+    if lane.get("lane_id") == "comprehensive_extraction":
+        return True
+    scope = lane.get("extraction_scope")
+    return isinstance(scope, list) and {
+        "nodes",
+        "edges",
+        "events",
+        "evidence",
+        "supports_templates",
+    }.issubset({item for item in scope if isinstance(item, str)})
+
+
+def _comprehensive_output_contract() -> dict:
+    return {
+        "required_collections": [
+            "extracted_nodes",
+            "extracted_edges",
+            "extracted_events",
+            "extracted_evidence",
+            "supports_templates",
+            "uncertainties",
+            "rejected_candidates",
+            "structured_failures",
+        ],
+        "summary": "single-pass comprehensive Stage 1 extraction for the assigned chunk",
+    }
 
 
 def build_template_requirements_task_packet(

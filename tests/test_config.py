@@ -108,12 +108,32 @@ def test_stage1_agent_driven_config_contains_lanes_review_and_writer_policy(defa
     assert default_config["template_requirements_strategy"]["schema"]
     assert default_config["template_requirements_strategy"]["templates_per_packet"] == 5
     assert default_config["canonical_graph_writer"]["semantic_generation"] == "disabled"
-    assert default_config["element_lanes"]
+    assert default_config["element_lanes"] == [
+        {
+            "lane_id": "comprehensive_extraction",
+            "agent_role": "comprehensive-stage1-extraction-agent",
+            "required": True,
+            "schema": "lane-output.schema.json",
+            "status_enum_ref": "status_enums.lane_output_statuses",
+            "extraction_scope": [
+                "nodes",
+                "edges",
+                "events",
+                "evidence",
+                "supports_templates",
+                "uncertainties",
+                "rejected_candidates",
+                "structured_failures",
+            ],
+        }
+    ]
     assert all(
         "lane_id" in lane and "agent_role" in lane and "required" in lane and "schema" in lane
         for lane in default_config["element_lanes"]
     )
-    assert default_config["review_policy"]["require_review_before_canonical_merge"] is True
+    assert default_config["review_policy"]["mode"] == "post_merge_incremental"
+    assert default_config["review_policy"]["require_review_before_canonical_merge"] is False
+    assert default_config["review_policy"]["unreviewed_merge_status"] == "unreviewed_usable"
     assert default_config["agent_orchestration"]["lane_batch_strategy"] == (
         "by-lane-contiguous-chunks"
     )
@@ -214,6 +234,15 @@ def test_stage1_config_covers_graphify_adapter_and_status_enums(default_config):
     assert {"pending", "passed", "failed", "blocked"}.issubset(enums["reviewer_statuses"])
     assert {"open", "closed", "waived"}.issubset(enums["finding_statuses"])
     assert {"must_fix", "should_fix", "note"}.issubset(enums["finding_severities"])
+    assert {
+        "reviewed_passed",
+        "unreviewed_usable",
+        "needs_incremental_review",
+        "review_failed",
+    }.issubset(enums["bundle_review_statuses"])
+    assert {"reviewed", "unreviewed_usable", "needs_incremental_review"}.issubset(
+        enums["graph_review_statuses"]
+    )
     assert {"blocking", "rebuild_required", "degraded", "not_applicable"}.issubset(enums["structured_failure_statuses"])
 
 
