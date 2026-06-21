@@ -1255,6 +1255,43 @@ def test_validate_graph_dir_uses_dynamic_template_readiness_count(tmp_path):
     assert not any(error.startswith("template_readiness_count_not_") for error in result.errors)
 
 
+def test_validate_graph_dir_accepts_refined_requirements_summary_for_readiness(tmp_path):
+    from storygraph_lib.validation import validate_graph_dir
+
+    graph_dir = tmp_path / "mini.storygraph"
+    requirements = {
+        "schema_version": "storygraph.template-requirements-summary.v1",
+        "source_template_count": 1,
+        "summary_passes": 3,
+        "categories": [
+            {
+                "category_id": "general",
+                "category_name": "通用抽取要求",
+                "purpose": "归纳所有模板的共同抽取目标。",
+                "required_extraction_targets": ["法宝"],
+                "evidence_requirements": ["原文位置"],
+                "graph_mapping_summary": {"nodes": ["artifact"]},
+                "template_coverage": ["法宝分析"],
+            }
+        ],
+        "global_rules": {
+            "requirement_statuses": ["covered", "needs_review", "not_found_in_source"]
+        },
+        "refinement_notes": ["pass 3"],
+        "source_coverage": {
+            "template_names": ["法宝分析"],
+            "covered_template_count": 1,
+        },
+    }
+    _write_minimal_valid_graph_dir(graph_dir, requirements=requirements)
+
+    result = validate_graph_dir(graph_dir)
+
+    assert "requirements_templates_not_list" not in result.errors
+    assert "requirements_readiness_template_mismatch" not in result.errors
+    assert "requirements_readiness_count_mismatch" not in result.errors
+
+
 def test_validate_graph_dir_rejects_duplicate_readiness_template_names(tmp_path):
     from storygraph_lib.validation import validate_graph_dir
 
@@ -2229,8 +2266,10 @@ def test_cli_ingest_template_requirements_only_requires_requirement_parts(
 
     payload = json.loads(capsys.readouterr().out)
     assert code == 0
-    assert payload["status"] == "requirements_ingested"
-    assert (graph_dir / "requirements" / "template-requirements.json").exists()
+    assert payload["status"] == "requirements_refinement_pending"
+    assert payload["next_action"] == "dispatch_template_requirements_refinement_agents"
+    assert (graph_dir / "intermediate" / "template-requirements-raw.json").exists()
+    assert not (graph_dir / "requirements" / "template-requirements.json").exists()
     assert not (graph_dir / "intermediate" / "merge-queue.json").exists()
 
 
@@ -2334,7 +2373,10 @@ def test_cli_claim_agent_batches_returns_structured_error_for_unsafe_expected_ou
 
     dispatch_path = graph_dir / "intermediate" / "agent-dispatch-plan.json"
     dispatch = json.loads(dispatch_path.read_text(encoding="utf-8"))
-    batch = dispatch["phases"][1]["execution_batches"][0]
+    lane_phase = next(
+        phase for phase in dispatch["phases"] if phase["phase"] == "lane_extraction"
+    )
+    batch = lane_phase["execution_batches"][0]
     batch["expected_output_paths"] = ["../escape.json"]
     batch["write_scope"] = ["../escape.json"]
     dispatch_path.write_text(json.dumps(dispatch, ensure_ascii=False), encoding="utf-8")

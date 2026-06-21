@@ -16,6 +16,7 @@ _REQUIRED_LIST_FIELDS = (
 )
 
 _REQUIRED_TEMPLATE_FIELDS = ("template_name", "template_file", *_REQUIRED_LIST_FIELDS, "coverage_rules")
+_SUMMARY_SCHEMA_VERSION = "storygraph.template-requirements-summary.v1"
 
 
 @dataclass(frozen=True)
@@ -108,6 +109,152 @@ def validate_template_requirements_payload(
         errors.append("template_requirements_template_names_mismatch")
 
     return TemplateRequirementsValidationResult(ok=not errors, errors=errors)
+
+
+def validate_template_requirements_summary_payload(
+    payload: Any,
+    expected_template_names: list[str] | tuple[str, ...] | None = None,
+) -> TemplateRequirementsValidationResult:
+    errors: list[str] = []
+    if not isinstance(payload, dict):
+        return TemplateRequirementsValidationResult(
+            ok=False, errors=["template_requirements_summary_payload_not_object"]
+        )
+
+    if payload.get("schema_version") != _SUMMARY_SCHEMA_VERSION:
+        errors.append("template_requirements_summary_schema_version_invalid")
+    if payload.get("summary_passes") != 3:
+        errors.append("template_requirements_summary_passes_invalid")
+
+    source_template_count = payload.get("source_template_count")
+    if type(source_template_count) is not int or source_template_count < 0:
+        errors.append("template_requirements_summary_source_template_count_invalid")
+
+    categories = payload.get("categories")
+    covered_names: list[str] = []
+    if not isinstance(categories, list) or not categories:
+        errors.append("template_requirements_summary_categories_invalid")
+    else:
+        seen_categories: set[str] = set()
+        for index, category in enumerate(categories):
+            if not isinstance(category, dict):
+                errors.append(f"template_requirements_summary_category_not_object:{index}")
+                continue
+            category_id = category.get("category_id")
+            name = category_id if isinstance(category_id, str) and category_id else f"index_{index}"
+            if not isinstance(category_id, str) or not category_id:
+                errors.append(f"template_requirements_summary_category_id_invalid:{index}")
+            elif category_id in seen_categories:
+                errors.append(f"template_requirements_summary_duplicate_category:{category_id}")
+            else:
+                seen_categories.add(category_id)
+            for field in (
+                "category_name",
+                "purpose",
+                "required_extraction_targets",
+                "evidence_requirements",
+                "graph_mapping_summary",
+                "template_coverage",
+            ):
+                if field not in category:
+                    errors.append(f"template_requirements_summary_missing_field:{name}:{field}")
+            _extend_string_list_errors(
+                category.get("required_extraction_targets"),
+                f"template_requirements_summary_targets_invalid:{name}",
+                errors,
+            )
+            _extend_string_list_errors(
+                category.get("evidence_requirements"),
+                f"template_requirements_summary_evidence_invalid:{name}",
+                errors,
+            )
+            mapping = category.get("graph_mapping_summary")
+            if not isinstance(mapping, dict):
+                errors.append(f"template_requirements_summary_mapping_invalid:{name}")
+            coverage = category.get("template_coverage")
+            if not isinstance(coverage, list):
+                errors.append(f"template_requirements_summary_template_coverage_invalid:{name}")
+            else:
+                for item in coverage:
+                    if isinstance(item, str) and item:
+                        covered_names.append(item)
+                    else:
+                        errors.append(
+                            f"template_requirements_summary_template_coverage_item_invalid:{name}"
+                        )
+
+    global_rules = payload.get("global_rules")
+    if not isinstance(global_rules, dict):
+        errors.append("template_requirements_summary_global_rules_invalid")
+    else:
+        statuses = global_rules.get("requirement_statuses")
+        _extend_string_list_errors(
+            statuses,
+            "template_requirements_summary_requirement_statuses_invalid",
+            errors,
+        )
+
+    _extend_string_list_errors(
+        payload.get("refinement_notes"),
+        "template_requirements_summary_refinement_notes_invalid",
+        errors,
+    )
+
+    source_coverage = payload.get("source_coverage")
+    source_names: list[str] = []
+    if not isinstance(source_coverage, dict):
+        errors.append("template_requirements_summary_source_coverage_invalid")
+    else:
+        template_names = source_coverage.get("template_names")
+        if not isinstance(template_names, list):
+            errors.append("template_requirements_summary_source_template_names_invalid")
+        else:
+            for item in template_names:
+                if isinstance(item, str) and item:
+                    source_names.append(item)
+                else:
+                    errors.append(
+                        "template_requirements_summary_source_template_name_invalid"
+                    )
+        covered_count = source_coverage.get("covered_template_count")
+        if type(covered_count) is not int:
+            errors.append("template_requirements_summary_covered_template_count_invalid")
+        elif covered_count != len(set(source_names)):
+            errors.append("template_requirements_summary_covered_template_count_mismatch")
+
+    unique_covered = set(covered_names)
+    unique_source = set(source_names)
+    if unique_source and not unique_source.issubset(unique_covered):
+        errors.append("template_requirements_summary_category_coverage_mismatch")
+    if type(source_template_count) is int and source_template_count != len(unique_source):
+        errors.append("template_requirements_summary_source_template_count_mismatch")
+
+    if expected_template_names is not None:
+        expected = list(expected_template_names)
+        for expected_name in expected:
+            if expected_name not in unique_source or expected_name not in unique_covered:
+                errors.append(
+                    f"template_requirements_summary_missing_expected_template:{expected_name}"
+                )
+        for actual_name in unique_source:
+            if actual_name not in expected:
+                errors.append(
+                    f"template_requirements_summary_unexpected_template:{actual_name}"
+                )
+        if source_names != expected:
+            errors.append("template_requirements_summary_template_names_mismatch")
+
+    return TemplateRequirementsValidationResult(ok=not errors, errors=errors)
+
+
+def _extend_string_list_errors(value: Any, code: str, errors: list[str]) -> None:
+    if not isinstance(value, list):
+        errors.append(code)
+        return
+    for item in value:
+        if not isinstance(item, str):
+            errors.append(code)
+            return
 
 
 def _is_legacy_producer(value: str) -> bool:

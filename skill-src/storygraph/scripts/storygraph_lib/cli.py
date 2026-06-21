@@ -95,6 +95,7 @@ def _stage1_cli_ok(status: str | None) -> bool:
         "pending_agent_outputs",
         "ingested",
         "requirements_ingested",
+        "requirements_refinement_pending",
         "dispatch_ready",
         "pending_agent_batches",
         "agent_batches_claimed",
@@ -308,7 +309,10 @@ def main(argv=None):
             return error_code
         result = ingest_template_requirements(graph_dir=Path(args.graph_dir), config=config)
         _print_json(result)
-        return 0 if result.get("status") == "requirements_ingested" else 2
+        return 0 if result.get("status") in {
+            "requirements_ingested",
+            "requirements_refinement_pending",
+        } else 2
     if args.command == "inspect-dispatch":
         result = inspect_dispatch(graph_dir=Path(args.graph_dir))
         _print_json(result)

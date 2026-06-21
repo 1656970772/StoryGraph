@@ -30,12 +30,17 @@ def build_stage1_input_cache(
                 "template_requirements_strategy": config.get(
                     "template_requirements_strategy"
                 ),
+                "template_requirements_refinement": config.get(
+                    "template_requirements_refinement"
+                ),
                 "stage1_artifacts": _selected_artifacts(
                     config,
                     [
                         "requirements",
+                        "raw_template_requirements",
                         "task_packet_dir",
                         "template_requirements_part_dir",
+                        "template_requirements_refinement_dir",
                     ],
                 ),
             }
