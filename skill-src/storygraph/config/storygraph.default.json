@@ -191,7 +191,52 @@
   },
   "stage2_render_policy": {
     "citation_format": "[{evidence_id}]",
-    "include_unreviewed_warning": true
+    "draft_entry_policy": {
+      "source_sections": ["facts"],
+      "field_aliases": {
+        "name": ["name", "title", "item_name", "entity_name", "名称"],
+        "classification": ["classification", "type", "category_label", "类别", "分类"],
+        "usage": ["usage", "purpose", "effect", "effects", "用途", "功效"],
+        "formula": ["formula", "materials", "ingredients", "components", "recipe", "方方", "材料", "成分"],
+        "source_excerpt": ["source_excerpt", "original_excerpt", "quote", "原文摘录"],
+        "review_status": ["review_status", "verification_status", "审核状态"]
+      },
+      "fallback_name": "未命名条目",
+      "kept_fields": [
+        "name",
+        "classification",
+        "usage",
+        "formula",
+        "source_range",
+        "source_excerpt",
+        "evidence_ids",
+        "confidence",
+        "review_status"
+      ]
+    },
+    "final_entry_policy": {
+      "allowed_confidence": ["EXTRACTED"],
+      "min_evidence_count": 1,
+      "require_explicit_name": true,
+      "require_source_excerpt": true,
+      "required_any_fields": ["usage", "formula"],
+      "unstable_name_prefixes": ["未名", "未命名", "未知", "不明"],
+      "unstable_name_contains": ["某种", "某类"],
+      "composite_name_markers": ["与", "或", "/", "、"],
+      "review_only_statuses": ["needs_review", "pending_review", "rejected", "ambiguous"],
+      "allow_missing_review_status": true
+    },
+    "dedupe_policy": {
+      "key_fields": ["name", "classification"],
+      "merge_text_fields": ["usage", "formula", "source_excerpt"],
+      "confidence_strategy": "most_conservative",
+      "review_status_strategy": "review_only_wins"
+    },
+    "final_template_policy": {
+      "case_section_names": ["案例", "典型案例", "案例清单", "示例"],
+      "excluded_section_names": ["待复核", "缺口", "资料来源", "说明"],
+      "fallback_to_first_non_root_heading": true
+    }
   },
   "writer_policy": {
     "mode": "single-writer",

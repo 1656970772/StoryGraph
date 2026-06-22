@@ -25,8 +25,8 @@ graphify 只作为可选的可视化和查询适配层，输入必须是 StoryGr
 
 ## Stage 2 边界
 
-Stage 2 是 agent-driven 模板文档生成工具链。主 agent 先运行 `prepare-stage2`，按模板文档生成 `intermediate/stage2/task-packets/*.json`；每个 task packet 只对应一个模板、一个 Stage 2 agent、一个 `intermediate/stage2/extraction-records/<模板名>/run-001.json` 和一个输出文档。task packet 会携带该模板覆盖到的 template requirements summary category、相关 requirements 和 Stage 1 证据。Python 只负责 schema 校验、证据闭合、ledger、路径策略和 Markdown 渲染，不负责自动编写模板正文。
+Stage 2 是 agent-driven 模板文档生成工具链。主 agent 先运行 `prepare-stage2`，按模板文档生成 `intermediate/stage2/task-packets/*.json`；每个 task packet 只对应一个模板、一个 Stage 2 agent、一个 `intermediate/stage2/extraction-records/<模板名>/run-001.json` 和一个输出文档。task packet 会携带该模板覆盖到的 template requirements summary category、相关 requirements、原始模板 Markdown 路径、模板 hash、Stage 1 证据和 `stage2_render_policy`。Python 只负责 schema 校验、证据闭合、ledger、路径策略、审查草稿整理、正文准入过滤、去重归并和 Markdown 渲染；语义内容仍来自 Stage 2 agent 的结构化记录。
 
-默认输出策略仍是 draft-first。`render-stage2` 使用配置中的 `stage2_categories`、`stage2_output_policy`、`overwrite_policy` 和 `stage2_render_policy`，在 `draft` 策略下写入 graph draft 目录，不覆盖已有正式 Markdown 文档。显式 `backup-and-overwrite` 会先备份小说目录中的同名正式 Markdown，再用单模板 agent 产物整篇覆盖；`merge` 需要单独 merge contract 和复核流程。
+默认输出策略仍是 draft-first。`render-stage2` 使用配置中的 `stage2_categories`、`stage2_output_policy`、`overwrite_policy` 和 `stage2_render_policy`，在 `draft` 策略下只写审查型草稿条目：名称、分类、用途/材料、source range、原文摘录、证据、置信度和 review status；草稿不得渲染前置声明、资料来源说明、模板说明或 agent 预写的 `document_sections` 正文。显式 `backup-and-overwrite` 会先备份小说目录中的同名正式 Markdown，再只从 ledger 中的原始模板 Markdown 路径读取并校验模板 hash，然后按模板标题结构，基于草稿条目执行配置化正文准入、去重和保守归并后只输出正式案例；`merge` 需要单独 merge contract 和复核流程。未命名、组合性描述、低置信度、来源不足、用途/材料/成分不闭合或待复核状态的条目不得进入正式正文，只能留在草稿或待复核数据中。
 
 汇报 skill source ready 前必须运行 `scripts/storygraph.py validate-skill`。

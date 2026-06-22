@@ -8,7 +8,7 @@ import shutil
 
 from .output_writer import OutputWriteError, OutputWriter, normalize_relative_output_path
 from .stage2_evidence import evidence_by_id, evidence_id_set, evidence_ids_for_category
-from .stage2_render import render_template_draft
+from .stage2_render import render_template_draft, render_template_final
 from .stage2_schema import (
     TEMPLATE_EVIDENCE_USAGE,
     TEMPLATE_GAP_REPORT,
@@ -143,6 +143,7 @@ def prepare_stage2(
         packet["stage2_policy"] = {
             "stage2_categories": config.get("stage2_categories", {}),
             "stage2_output_policy": config.get("stage2_output_policy", {}),
+            "stage2_render_policy": config.get("stage2_render_policy", {}),
         }
         writer.write_json(f"{artifacts['task_packet_dir']}/{batch['batch_id']}.json", packet)
 
@@ -313,12 +314,24 @@ def render_stage2(graph_dir: str | Path, config: dict) -> dict:
                 "template_name": record["template_name"],
                 "target_path": decision["target_path"],
             }
-        text = render_template_draft(
-            record,
-            evidence_lookup,
-            config.get("stage2_render_policy", {}),
-            review_status=review_status,
-        )
+        if overwrite_policy == "backup-and-overwrite":
+            template_text = _read_stage2_template_markdown(task, record)
+            if template_text is None:
+                record_errors.append(f"{normalized_rel_path}:template_markdown_missing")
+                continue
+            text = render_template_final(
+                record,
+                evidence_lookup,
+                template_text,
+                config.get("stage2_render_policy", {}),
+            )
+        else:
+            text = render_template_draft(
+                record,
+                evidence_lookup,
+                config.get("stage2_render_policy", {}),
+                review_status=review_status,
+            )
         if overwrite_policy == "backup-and-overwrite":
             write_error = _write_formal_stage2_document(
                 graph_dir,
@@ -601,6 +614,8 @@ def _template_run_ledger(templates: list[dict], batches: list[dict]) -> dict:
             {
                 "template_name": template["template_name"],
                 "template_file": template["template_file"],
+                "template_path": template.get("template_path"),
+                "template_sha256": template.get("template_sha256"),
                 "status": "pending",
                 "batch_id": batch_by_template.get(template["template_name"]),
                 "output_record": None,
@@ -670,6 +685,24 @@ def _stage1_review_status(graph_dir: Path) -> str | None:
     if isinstance(metadata, dict):
         return metadata.get("review_status")
     return None
+
+
+def _read_stage2_template_markdown(task: dict, record: dict) -> str | None:
+    del record
+    template_path = task.get("template_path")
+    if not template_path:
+        return None
+    path = Path(template_path)
+    if not path.is_file():
+        return None
+    expected_sha256 = task.get("template_sha256")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    if expected_sha256 and sha256(text.encode("utf-8")).hexdigest() != expected_sha256:
+        return None
+    return text
 
 
 def _novel_dir(graph_dir: Path) -> Path:
