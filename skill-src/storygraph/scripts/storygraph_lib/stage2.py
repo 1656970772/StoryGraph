@@ -42,6 +42,7 @@ def prepare_stage2(
     config: dict,
     *,
     overwrite_policy: str | None = None,
+    selection: str | None = None,
 ) -> dict:
     graph_dir = Path(graph_dir)
     template_dir = Path(template_dir)
@@ -55,6 +56,13 @@ def prepare_stage2(
             "status": "failed",
             "error": "unsupported_stage2_grouping_strategy",
             "grouping_strategy": grouping_strategy,
+        }
+    resolved_selection = _stage2_selection(config, selection)
+    if resolved_selection not in {"all", "changed-or-missing"}:
+        return {
+            "status": "failed",
+            "error": "unsupported_stage2_selection",
+            "selection": resolved_selection,
         }
     requirements = _read_json(graph_dir / "requirements" / "template-requirements.json")
     stage1_cache = _read_json(graph_dir / "intermediate" / "stage1-input-cache.json")
@@ -75,6 +83,11 @@ def prepare_stage2(
     batches = []
     record_root = artifacts["extraction_record_dir"]
     covered_templates = []
+    previous_tasks = (
+        _previous_stage2_tasks(graph_dir)
+        if resolved_selection == "changed-or-missing"
+        else {}
+    )
     for template in templates:
         template_name = template["template_name"]
         template_categories = categories_by_template.get(template_name, [])
@@ -83,6 +96,14 @@ def prepare_stage2(
         category_ids = [category.get("category_id") for category in template_categories]
         category_ids = [category_id for category_id in category_ids if category_id]
         if not category_ids:
+            continue
+        if resolved_selection == "changed-or-missing" and not _template_needs_stage2_batch(
+            graph_dir,
+            template,
+            previous_tasks.get(template_name),
+            config,
+            overwrite_policy or config.get("overwrite_policy", "draft"),
+        ):
             continue
         covered_templates.append(template)
         expected_rel_paths = [f"{record_root}/{template_name}/run-001.json"]
@@ -157,6 +178,7 @@ def prepare_stage2(
         "batch_count": len(batches),
         "template_count": len(covered_templates),
         "overwrite_policy": overwrite_policy or config.get("overwrite_policy", "draft"),
+        "selection": resolved_selection,
     }
 
 
@@ -409,6 +431,88 @@ def _stage2_artifacts(config: dict) -> dict:
         key: normalize_relative_output_path(value)
         for key, value in artifacts.items()
     }
+
+
+def _stage2_selection(config: dict, selection: str | None) -> str:
+    if isinstance(selection, str) and selection:
+        return selection
+    policy = config.get("stage2_incremental_policy")
+    if isinstance(policy, dict):
+        configured = policy.get("selection")
+        if isinstance(configured, str) and configured:
+            return configured
+    return "all"
+
+
+def _previous_stage2_tasks(graph_dir: Path) -> dict[str, dict]:
+    ledger_path = graph_dir / TEMPLATE_RUN_LEDGER
+    if not ledger_path.exists():
+        return {}
+    try:
+        ledger = _read_json(ledger_path)
+    except (FileNotFoundError, Stage2ArtifactError):
+        return {}
+    tasks = ledger.get("template_tasks")
+    if not isinstance(tasks, list):
+        return {}
+    return {
+        task["template_name"]: task
+        for task in tasks
+        if isinstance(task, dict) and isinstance(task.get("template_name"), str)
+    }
+
+
+def _template_needs_stage2_batch(
+    graph_dir: Path,
+    template: dict,
+    previous_task: dict | None,
+    config: dict,
+    overwrite_policy: str,
+) -> bool:
+    if not isinstance(previous_task, dict):
+        return True
+    if previous_task.get("status") != "completed":
+        return True
+    if previous_task.get("template_sha256") != template.get("template_sha256"):
+        return True
+    output_record = previous_task.get("output_record")
+    if not isinstance(output_record, str) or not output_record:
+        return True
+    try:
+        _normalized, record_path = _resolve_graph_relative_path(
+            graph_dir,
+            output_record,
+            "output_record_path",
+        )
+    except Stage2ArtifactError:
+        return True
+    if not record_path.exists():
+        return True
+    if not _stage2_render_target_exists(
+        graph_dir,
+        template.get("template_name"),
+        config,
+        overwrite_policy,
+    ):
+        return True
+    return False
+
+
+def _stage2_render_target_exists(
+    graph_dir: Path,
+    template_name: object,
+    config: dict,
+    overwrite_policy: str,
+) -> bool:
+    if not isinstance(template_name, str) or not template_name:
+        return False
+    if overwrite_policy != "draft":
+        return False
+    output_policy = config.get("stage2_output_policy", {})
+    default_dir = output_policy.get("default_dir", "drafts")
+    if not isinstance(default_dir, str) or not default_dir:
+        return False
+    return (graph_dir / default_dir / f"{template_name}.md").exists()
 
 
 def _stage2_template_batch_id(index: int, template: dict) -> str:

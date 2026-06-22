@@ -136,7 +136,14 @@ def prepare_stage1(
         template_requirements_packets: list[dict] = []
         template_requirements_refinement_packets: list[dict] = []
         if template_decision["status"] != "reused":
-            _remove_extraction_flow_artifacts(ctx.graph_dir, artifacts)
+            _remove_extraction_artifacts_for_template_change(
+                ctx.graph_dir,
+                artifacts,
+                active_config,
+                template_decision,
+                discovery.templates,
+                source_flow_status=source_flow_status,
+            )
         if template_decision["status"] == "reused":
             _remove_template_requirements_work_artifacts(ctx.graph_dir, artifacts)
         else:
@@ -623,22 +630,34 @@ def claim_agent_batches(
 
     current_batch_ids = {batch["batch_id"] for batch in current_batches}
 
-    for batch in current_batches:
-        batch_id = batch["batch_id"]
-        record = state_batches.get(batch_id)
-        if not isinstance(record, dict):
-            continue
-        status = record.get("status")
-        outputs_exist = _batch_outputs_exist(graph_root, batch)
-        if status == "running" and outputs_exist:
-            state_batches[batch_id] = _dispatch_state_batch_record(
-                batch=batch,
-                status="completed",
-                now=now,
-                previous=record,
+    if phase == "template_requirements_refinement":
+        refinement_error = _refresh_template_refinement_state(
+            graph_root, current_batches, state_batches, now
+        )
+        if refinement_error:
+            return _failure_response(
+                graph_root,
+                refinement_error,
+                _manifest_exists(graph_root),
+                validation_errors=refinement_error["validation_errors"],
             )
-        elif status == "completed" and not outputs_exist:
-            del state_batches[batch_id]
+    else:
+        for batch in current_batches:
+            batch_id = batch["batch_id"]
+            record = state_batches.get(batch_id)
+            if not isinstance(record, dict):
+                continue
+            status = record.get("status")
+            outputs_exist = _batch_outputs_exist(graph_root, batch)
+            if status == "running" and outputs_exist:
+                state_batches[batch_id] = _dispatch_state_batch_record(
+                    batch=batch,
+                    status="completed",
+                    now=now,
+                    previous=record,
+                )
+            elif status == "completed" and not outputs_exist:
+                del state_batches[batch_id]
 
     running_ids = {
         batch_id
@@ -654,14 +673,17 @@ def claim_agent_batches(
         and isinstance(record, dict)
         and record.get("status") == "completed"
     }
-    pending = [
-        batch
-        for batch in current_batches
-        if batch["batch_id"] not in running_ids
-        and batch["batch_id"] not in completed_ids
-    ]
-    if phase == "template_requirements_refinement" and pending:
-        pending = pending[:1]
+    if phase == "template_requirements_refinement":
+        pending = _serial_template_refinement_pending(
+            current_batches, state_batches
+        )
+    else:
+        pending = [
+            batch
+            for batch in current_batches
+            if batch["batch_id"] not in running_ids
+            and batch["batch_id"] not in completed_ids
+        ]
     available_slots = _claim_available_slots(
         limit, len(running_ids), len(pending), dispatch.get("max_parallel")
     )
@@ -1320,6 +1342,150 @@ def _remove_extraction_flow_artifacts(graph_dir: Path, artifacts: dict[str, str]
         artifacts["canonical_graph"],
     ]:
         _remove_artifact_path(graph_dir, relative)
+
+
+def _remove_extraction_artifacts_for_template_change(
+    graph_dir: Path,
+    artifacts: dict[str, str],
+    config: dict,
+    template_decision: dict,
+    templates: list,
+    *,
+    source_flow_status: str,
+) -> None:
+    if (
+        source_flow_status != "reused"
+        or template_decision.get("status") != "partial_refreshed"
+        or not _stage1_delta_template_support_enabled(config)
+    ):
+        _remove_extraction_flow_artifacts(graph_dir, artifacts)
+        return
+    affected_names = _affected_template_names_for_delta(
+        graph_dir,
+        artifacts,
+        template_decision.get("changed_template_keys", []),
+        templates,
+    )
+    affected_chunk_ids = _chunk_ids_for_supported_templates(graph_dir, affected_names)
+    if not affected_names or not affected_chunk_ids:
+        _remove_extraction_flow_artifacts(graph_dir, artifacts)
+        return
+    for chunk_id in affected_chunk_ids:
+        _remove_artifact_path(
+            graph_dir,
+            _join_artifact(artifacts["lane_output_dir"], chunk_id),
+        )
+        _remove_artifact_path(
+            graph_dir,
+            _join_artifact(artifacts["reviewed_bundle_dir"], f"{chunk_id}.json"),
+        )
+    for relative in [
+        artifacts["merge_queue"],
+        artifacts["review_findings"],
+        artifacts["canonical_graph"],
+    ]:
+        _remove_artifact_path(graph_dir, relative)
+
+
+def _stage1_delta_template_support_enabled(config: dict) -> bool:
+    policy = config.get("stage1_delta_policy")
+    return (
+        isinstance(policy, dict)
+        and policy.get("scope") == "changed-template-support"
+    )
+
+
+def _affected_template_names_for_delta(
+    graph_dir: Path,
+    artifacts: dict[str, str],
+    changed_template_keys: object,
+    templates: list,
+) -> set[str]:
+    if not isinstance(changed_template_keys, (list, tuple, set)):
+        return set()
+    keys = {key for key in changed_template_keys if isinstance(key, str) and key}
+    if not keys:
+        return set()
+    names = _affected_template_names_from_existing_requirements(
+        graph_dir, artifacts, keys
+    )
+    if names:
+        return names
+    fallback_names: set[str] = set()
+    for template in templates:
+        name = getattr(template, "name", None)
+        path = getattr(template, "path", None)
+        if not isinstance(name, str) or not name or path is None:
+            continue
+        path_name = Path(path).name
+        if path_name in keys:
+            fallback_names.add(name)
+    return fallback_names
+
+
+def _affected_template_names_from_existing_requirements(
+    graph_dir: Path,
+    artifacts: dict[str, str],
+    changed_template_keys: set[str],
+) -> set[str]:
+    for relative_path in [
+        artifacts.get("raw_template_requirements"),
+        artifacts.get("requirements"),
+    ]:
+        if not isinstance(relative_path, str):
+            continue
+        payload, error = _read_json_artifact(
+            _artifact_path(graph_dir, relative_path),
+            missing_code="template_requirements_existing_total_missing",
+            bad_code="template_requirements_existing_total_invalid",
+        )
+        if error or not isinstance(payload, dict):
+            continue
+        templates = payload.get("templates")
+        if not isinstance(templates, list):
+            continue
+        names = {
+            item["template_name"]
+            for item in templates
+            if isinstance(item, dict)
+            and requirement_key(item, name_to_current_key={}) in changed_template_keys
+            and isinstance(item.get("template_name"), str)
+        }
+        if names:
+            return names
+    return set()
+
+
+def _chunk_ids_for_supported_templates(
+    graph_dir: Path, template_names: set[str]
+) -> set[str]:
+    if not template_names:
+        return set()
+    evidence_path = graph_dir / "coverage" / "evidence-index.json"
+    payload, error = _read_json_artifact(
+        evidence_path,
+        missing_code="evidence_index_missing",
+        bad_code="evidence_index_invalid",
+    )
+    if error or not isinstance(payload, list):
+        return set()
+    chunk_ids: set[str] = set()
+    for evidence in payload:
+        if not isinstance(evidence, dict):
+            continue
+        chunk_id = evidence.get("chunk_id")
+        if not isinstance(chunk_id, str) or not chunk_id:
+            continue
+        supports = evidence.get("supports_templates")
+        if not isinstance(supports, list):
+            continue
+        for support in supports:
+            if (
+                isinstance(support, dict)
+                and support.get("template_name") in template_names
+            ):
+                chunk_ids.add(chunk_id)
+    return chunk_ids
 
 
 def _remove_artifact_path(graph_dir: Path, relative_path: str | Path) -> None:
@@ -2586,6 +2752,88 @@ def _batch_outputs_exist(graph_root: Path, batch: dict) -> bool:
         isinstance(path, str) and _artifact_path(graph_root, path).exists()
         for path in output_paths
     )
+
+
+def _refresh_template_refinement_state(
+    graph_root: Path,
+    current_batches: list[dict],
+    state_batches: dict,
+    now: str,
+) -> dict | None:
+    for batch in current_batches:
+        batch_id = batch["batch_id"]
+        record = state_batches.get(batch_id)
+        if not isinstance(record, dict):
+            continue
+        status = record.get("status")
+        outputs_exist = _batch_outputs_exist(graph_root, batch)
+        if status == "running" and outputs_exist:
+            validation_errors = _template_refinement_batch_validation_errors(
+                graph_root, batch
+            )
+            if validation_errors:
+                return {
+                    "code": "template_requirements_refinement_previous_invalid",
+                    "validation_errors": validation_errors,
+                }
+            state_batches[batch_id] = _dispatch_state_batch_record(
+                batch=batch,
+                status="completed",
+                now=now,
+                previous=record,
+            )
+        elif status == "completed":
+            if not outputs_exist:
+                del state_batches[batch_id]
+            else:
+                validation_errors = _template_refinement_batch_validation_errors(
+                    graph_root, batch
+                )
+                if validation_errors:
+                    return {
+                        "code": "template_requirements_refinement_previous_invalid",
+                        "validation_errors": validation_errors,
+                    }
+    return None
+
+
+def _serial_template_refinement_pending(
+    current_batches: list[dict],
+    state_batches: dict,
+) -> list[dict]:
+    for batch in current_batches:
+        record = state_batches.get(batch["batch_id"])
+        status = record.get("status") if isinstance(record, dict) else None
+        if status == "completed":
+            continue
+        if status == "running":
+            return []
+        return [batch]
+    return []
+
+
+def _template_refinement_batch_validation_errors(
+    graph_root: Path,
+    batch: dict,
+) -> list[str]:
+    output_paths = batch.get("expected_output_paths")
+    if not isinstance(output_paths, list) or len(output_paths) != 1:
+        return ["template_requirements_refinement_output_path_invalid"]
+    payload, payload_error = _read_json_artifact(
+        _artifact_path(graph_root, output_paths[0]),
+        missing_code="template_requirements_refinement_pass_missing",
+        bad_code="template_requirements_summary_invalid",
+    )
+    if payload_error:
+        return [payload_error["code"]]
+    template_names = [
+        name for name in batch.get("template_names", []) if isinstance(name, str)
+    ]
+    validation = validate_template_requirements_summary_payload(
+        payload,
+        expected_template_names=template_names,
+    )
+    return [] if validation.ok else validation.errors
 
 
 def _dispatch_batch_path_errors(batches: list[dict]) -> list[str]:

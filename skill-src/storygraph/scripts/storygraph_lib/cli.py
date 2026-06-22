@@ -173,6 +173,10 @@ def main(argv=None):
     prepare_stage2_parser.add_argument("--graph-dir", required=True)
     prepare_stage2_parser.add_argument("--template-dir", required=True)
     prepare_stage2_parser.add_argument("--overwrite-policy", default="draft")
+    prepare_stage2_parser.add_argument(
+        "--selection",
+        choices=["all", "changed-or-missing"],
+    )
     inspect_stage2_parser = sub.add_parser("inspect-stage2-dispatch")
     inspect_stage2_parser.add_argument("--config")
     inspect_stage2_parser.add_argument("--local-override")
@@ -402,6 +406,7 @@ def main(argv=None):
             template_dir=Path(args.template_dir),
             config=config,
             overwrite_policy=args.overwrite_policy,
+            selection=args.selection,
         )
         _print_json(result)
         return 0 if result.get("status") == "prepared" else 2
