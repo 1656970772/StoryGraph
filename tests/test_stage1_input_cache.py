@@ -95,6 +95,179 @@ def _prepare_and_ingest_requirements(novel, template_dir, graph_dir, config) -> 
     assert ingest["status"] == "requirements_ingested"
 
 
+def _enable_refinement(config: dict) -> dict:
+    updated = copy.deepcopy(config)
+    updated["stage1_artifacts"]["raw_template_requirements"] = (
+        "intermediate/template-requirements-raw.json"
+    )
+    updated["stage1_artifacts"]["template_requirements_refinement_dir"] = (
+        "intermediate/template-requirements-refinement"
+    )
+    updated["template_requirements_refinement"] = {
+        "enabled": True,
+        "passes": 3,
+        "serial_gate": True,
+        "agent_roles": [
+            "template-requirements-refine-pass-1-agent",
+            "template-requirements-refine-pass-2-agent",
+            "template-requirements-refine-pass-3-agent",
+        ],
+        "summary_schema": "template-requirements-summary.schema.json",
+    }
+    managed = updated["writer_policy"]["managed_outputs"]
+    for path in [
+        "intermediate/template-requirements-raw.json",
+        "intermediate/template-requirements-refinement/*.json",
+        "intermediate/task-packets/template-requirements-refinement/*.json",
+    ]:
+        if path not in managed:
+            managed.append(path)
+    return updated
+
+
+def _valid_refinement_summary(pass_number: int, template_names: list[str]) -> dict:
+    return {
+        "schema_version": "storygraph.template-requirements-summary.v1",
+        "source_template_count": len(template_names),
+        "summary_passes": 3,
+        "categories": [
+            {
+                "category_id": "general",
+                "category_name": "通用抽取要求",
+                "purpose": f"第 {pass_number} 轮整理后的模板需求摘要。",
+                "required_extraction_targets": ["法宝"],
+                "evidence_requirements": ["原文位置"],
+                "graph_mapping_summary": {"nodes": ["artifact"]},
+                "template_coverage": template_names,
+            }
+        ],
+        "global_rules": {
+            "requirement_statuses": ["covered", "needs_review", "not_found_in_source"]
+        },
+        "refinement_notes": [f"pass {pass_number}"],
+        "source_coverage": {
+            "template_names": template_names,
+            "covered_template_count": len(template_names),
+        },
+    }
+
+
+def _write_refinement_summary(
+    graph_dir: Path,
+    pass_number: int,
+    template_names: list[str],
+    *,
+    payload: dict | None = None,
+) -> None:
+    path = (
+        graph_dir
+        / "intermediate"
+        / "template-requirements-refinement"
+        / f"pass-{pass_number}.json"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            payload
+            if payload is not None
+            else _valid_refinement_summary(pass_number, template_names),
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_template_requirements_refinement_claims_only_next_valid_pass(
+    novel, template_dir, graph_dir, config
+):
+    from storygraph_lib.stage1 import (
+        claim_agent_batches,
+        ingest_template_requirements,
+        prepare_stage1,
+    )
+
+    refined_config = _enable_refinement(config)
+    prepare = prepare_stage1(
+        source_path=novel,
+        template_dir=template_dir,
+        graph_dir=graph_dir,
+        config=refined_config,
+    )
+    assert prepare["status"] == "prepared"
+    _write_requirement_parts(graph_dir)
+    pending = ingest_template_requirements(graph_dir=graph_dir, config=refined_config)
+    assert pending["status"] == "requirements_refinement_pending"
+
+    first = claim_agent_batches(
+        graph_dir=graph_dir,
+        phase="template_requirements_refinement",
+        limit=3,
+    )
+
+    assert first["claimed_count"] == 1
+    assert first["batches"][0]["refinement_pass"] == 1
+
+    blocked_while_running = claim_agent_batches(
+        graph_dir=graph_dir,
+        phase="template_requirements_refinement",
+        limit=3,
+    )
+
+    assert blocked_while_running["claimed_count"] == 0
+    assert blocked_while_running["in_flight_count"] == 1
+
+    _write_refinement_summary(graph_dir, 1, ["法宝分析"], payload={})
+    invalid_previous = claim_agent_batches(
+        graph_dir=graph_dir,
+        phase="template_requirements_refinement",
+        limit=3,
+    )
+
+    assert invalid_previous["status"] == "failed"
+    assert invalid_previous["error"]["code"] == "template_requirements_refinement_previous_invalid"
+
+    _write_refinement_summary(graph_dir, 1, ["法宝分析"])
+    second = claim_agent_batches(
+        graph_dir=graph_dir,
+        phase="template_requirements_refinement",
+        limit=3,
+    )
+
+    assert second["claimed_count"] == 1
+    assert second["batches"][0]["refinement_pass"] == 2
+
+
+def test_template_requirements_refinement_pass3_becomes_final_requirements(
+    novel, template_dir, graph_dir, config
+):
+    from storygraph_lib.stage1 import ingest_template_requirements, prepare_stage1
+
+    refined_config = _enable_refinement(config)
+    prepare_stage1(
+        source_path=novel,
+        template_dir=template_dir,
+        graph_dir=graph_dir,
+        config=refined_config,
+    )
+    _write_requirement_parts(graph_dir)
+    pending = ingest_template_requirements(graph_dir=graph_dir, config=refined_config)
+    assert pending["status"] == "requirements_refinement_pending"
+
+    for pass_number in range(1, 4):
+        _write_refinement_summary(graph_dir, pass_number, ["法宝分析"])
+
+    result = ingest_template_requirements(graph_dir=graph_dir, config=refined_config)
+    requirements = json.loads(
+        (graph_dir / "requirements" / "template-requirements.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert result["status"] == "requirements_ingested"
+    assert requirements["refinement_notes"] == ["pass 3"]
+
+
 def test_prepare_stage1_reuses_template_requirements_when_template_md5_unchanged(
     novel, template_dir, graph_dir, config
 ):
@@ -455,6 +628,82 @@ def test_prepare_stage1_isolates_stale_lane_outputs_when_template_requirements_r
     assert all(not path.exists() for path in stale_paths)
     assert ingest["status"] == "failed"
     assert ingest["error"]["code"] == "agent_lane_outputs_missing"
+
+
+def test_prepare_stage1_delta_policy_keeps_unaffected_template_chunk_outputs(
+    novel, template_dir, graph_dir, config
+):
+    from storygraph_lib.stage1 import prepare_stage1
+
+    (template_dir / "人物分析模板.md").write_text("# 人物分析模板\n- 人物", encoding="utf-8")
+    delta_config = copy.deepcopy(config)
+    delta_config["stage1_delta_policy"] = {"scope": "changed-template-support"}
+    _prepare_and_ingest_requirements(novel, template_dir, graph_dir, delta_config)
+
+    affected_output = (
+        graph_dir
+        / "intermediate"
+        / "lane-outputs"
+        / "chunk-0001"
+        / "entities_resources"
+        / "run-001.json"
+    )
+    unaffected_output = (
+        graph_dir
+        / "intermediate"
+        / "lane-outputs"
+        / "chunk-0002"
+        / "entities_resources"
+        / "run-001.json"
+    )
+    affected_bundle = graph_dir / "intermediate" / "reviewed-bundles" / "chunk-0001.json"
+    unaffected_bundle = graph_dir / "intermediate" / "reviewed-bundles" / "chunk-0002.json"
+    for path in [affected_output, unaffected_output, affected_bundle, unaffected_bundle]:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}", encoding="utf-8")
+    (graph_dir / "coverage" / "evidence-index.json").write_text(
+        json.dumps(
+            [
+                {
+                    "evidence_id": "evidence:artifact",
+                    "chunk_id": "chunk-0001",
+                    "supports_templates": [{"template_name": "法宝分析"}],
+                },
+                {
+                    "evidence_id": "evidence:character",
+                    "chunk_id": "chunk-0002",
+                    "supports_templates": [{"template_name": "人物分析"}],
+                },
+            ],
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (graph_dir / "intermediate" / "merge-queue.json").write_text(
+        "{}", encoding="utf-8"
+    )
+    (graph_dir / "graphify-out").mkdir(exist_ok=True)
+    (graph_dir / "graphify-out" / "graph.json").write_text("{}", encoding="utf-8")
+
+    (template_dir / "法宝分析模板.md").write_text(
+        "# 法宝分析模板\n- 法宝\n- 新增字段",
+        encoding="utf-8",
+    )
+    result = prepare_stage1(
+        source_path=novel,
+        template_dir=template_dir,
+        graph_dir=graph_dir,
+        config=delta_config,
+    )
+
+    assert result["cache"]["template_requirements"] == "partial_refreshed"
+    assert not affected_output.exists()
+    assert not affected_bundle.exists()
+    assert unaffected_output.exists()
+    assert unaffected_bundle.exists()
+    assert not (graph_dir / "intermediate" / "merge-queue.json").exists()
+    assert not (graph_dir / "graphify-out" / "graph.json").exists()
 
 
 def test_prepare_stage1_rebuilds_source_flow_when_required_evidence_policy_tampered(

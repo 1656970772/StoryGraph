@@ -171,6 +171,35 @@ def test_stage2_default_config_uses_template_document_batches(default_config):
     assert default_config["overwrite_policy"] == "draft"
 
 
+def test_default_config_declares_only_three_storygraph_workflow_modes(default_config):
+    assert default_config["workflow_modes"] == {
+        "default": "full",
+        "allowed": ["full", "stage2_incremental", "full_incremental"],
+    }
+    assert default_config["template_requirements_refinement"]["serial_gate"] is True
+    assert default_config["stage2_incremental_policy"]["selection"] == "changed-or-missing"
+    assert default_config["stage1_delta_policy"]["scope"] == "changed-template-support"
+
+
+def test_storygraph_skill_docs_describe_only_three_user_modes():
+    docs = "\n".join(
+        [
+            (ROOT / "skill-src" / "storygraph" / "SKILL.md").read_text(
+                encoding="utf-8"
+            ),
+            (ROOT / "skill-src" / "storygraph" / "references" / "workflow.md").read_text(
+                encoding="utf-8"
+            ),
+        ]
+    )
+
+    assert "`full`" in docs
+    assert "`stage2_incremental`" in docs
+    assert "`full_incremental`" in docs
+    assert docs.count("用户模式") >= 1
+    assert "第四种模式" not in docs
+
+
 def test_stage1_artifacts_include_agent_driven_output_dirs(default_config):
     required = {
         "requirements",

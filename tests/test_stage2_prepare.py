@@ -270,6 +270,70 @@ def _read_single_packet(graph_dir: Path) -> dict:
     return json.loads(packet_paths[0].read_text(encoding="utf-8"))
 
 
+def _valid_stage2_record(template_name="法宝分析", template_file="法宝分析模板.md"):
+    return {
+        "schema": "stage2-extraction-record.v1",
+        "template_name": template_name,
+        "template_file": template_file,
+        "source_graph": "graphify-out/graph.json",
+        "source_novel": "book.txt",
+        "stage2_policy": {
+            "stage2_categories": {
+                "facts": "原作事实",
+                "judgments": "我的判断",
+                "pending_verifications": "待核验",
+                "not_found_items": "未见可靠证据",
+            },
+            "stage2_output_policy": {
+                "default_dir": "drafts",
+                "allowed_policies": ["draft", "backup-and-overwrite", "merge"],
+                "draft_action": "write_draft",
+            },
+        },
+        "coverage_scope": {
+            "scope": "whole_novel",
+            "stage1_chunk_ledger": "coverage/chunk-ledger.json",
+            "chunk_ranges": [{"chunk_id": "chunk-0001", "source_range": [0, 10]}],
+            "ledger_path": "coverage/template-run-ledger.json",
+        },
+        "fulfilled_sections": [],
+        "facts": [
+            {
+                "content": "韩立获得小瓶。",
+                "category": "原作事实",
+                "evidence_ids": ["evidence:abc"],
+                "source_locations": [],
+                "confidence": "EXTRACTED",
+            }
+        ],
+        "judgments": [],
+        "pending_verifications": [],
+        "not_found_items": [],
+        "document_sections": [
+            {
+                "heading": "来源",
+                "markdown": "韩立获得小瓶。",
+                "evidence_ids": ["evidence:abc"],
+                "requirement_ids": ["resources_items_economy"],
+                "confidence": "EXTRACTED",
+            }
+        ],
+        "evidence_citations": ["evidence:abc"],
+        "overwrite_policy": "draft",
+    }
+
+
+def _record_path(graph_dir: Path, template_name="法宝分析") -> Path:
+    return (
+        graph_dir
+        / "intermediate"
+        / "stage2"
+        / "extraction-records"
+        / template_name
+        / "run-001.json"
+    )
+
+
 def test_prepare_stage2_creates_one_batch_per_template_document_and_writes_ledgers(tmp_path):
     graph_dir = tmp_path / "book.storygraph"
     template_dir = tmp_path / "templates"
@@ -309,6 +373,94 @@ def test_prepare_stage2_creates_one_batch_per_template_document_and_writes_ledge
     assert ledger["template_tasks"][0]["template_name"] == "法宝分析"
     assert ledger["template_tasks"][0]["status"] == "pending"
     assert ledger["template_tasks"][0]["batch_id"] == packet["batch_id"]
+
+
+def test_prepare_stage2_changed_or_missing_skips_completed_unchanged_templates(tmp_path):
+    graph_dir = tmp_path / "book.storygraph"
+    template_dir = tmp_path / "templates"
+    graph_dir.mkdir()
+    template_dir.mkdir()
+    _write_stage1_inputs(graph_dir, template_dir, include_second_template=True)
+    prepare_stage2(graph_dir, template_dir, _stage2_config())
+
+    record_path = _record_path(graph_dir, "法宝分析")
+    record_path.parent.mkdir(parents=True)
+    record_path.write_text(
+        json.dumps(_valid_stage2_record("法宝分析", "法宝分析模板.md"), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    draft_path = graph_dir / "drafts" / "法宝分析.md"
+    draft_path.parent.mkdir()
+    draft_path.write_text("# 法宝分析\n", encoding="utf-8")
+    ledger_path = graph_dir / "coverage" / "template-run-ledger.json"
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    for task in ledger["template_tasks"]:
+        if task["template_name"] == "法宝分析":
+            task["status"] = "completed"
+            task["output_record"] = "intermediate/stage2/extraction-records/法宝分析/run-001.json"
+        else:
+            task["status"] = "pending"
+            task["output_record"] = None
+    ledger_path.write_text(json.dumps(ledger, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    config = _stage2_config()
+    config["stage2_incremental_policy"] = {"selection": "changed-or-missing"}
+    result = prepare_stage2(
+        graph_dir,
+        template_dir,
+        config,
+        selection="changed-or-missing",
+    )
+    dispatch = json.loads(
+        (graph_dir / "intermediate" / "stage2" / "dispatch-state.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert result["batch_count"] == 1
+    assert [batch["templates"][0]["template_name"] for batch in dispatch["batches"]] == [
+        "角色分析"
+    ]
+
+
+def test_prepare_stage2_changed_or_missing_reruns_changed_template_hash(tmp_path):
+    graph_dir = tmp_path / "book.storygraph"
+    template_dir = tmp_path / "templates"
+    graph_dir.mkdir()
+    template_dir.mkdir()
+    _write_stage1_inputs(graph_dir, template_dir)
+    prepare_stage2(graph_dir, template_dir, _stage2_config())
+
+    record_path = _record_path(graph_dir, "法宝分析")
+    record_path.parent.mkdir(parents=True)
+    record_path.write_text(
+        json.dumps(_valid_stage2_record("法宝分析", "法宝分析模板.md"), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    ledger_path = graph_dir / "coverage" / "template-run-ledger.json"
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    ledger["template_tasks"][0]["status"] = "completed"
+    ledger["template_tasks"][0]["output_record"] = (
+        "intermediate/stage2/extraction-records/法宝分析/run-001.json"
+    )
+    ledger_path.write_text(json.dumps(ledger, ensure_ascii=False, indent=2), encoding="utf-8")
+    (template_dir / "法宝分析模板.md").write_text(
+        "# 法宝分析\n\n## 来源\n\n## 新用途\n",
+        encoding="utf-8",
+    )
+    cache_path = graph_dir / "intermediate" / "stage1-input-cache.json"
+    cache = json.loads(cache_path.read_text(encoding="utf-8"))
+    cache["templates"][0]["sha256"] = "changed-stage1-template-hash"
+    cache_path.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    result = prepare_stage2(
+        graph_dir,
+        template_dir,
+        _stage2_config(),
+        selection="changed-or-missing",
+    )
+
+    assert result["batch_count"] == 1
 
 
 def test_prepare_stage2_splits_templates_in_same_category_into_independent_batches(tmp_path):

@@ -8,6 +8,10 @@
   "supported_source_exts": [".txt", ".md"],
   "output_language": "zh-CN",
   "stage1_mode": "agent-driven",
+  "workflow_modes": {
+    "default": "full",
+    "allowed": ["full", "stage2_incremental", "full_incremental"]
+  },
   "template_discovery": {
     "glob": "*模板.md",
     "exclude_files": ["README.md"],
@@ -86,12 +90,16 @@
   "template_requirements_refinement": {
     "enabled": true,
     "passes": 3,
+    "serial_gate": true,
     "agent_roles": [
       "template-requirements-refine-pass-1-agent",
       "template-requirements-refine-pass-2-agent",
       "template-requirements-refine-pass-3-agent"
     ],
     "summary_schema": "template-requirements-summary.schema.json"
+  },
+  "stage1_delta_policy": {
+    "scope": "changed-template-support"
   },
   "element_lanes": [
     {
@@ -178,6 +186,9 @@
     "existing_document_action": "write_versioned_draft",
     "allowed_policies": ["draft", "backup-and-overwrite", "merge"],
     "draft_action": "write_draft"
+  },
+  "stage2_incremental_policy": {
+    "selection": "changed-or-missing"
   },
   "stage2_artifacts": {
     "task_packet_dir": "intermediate/stage2/task-packets",
