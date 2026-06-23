@@ -145,11 +145,11 @@
     }
   ],
   "agent_orchestration": {
+    "parallelism_source": "agent_adapter_capabilities",
     "lane_assignment_strategy": "configured-element-lanes",
     "lane_batch_strategy": "by-lane-contiguous-chunks",
     "lane_chunks_per_agent": 2,
     "extraction_quality_rules_path": "references/stage1-extraction-agent-quality-rules.md",
-    "max_parallel_agents": 6,
     "template_requirements_parallel": true,
     "max_parallel_lanes": 3,
     "reviewer_sequence": ["contract-reviewer", "code-quality-reviewer"],
@@ -220,9 +220,9 @@
     "extraction_record_dir": "intermediate/stage2/extraction-records"
   },
   "stage2_agent_orchestration": {
+    "parallelism_source": "agent_adapter_capabilities",
     "grouping_strategy": "by_template_document",
-    "agent_role": "stage2-template-document-agent",
-    "max_parallel_agents": 6
+    "agent_role": "stage2-template-document-agent"
   },
   "stage2_render_policy": {
     "citation_format": "[{evidence_id}]",
@@ -306,11 +306,6 @@
       "intermediate/stage2/extraction-records/*/*.json",
       "drafts/*.md"
     ]
-  },
-  "agent_policy": {
-    "enabled": true,
-    "max_parallel": 6,
-    "write_conflict_policy": "single-writer"
   },
   "coverage_thresholds": {
     "require_all_templates": true,

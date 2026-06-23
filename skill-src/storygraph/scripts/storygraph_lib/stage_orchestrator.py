@@ -242,13 +242,16 @@ def _process_stage1_agent_batches(
         dict with status and batch processing results
     """
     graph_dir = Path(graph_dir)
-    max_parallel = config.get("stage1_agent_orchestration", {}).get(
-        "max_parallel_tasks", 5
+    max_parallel = _agent_capability_limit(
+        config,
+        stage="stage1",
+        lane_id="comprehensive_extraction",
     )
 
     # Claim initial batches
     claim_result = claim_agent_batches(
-        graph_dir,
+        graph_dir=graph_dir,
+        phase="lane_extraction",
         limit=max_parallel,
         config=config,
     )
@@ -286,8 +289,10 @@ def _process_stage2_agent_batches(
         dict with status and batch processing results
     """
     graph_dir = Path(graph_dir)
-    max_parallel = config.get("stage2_agent_orchestration", {}).get(
-        "max_parallel_tasks", 5
+    max_parallel = _agent_capability_limit(
+        config,
+        stage="stage2",
+        lane_id="template_document",
     )
 
     # Claim initial batches
@@ -313,6 +318,33 @@ def _process_stage2_agent_batches(
         "claimed_count": claimed_count,
         "note": "MVP implementation - assumes agent completion",
     }
+
+
+def _agent_capability_limit(
+    config: dict,
+    *,
+    stage: str,
+    lane_id: str,
+) -> int:
+    try:
+        from .config import load_agent_adapters
+
+        registry = load_agent_adapters(config)
+        default_agent_type = config.get("agent_platform", {}).get("default_agent_type")
+        capability = None
+        if isinstance(default_agent_type, str) and default_agent_type:
+            capability = registry.resolve_dispatch_capability(
+                stage,
+                lane_id,
+                forced_agent_type=default_agent_type,
+            )
+        if capability is None:
+            capability = registry.resolve_dispatch_capability(stage, lane_id)
+        if capability is not None:
+            return capability["max_parallel_tasks"]
+    except (ImportError, ValueError):
+        pass
+    return 0
 
 
 def _timestamp() -> str:

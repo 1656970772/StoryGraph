@@ -35,7 +35,6 @@ def test_default_config_is_portable_and_local_override_wins(tmp_path):
             {
                 "graph_dir_suffix": ".storygraph",
                 "paths": {"template_dir": None},
-                "agent_policy": {"max_parallel": 6},
                 "sample_policy": {
                     "mode": "default",
                     "options": ["字段"],
@@ -49,7 +48,6 @@ def test_default_config_is_portable_and_local_override_wins(tmp_path):
         json.dumps(
             {
                 "paths": {"template_dir": "E:/Templates"},
-                "agent_policy": {"max_parallel": 2},
                 "sample_policy": {"limits": {"max_items": 2}},
             }
         ),
@@ -59,7 +57,6 @@ def test_default_config_is_portable_and_local_override_wins(tmp_path):
     config = load_config(default, local_override=local)
 
     assert config["paths"]["template_dir"] == "E:/Templates"
-    assert config["agent_policy"]["max_parallel"] == 2
     assert config["sample_policy"]["mode"] == "default"
     assert config["sample_policy"]["options"] == ["字段"]
     assert config["sample_policy"]["limits"]["max_items"] == 2
@@ -146,9 +143,11 @@ def test_stage1_agent_driven_config_contains_lanes_review_and_writer_policy(defa
     assert (
         Path("skill-src/storygraph") / quality_rules_path
     ).exists()
-    assert default_config["agent_orchestration"]["max_parallel_agents"] == (
-        default_config["agent_policy"]["max_parallel"]
+    assert default_config["agent_orchestration"]["parallelism_source"] == (
+        "agent_adapter_capabilities"
     )
+    assert "max_parallel_agents" not in default_config["agent_orchestration"]
+    assert "agent_policy" not in default_config
     assert default_config["agent_orchestration"]["template_requirements_parallel"] is True
 
 
@@ -167,7 +166,10 @@ def test_stage2_default_config_uses_template_document_batches(default_config):
     assert default_config["stage2_agent_orchestration"]["agent_role"] == (
         "stage2-template-document-agent"
     )
-    assert default_config["stage2_agent_orchestration"]["max_parallel_agents"] == 6
+    assert default_config["stage2_agent_orchestration"]["parallelism_source"] == (
+        "agent_adapter_capabilities"
+    )
+    assert "max_parallel_agents" not in default_config["stage2_agent_orchestration"]
     assert default_config["overwrite_policy"] == "draft"
 
 
@@ -373,8 +375,8 @@ def test_cli_overrides_win_after_local_override_and_keep_uncovered_defaults(tmp_
         json.dumps(
             {
                 "paths": {"template_dir": None, "graphify_repo": None},
-                "agent_policy": {
-                    "max_parallel": 6,
+                "runtime_policy": {
+                    "max_items": 6,
                     "enabled": True,
                     "write_conflict_policy": "single-writer",
                 },
@@ -386,7 +388,7 @@ def test_cli_overrides_win_after_local_override_and_keep_uncovered_defaults(tmp_
         json.dumps(
             {
                 "paths": {"template_dir": "local-templates"},
-                "agent_policy": {"max_parallel": 2},
+                "runtime_policy": {"max_items": 2},
             }
         ),
         encoding="utf-8",
@@ -397,15 +399,15 @@ def test_cli_overrides_win_after_local_override_and_keep_uncovered_defaults(tmp_
         local_override=local,
         cli_overrides={
             "paths": {"template_dir": "cli-templates"},
-            "agent_policy": {"max_parallel": 1},
+            "runtime_policy": {"max_items": 1},
         },
     )
 
     assert config["paths"]["template_dir"] == "cli-templates"
-    assert config["agent_policy"]["max_parallel"] == 1
+    assert config["runtime_policy"]["max_items"] == 1
     assert config["paths"]["graphify_repo"] is None
-    assert config["agent_policy"]["enabled"] is True
-    assert config["agent_policy"]["write_conflict_policy"] == "single-writer"
+    assert config["runtime_policy"]["enabled"] is True
+    assert config["runtime_policy"]["write_conflict_policy"] == "single-writer"
 
 
 def test_config_check_uses_local_override(capsys, tmp_path):

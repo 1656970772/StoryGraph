@@ -1,9 +1,23 @@
 """Tests for per-agent dynamic window scheduling."""
 
+import json
+
 from storygraph_lib.adapters import AgentRegistry
 from storygraph_lib.adapters.codex_adapter import CodexAdapter
 from storygraph_lib.adapters.claude_adapter import ClaudeAdapter
 from storygraph_lib.adapters.opencode_adapter import OpenCodeAdapter
+from storygraph_lib.stage1 import claim_agent_batches
+from storygraph_lib.stage2 import claim_stage2_batches
+
+
+class BurstAdapter(CodexAdapter):
+    """Test adapter with a larger capability than legacy global caps."""
+
+    def get_capabilities(self):
+        capabilities = super().get_capabilities()
+        capabilities["agent_type"] = "burst"
+        capabilities["max_parallel_tasks"] = 8
+        return capabilities
 
 
 class TestPerAgentScheduling:
@@ -124,3 +138,127 @@ class TestPerAgentScheduling:
         # Claude window is open
         claude_available = max(0, 6 - 3)
         assert claude_available == 3
+
+    def test_stage1_claim_uses_adapter_capability_above_historical_global_cap(
+        self, tmp_path, monkeypatch
+    ):
+        """Stage 1 should size claim windows from adapter capability."""
+        graph_dir = tmp_path / "book.storygraph"
+        packet_dir = graph_dir / "intermediate" / "task-packets"
+        packet_dir.mkdir(parents=True)
+        batches = []
+        for index in range(1, 9):
+            packet_rel = f"intermediate/task-packets/batch-{index:04d}.json"
+            output_rel = f"intermediate/lane-outputs/chunk-{index:04d}/run-001.json"
+            packet = {
+                "task_packet_id": f"chunk-{index:04d}:comprehensive_extraction:attempt-001",
+                "stage": "stage1",
+                "lane_id": "comprehensive_extraction",
+                "agent_selector": {
+                    "stage": "stage1",
+                    "lane_id": "comprehensive_extraction",
+                    "required_schema": "lane-output.schema.json",
+                    "preferred_agents": ["burst"],
+                },
+                "selected_agent_info": None,
+            }
+            (graph_dir / packet_rel).write_text(
+                json.dumps(packet, ensure_ascii=False), encoding="utf-8"
+            )
+            batches.append(
+                {
+                    "batch_id": f"lane-comprehensive_extraction-batch-{index:04d}",
+                    "phase": "lane_extraction",
+                    "agent_role": "comprehensive-stage1-extraction-agent",
+                    "lane_id": "comprehensive_extraction",
+                    "task_packet_paths": [packet_rel],
+                    "expected_output_paths": [output_rel],
+                    "write_scope": [output_rel],
+                }
+            )
+        dispatch = {
+            "schema_version": "storygraph.agent-dispatch.v1",
+            "stage": "stage1",
+            "dispatch_state_path": "intermediate/agent-dispatch-state.json",
+            "phases": [
+                {
+                    "phase": "lane_extraction",
+                    "execution_batches": batches,
+                }
+            ],
+        }
+        dispatch_path = graph_dir / "intermediate" / "agent-dispatch-plan.json"
+        dispatch_path.write_text(
+            json.dumps(dispatch, ensure_ascii=False), encoding="utf-8"
+        )
+        monkeypatch.setattr(
+            "storygraph_lib.stage1.load_agent_adapters",
+            lambda _config: AgentRegistry({"burst": BurstAdapter()}),
+        )
+
+        result = claim_agent_batches(
+            graph_dir=graph_dir,
+            phase="lane_extraction",
+            limit=8,
+            agent_type="burst",
+            config={"agent_platform": {"enabled": True}},
+        )
+
+        assert result["status"] == "agent_batches_claimed"
+        assert result["claimed_count"] == 8
+        assert result["available_slots"] == 8
+
+    def test_stage2_claim_uses_preferred_agent_capability(self, tmp_path):
+        """Stage 2 should size the window from the preferred adapter, not Codex."""
+        graph_dir = tmp_path / "book.storygraph"
+        state_dir = graph_dir / "intermediate" / "stage2"
+        state_dir.mkdir(parents=True)
+        batches = []
+        for index in range(1, 6):
+            batches.append(
+                {
+                    "batch_id": f"stage2-template-{index:04d}",
+                    "agent_role": "stage2-template-document-agent",
+                    "status": "pending",
+                    "templates": [{"template_name": f"模板{index}"}],
+                    "expected_output_rel_paths": [
+                        f"intermediate/stage2/extraction-records/template-{index}/run-001.json"
+                    ],
+                    "agent_selector": {
+                        "stage": "stage2",
+                        "lane_id": "template_document",
+                        "required_schema": "stage2-task-packet.v1",
+                        "preferred_agents": ["opencode"],
+                    },
+                    "selected_agent_info": None,
+                }
+            )
+        state = {"schema": "stage2-dispatch-state.v1", "batches": batches}
+        (state_dir / "dispatch-state.json").write_text(
+            json.dumps(state, ensure_ascii=False), encoding="utf-8"
+        )
+        config = {
+            "agent_platform": {
+                "enabled": True,
+                "agent_adapters": {
+                    "codex": {
+                        "module": "storygraph_lib.adapters.codex_adapter",
+                        "class": "CodexAdapter",
+                    },
+                    "opencode": {
+                        "module": "storygraph_lib.adapters.opencode_adapter",
+                        "class": "OpenCodeAdapter",
+                    },
+                },
+            }
+        }
+
+        result = claim_stage2_batches(graph_dir, limit=6, config=config)
+
+        assert result["claimed_count"] == 4
+        assert [batch["selected_agent_type"] for batch in result["batches"]] == [
+            "opencode",
+            "opencode",
+            "opencode",
+            "opencode",
+        ]

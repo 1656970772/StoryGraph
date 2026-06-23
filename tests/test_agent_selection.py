@@ -16,7 +16,6 @@ def create_mock_dispatch_plan(tmpdir) -> Path:
     plan = {
         "schema_version": "storygraph.agent-dispatch.v1",
         "stage": "stage1",
-        "max_parallel": 2,
         "review_policy_mode": "post_merge_incremental",
         "dispatch_state_path": "intermediate/agent-dispatch-state.json",
         "agent_platform": {

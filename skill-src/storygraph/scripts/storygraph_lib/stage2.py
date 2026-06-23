@@ -229,37 +229,33 @@ def claim_stage2_batches(
             elif output_errors:
                 batch["errors"] = output_errors
 
-    # Group batches by agent type for per-agent parallelism window
     running_by_agent = _group_stage2_batches_by_agent(state.get("batches", []))
-
-    # Calculate available slots respecting per-agent max_parallel_tasks
-    available_slots = _claim_available_slots_stage2_per_agent(
-        limit, running_by_agent, agent_registry, agent_type
-    )
-
-    # Count pending batches
-    pending_count = sum(
-        1 for batch in state.get("batches", []) if batch.get("status") == "pending"
-    )
-    available_slots = min(available_slots, pending_count)
-
     claimed = []
     for batch in state.get("batches", []):
-        if available_slots <= 0:
+        if len(claimed) >= max(0, limit):
             break
-        if batch.get("status") == "pending":
-            batch["status"] = "running"
+        if batch.get("status") != "pending":
+            continue
+        if agent_registry:
+            selected_agent_type = _claim_stage2_batch_agent_slot(
+                batch, running_by_agent, agent_registry, agent_type
+            )
+            if not selected_agent_type:
+                continue
+        else:
+            total_running = sum(running_by_agent.values())
+            if total_running + len(claimed) >= limit:
+                continue
+            selected_agent_type = None
 
-            # Apply agent selection to batch
-            if agent_registry:
-                selected_agent_type = _apply_stage2_agent_selection(
-                    batch, agent_registry, agent_type
-                )
-                if selected_agent_type:
-                    batch["selected_agent_type"] = selected_agent_type
-
-            claimed.append(batch)
-            available_slots -= 1
+        batch["status"] = "running"
+        if agent_registry:
+            selected_agent_type = _apply_stage2_agent_selection(
+                batch, agent_registry, agent_type
+            )
+            if selected_agent_type:
+                batch["selected_agent_type"] = selected_agent_type
+        claimed.append(batch)
 
     _refresh_state_counts(state)
     writer.write_json(artifacts["dispatch_state"], state)
@@ -273,6 +269,29 @@ def claim_stage2_batches(
     }
 
 
+def _claim_stage2_batch_agent_slot(
+    batch: dict,
+    running_by_agent: dict[str, int],
+    agent_registry,
+    forced_agent_type: str | None,
+) -> str | None:
+    capability = agent_registry.resolve_dispatch_capability(
+        "stage2",
+        "template_document",
+        batch.get("agent_selector"),
+        forced_agent_type,
+    )
+    if capability is None:
+        return None
+    agent_type = capability["agent_type"]
+    unknown_running = running_by_agent.get("unknown", 0)
+    running_for_agent = running_by_agent.get(agent_type, 0) + unknown_running
+    if running_for_agent >= capability["max_parallel_tasks"]:
+        return None
+    running_by_agent[agent_type] = running_by_agent.get(agent_type, 0) + 1
+    return agent_type
+
+
 def _apply_stage2_agent_selection(
     batch: dict,
     agent_registry,
@@ -283,31 +302,21 @@ def _apply_stage2_agent_selection(
     Updates batch with selected_agent_info based on agent selector.
     Returns the selected agent type.
     """
-    # Get agent selector from batch
-    selector = batch.get("agent_selector")
-    if not selector:
+    capability = agent_registry.resolve_dispatch_capability(
+        "stage2",
+        "template_document",
+        batch.get("agent_selector"),
+        forced_agent_type,
+    )
+    if capability is None:
         return None
-
-    # Determine which agent to use
-    stage = selector.get("stage", "stage2")
-    lane_id = selector.get("lane_id", "template_document")
-    preferred = selector.get("preferred_agents")
-
-    # Use forced agent_type if provided, otherwise use registry selection
-    if forced_agent_type:
-        selected_type = forced_agent_type
-        adapter = agent_registry.get_adapter(forced_agent_type)
-    else:
-        result = agent_registry.select_best_adapter(stage, lane_id, preferred)
-        if not result:
-            return None
-        selected_type, adapter = result
+    selected_type = capability["agent_type"]
 
     # Update batch with selected agent info
     batch["selected_agent_info"] = {
         "agent_type": selected_type,
         "agent_role": batch.get("agent_role", ""),
-        "adapter_version": adapter.get_capabilities().get("version", "1.0.0"),
+        "adapter_version": capability["capabilities"].get("version", "1.0.0"),
     }
 
     return selected_type
@@ -322,42 +331,6 @@ def _group_stage2_batches_by_agent(batches: list[dict]) -> dict[str, int]:
         agent_type = batch.get("selected_agent_type", "unknown")
         by_agent[agent_type] = by_agent.get(agent_type, 0) + 1
     return by_agent
-
-
-def _claim_available_slots_stage2_per_agent(
-    limit: int,
-    running_by_agent: dict[str, int],
-    agent_registry,
-    forced_agent_type: str | None,
-) -> int:
-    """Calculate available slots respecting per-agent max_parallel_tasks for Stage 2."""
-    if not agent_registry:
-        # Fallback to simple limit-based
-        total_running = sum(running_by_agent.values())
-        return max(0, limit - total_running)
-
-    # Determine the agent type that will be used for next batch
-    if forced_agent_type:
-        adapter = agent_registry.get_adapter(forced_agent_type)
-        if not adapter:
-            # Fallback
-            total_running = sum(running_by_agent.values())
-            return max(0, limit - total_running)
-        max_parallel = adapter.get_capabilities()["max_parallel_tasks"]
-        running_for_agent = running_by_agent.get(forced_agent_type, 0)
-    else:
-        # For auto-selection, estimate using default agent (codex)
-        adapter = agent_registry.get_adapter("codex")
-        if not adapter:
-            # Fallback
-            total_running = sum(running_by_agent.values())
-            return max(0, limit - total_running)
-        max_parallel = adapter.get_capabilities()["max_parallel_tasks"]
-        running_for_agent = sum(running_by_agent.values())
-
-    # Calculate slots: min of (per-agent window, limit)
-    per_agent_slots = max(0, max_parallel - running_for_agent)
-    return min(per_agent_slots, limit)
 
 
 def ingest_stage2(graph_dir: str | Path, config: dict) -> dict:

@@ -11,11 +11,7 @@ class ClaudeAdapter(AgentAdapter):
         return {
             "agent_type": "claude",
             "supported_stages": ["stage1", "stage2"],
-            "supported_lanes": [
-                "template_requirements",
-                "comprehensive_extraction",
-                "template_document",  # Stage 2
-            ],
+            "supported_lanes": [],
             "supported_schemas": [
                 "lane-output.schema.json",
                 "template-requirements.schema.json",

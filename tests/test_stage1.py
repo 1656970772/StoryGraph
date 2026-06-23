@@ -453,7 +453,6 @@ def test_prepare_stage1_writes_agent_dispatch_plan(
 ):
     from storygraph_lib.stage1 import prepare_stage1
 
-    config["agent_policy"] = {"max_parallel": 4}
     result = prepare_stage1(
         source_path=novel,
         template_dir=template_dir,
@@ -469,7 +468,8 @@ def test_prepare_stage1_writes_agent_dispatch_plan(
     assert result["agent_dispatch"]["dispatch_plan_path"] == (
         "intermediate/agent-dispatch-plan.json"
     )
-    assert result["agent_dispatch"]["max_parallel"] == config["agent_policy"]["max_parallel"]
+    assert "max_parallel" not in result["agent_dispatch"]
+    assert "max_parallel" not in dispatch
     assert [phase["phase"] for phase in dispatch["phases"]] == [
         "template_requirements",
         "lane_extraction",
@@ -666,7 +666,6 @@ def test_prepare_stage1_groups_lane_execution_batches_by_configured_chunk_count(
     config["agent_orchestration"] = {
         "lane_batch_strategy": "by-lane-contiguous-chunks",
         "lane_chunks_per_agent": 2,
-        "max_parallel_agents": 4,
     }
 
     result = prepare_stage1(
@@ -683,7 +682,7 @@ def test_prepare_stage1_groups_lane_execution_batches_by_configured_chunk_count(
     lane_phase = next(phase for phase in dispatch["phases"] if phase["phase"] == "lane_extraction")
     batches = lane_phase["execution_batches"]
 
-    assert result["agent_dispatch"]["max_parallel"] == 4
+    assert "max_parallel" not in result["agent_dispatch"]
     assert len(lane_phase["task_packets"]) == 15
     assert len(batches) == 9
     assert {
@@ -787,7 +786,6 @@ def test_claim_agent_batches_uses_sliding_window_dispatch_state(
     config["agent_orchestration"] = {
         "lane_batch_strategy": "by-lane-contiguous-chunks",
         "lane_chunks_per_agent": 2,
-        "max_parallel_agents": 6,
     }
     prepare_stage1(
         source_path=novel,
@@ -796,8 +794,18 @@ def test_claim_agent_batches_uses_sliding_window_dispatch_state(
         config=config,
     )
 
-    first = claim_agent_batches(graph_dir=graph_dir, phase="lane_extraction", limit=6)
-    second = claim_agent_batches(graph_dir=graph_dir, phase="lane_extraction", limit=6)
+    first = claim_agent_batches(
+        graph_dir=graph_dir,
+        phase="lane_extraction",
+        limit=6,
+        config=config,
+    )
+    second = claim_agent_batches(
+        graph_dir=graph_dir,
+        phase="lane_extraction",
+        limit=6,
+        config=config,
+    )
 
     assert first["status"] == "agent_batches_claimed"
     assert first["phase"] == "lane_extraction"
@@ -816,7 +824,12 @@ def test_claim_agent_batches_uses_sliding_window_dispatch_state(
     first_batch = first["batches"][0]
     _write_batch_outputs(graph_dir, first_batch)
 
-    third = claim_agent_batches(graph_dir=graph_dir, phase="lane_extraction", limit=1)
+    third = claim_agent_batches(
+        graph_dir=graph_dir,
+        phase="lane_extraction",
+        limit=1,
+        config=config,
+    )
 
     assert third["claimed_count"] == 1
     assert third["in_flight_count"] == 6
@@ -832,7 +845,12 @@ def test_claim_agent_batches_uses_sliding_window_dispatch_state(
     partial_path.parent.mkdir(parents=True, exist_ok=True)
     partial_path.write_text("{}", encoding="utf-8")
 
-    partial = claim_agent_batches(graph_dir=graph_dir, phase="lane_extraction", limit=6)
+    partial = claim_agent_batches(
+        graph_dir=graph_dir,
+        phase="lane_extraction",
+        limit=6,
+        config=config,
+    )
 
     assert partial["claimed_count"] == 0
     assert partial["in_flight_count"] == 6
@@ -845,12 +863,22 @@ def test_claim_agent_batches_uses_sliding_window_dispatch_state(
     for batch in known_batches.values():
         _write_batch_outputs(graph_dir, batch)
 
-    fourth = claim_agent_batches(graph_dir=graph_dir, phase="lane_extraction", limit=6)
+    fourth = claim_agent_batches(
+        graph_dir=graph_dir,
+        phase="lane_extraction",
+        limit=6,
+        config=config,
+    )
     for batch in fourth["batches"]:
         known_batches[batch["batch_id"]] = batch
         _write_batch_outputs(graph_dir, batch)
 
-    final = claim_agent_batches(graph_dir=graph_dir, phase="lane_extraction", limit=6)
+    final = claim_agent_batches(
+        graph_dir=graph_dir,
+        phase="lane_extraction",
+        limit=6,
+        config=config,
+    )
 
     assert final["claimed_count"] == 0
     assert final["in_flight_count"] == 0
@@ -962,7 +990,6 @@ def test_claim_agent_batches_fails_closed_for_unsafe_dispatch_state_path(graph_d
         json.dumps(
             {
                 "stage": "stage1",
-                "max_parallel": 1,
                 "dispatch_state_path": "../escape.json",
                 "phases": [
                     {
