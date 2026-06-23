@@ -49,7 +49,6 @@ def build_stage1_input_cache(
             {
                 "element_lanes": config.get("element_lanes"),
                 "agent_orchestration": config.get("agent_orchestration"),
-                "agent_policy": config.get("agent_policy"),
                 "required_evidence_policy": config.get("required_evidence_policy"),
                 "extraction_quality_rules": config.get(
                     "_resolved_extraction_quality_rules"

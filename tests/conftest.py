@@ -59,6 +59,17 @@ def config(template_dir: Path) -> dict:
         "graph_dir_suffix": ".storygraph",
         "output_language": "zh-CN",
         "paths": {"template_dir": str(template_dir), "graphify_repo": None},
+        "agent_platform": {
+            "enabled": True,
+            "default_agent_type": "codex",
+            "agent_adapters": {
+                "codex": {
+                    "module": "storygraph_lib.adapters.codex_adapter",
+                    "class": "CodexAdapter",
+                    "config": {},
+                }
+            },
+        },
         "template_discovery": {
             "glob": "*模板.md",
             "readme_index_file": "README.md",

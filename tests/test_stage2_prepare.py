@@ -29,7 +29,6 @@ def _stage2_config() -> dict:
         "stage2_agent_orchestration": {
             "grouping_strategy": "by_template_document",
             "agent_role": "stage2-template-document-agent",
-            "max_parallel_agents": 2,
         },
         "stage2_render_policy": {
             "citation_format": "[{evidence_id}]",

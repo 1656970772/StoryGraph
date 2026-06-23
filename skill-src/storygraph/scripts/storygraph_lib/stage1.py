@@ -253,7 +253,6 @@ def prepare_stage1(
                 },
                 "agent_dispatch": {
                     "dispatch_plan_path": artifacts["agent_dispatch_plan"],
-                    "max_parallel": dispatch_plan["max_parallel"],
                     "phases": dispatch_plan["phases"],
                 }
             },
@@ -529,7 +528,6 @@ def inspect_dispatch(*, graph_dir: str | Path) -> dict:
         "status": "dispatch_ready",
         "graph_dir": str(graph_root),
         "dispatch_plan_path": DEFAULT_STAGE1_ARTIFACTS["agent_dispatch_plan"],
-        "max_parallel": dispatch.get("max_parallel"),
         "phases": phases,
     }
 
@@ -707,22 +705,24 @@ def claim_agent_batches(
             and batch["batch_id"] not in completed_ids
         ]
 
-    global_slots = _claim_available_slots(
-        limit,
-        len(running_ids),
-        len(pending),
-        dispatch.get("max_parallel"),
-    )
     if agent_registry:
-        # Per-agent adapter windows refine, but do not replace, the dispatch plan cap.
         running_by_agent = _group_batches_by_agent(state_batches, current_batch_ids)
-        agent_slots = _claim_available_slots_per_agent(
-            limit, running_by_agent, len(pending), agent_registry, agent_type
+        selected = _claimable_batches_for_agent_capabilities(
+            graph_root=graph_root,
+            pending=pending,
+            running_by_agent=running_by_agent,
+            limit=limit,
+            agent_registry=agent_registry,
+            forced_agent_type=agent_type,
         )
-        available_slots = min(global_slots, agent_slots)
+        available_slots = len(selected)
     else:
+        global_slots = _claim_available_slots(
+            limit,
+            len(pending),
+        )
         available_slots = global_slots
-    selected = pending[:available_slots]
+        selected = pending[:available_slots]
     for batch in selected:
         state_batches[batch["batch_id"]] = _dispatch_state_batch_record(
             batch=batch,
@@ -779,20 +779,15 @@ def _apply_agent_selection_to_batch(
     if not task_packet_paths:
         return None
 
-    # Determine which agent to use
-    if forced_agent_type:
-        selected_type = forced_agent_type
-        adapter = agent_registry.get_adapter(forced_agent_type)
-    else:
-        result = agent_registry.select_best_adapter("stage1", None)
-        if not result:
-            return None
-        selected_type, adapter = result
-
+    selected_batch_type = None
     for packet_path in task_packet_paths:
         try:
             full_path = _artifact_path(graph_root, packet_path)
-            packet, read_error = _read_json_artifact(full_path, missing_code="packet_missing")
+            packet, read_error = _read_json_artifact(
+                full_path,
+                missing_code="packet_missing",
+                bad_code="packet_invalid",
+            )
             if read_error or not isinstance(packet, dict):
                 continue
 
@@ -800,12 +795,22 @@ def _apply_agent_selection_to_batch(
             selector = packet.get("agent_selector")
             if not selector:
                 continue
+            capability = agent_registry.resolve_dispatch_capability(
+                "stage1",
+                batch.get("lane_id", ""),
+                selector,
+                forced_agent_type,
+            )
+            if capability is None:
+                continue
+            selected_type = capability["agent_type"]
+            selected_batch_type = selected_batch_type or selected_type
 
             # Update packet with selected agent info
             packet["selected_agent_info"] = {
                 "agent_type": selected_type,
                 "agent_role": batch.get("agent_role", ""),
-                "adapter_version": adapter.get_capabilities().get("version", "1.0.0"),
+                "adapter_version": capability["capabilities"].get("version", "1.0.0"),
             }
 
             # Write updated packet back
@@ -815,7 +820,7 @@ def _apply_agent_selection_to_batch(
             # Silently continue if any packet update fails
             continue
 
-    return selected_type
+    return selected_batch_type
 
 
 def merge_stage1(*, graph_dir: str | Path, config: dict) -> dict:
@@ -1956,7 +1961,6 @@ def _build_agent_dispatch_plan(
     return {
         "schema_version": "storygraph.agent-dispatch.v1",
         "stage": "stage1",
-        "max_parallel": _agent_max_parallel(config),
         "review_policy_mode": _review_policy_mode(config),
         "dispatch_state_path": artifacts["dispatch_state"],
         "agent_platform": {
@@ -2075,16 +2079,6 @@ def _dispatch_task_packet(packet: dict) -> dict:
         if field in packet:
             item[field] = packet[field]
     return item
-
-
-def _agent_max_parallel(config: dict) -> int:
-    value = config.get("agent_orchestration", {}).get("max_parallel_agents")
-    if type(value) is int and value > 0:
-        return value
-    value = config.get("agent_policy", {}).get("max_parallel", 1)
-    if type(value) is int and value > 0:
-        return value
-    return 1
 
 
 def _lane_batch_strategy(config: dict) -> str:
@@ -2824,15 +2818,8 @@ def _dispatch_state_batch_record(
     return record
 
 
-def _claim_available_slots(
-    limit: int | None, running_count: int, pending_count: int, max_parallel: object
-) -> int:
-    window_limit = max_parallel if type(max_parallel) is int and max_parallel > 0 else None
-    window_slots = (
-        pending_count
-        if window_limit is None
-        else max(0, min(window_limit - running_count, pending_count))
-    )
+def _claim_available_slots(limit: int | None, pending_count: int) -> int:
+    window_slots = pending_count
     if limit is None or limit < 0:
         return window_slots
     return max(0, min(limit, window_slots))
@@ -2856,47 +2843,68 @@ def _group_batches_by_agent(
     return by_agent
 
 
-def _claim_available_slots_per_agent(
-    limit: int | None,
+def _claimable_batches_for_agent_capabilities(
+    *,
+    graph_root: Path,
+    pending: list[dict],
     running_by_agent: dict[str, list],
-    pending_count: int,
-    agent_registry: AgentRegistry | None,
+    limit: int | None,
+    agent_registry: AgentRegistry,
     forced_agent_type: str | None,
-) -> int:
-    """Calculate available slots respecting per-agent max_parallel_tasks.
+) -> list[dict]:
+    """Select pending batches using each selected agent's own capacity."""
+    max_claims = len(pending) if limit is None or limit < 0 else max(0, limit)
+    if max_claims == 0:
+        return []
 
-    For forced agent_type: use that agent's max_parallel
-    For auto-selection: use next agent's max_parallel (estimate based on registry)
-    """
-    if not agent_registry:
-        # Fallback to global limit
-        if limit is None or limit < 0:
-            return pending_count
-        return max(0, min(limit, pending_count))
+    selected: list[dict] = []
+    running_counts = {
+        agent_type: len(batch_ids)
+        for agent_type, batch_ids in running_by_agent.items()
+    }
+    unknown_running = running_counts.get("unknown", 0)
+    for batch in pending:
+        if len(selected) >= max_claims:
+            break
+        capability = agent_registry.resolve_dispatch_capability(
+            "stage1",
+            batch.get("lane_id", ""),
+            _batch_agent_selector(graph_root, batch),
+            forced_agent_type,
+        )
+        if capability is None:
+            continue
+        agent_type = capability["agent_type"]
+        running_for_agent = running_counts.get(agent_type, 0) + unknown_running
+        if running_for_agent >= capability["max_parallel_tasks"]:
+            continue
+        selected.append(batch)
+        running_counts[agent_type] = running_counts.get(agent_type, 0) + 1
+    return selected
 
-    # Determine the agent type that will be used for next batch
-    if forced_agent_type:
-        adapter = agent_registry.get_adapter(forced_agent_type)
-        if not adapter:
-            # Fallback if adapter not found
-            return max(0, min(limit or pending_count, pending_count))
-        max_parallel = adapter.get_capabilities()["max_parallel_tasks"]
-        running_for_agent = len(running_by_agent.get(forced_agent_type, []))
-    else:
-        # For auto-selection, estimate using default agent
-        default_agent = agent_registry.get_adapter(
-            "codex"  # Default if available
-        ) or agent_registry.select_best_adapter("stage1", None)[1]
-        if not default_agent:
-            return max(0, min(limit or pending_count, pending_count))
-        max_parallel = default_agent.get_capabilities()["max_parallel_tasks"]
-        running_for_agent = sum(len(v) for v in running_by_agent.values())
 
-    # Calculate slots: min of (per-agent window, global limit, pending)
-    per_agent_slots = max(0, max_parallel - running_for_agent)
-    if limit is None or limit < 0:
-        return min(per_agent_slots, pending_count)
-    return max(0, min(limit, per_agent_slots, pending_count))
+def _batch_agent_selector(graph_root: Path, batch: dict) -> dict | None:
+    selector = batch.get("agent_selector")
+    if isinstance(selector, dict):
+        return selector
+    task_packet_paths = batch.get("task_packet_paths", [])
+    if not isinstance(task_packet_paths, list):
+        return None
+    for packet_path in task_packet_paths:
+        if not isinstance(packet_path, str):
+            continue
+        full_path = _artifact_path(graph_root, packet_path)
+        packet, read_error = _read_json_artifact(
+            full_path,
+            missing_code="packet_missing",
+            bad_code="packet_invalid",
+        )
+        if read_error or not isinstance(packet, dict):
+            continue
+        selector = packet.get("agent_selector")
+        if isinstance(selector, dict):
+            return selector
+    return None
 
 
 def _dispatch_phase(dispatch: dict, phase: str) -> dict | None:

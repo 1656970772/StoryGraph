@@ -116,7 +116,7 @@ def test_stage1_workflow_documents_parallel_dispatch_plan_contract():
     assert "execution_batches" in text
     assert "next-agent-batches" in text
     assert "stage1_runner_unavailable" in text
-    assert "agent_policy.max_parallel" in text
+    assert "max_parallel_tasks" in text
     assert "并行" in text
     assert "等待所有 template requirements 分片产物" in text
     assert "不得在未派发 agent 时调用 ingest/merge 宣称完成" in text

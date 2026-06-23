@@ -1,6 +1,6 @@
 """Agent registry for discovering and selecting agents."""
 
-from typing import Optional
+from typing import Any, Optional
 
 from .base import AgentAdapter, AgentCapabilities
 
@@ -96,6 +96,69 @@ class AgentRegistry:
             return available[0]
 
         return None
+
+    def resolve_dispatch_capability(
+        self,
+        stage: str,
+        lane_id: str = "",
+        selector: dict[str, Any] | None = None,
+        forced_agent_type: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Resolve the adapter and max parallelism for a dispatch target.
+
+        Args:
+            stage: Fallback stage identifier.
+            lane_id: Fallback lane identifier.
+            selector: Optional task/batch agent selector.
+            forced_agent_type: Explicit agent type override.
+
+        Returns:
+            Dict with agent_type, adapter, capabilities, and max_parallel_tasks,
+            or None when no usable adapter capability is available.
+        """
+        selector = selector if isinstance(selector, dict) else {}
+        resolved_stage = selector.get("stage")
+        if not isinstance(resolved_stage, str) or not resolved_stage:
+            resolved_stage = stage
+        resolved_lane = selector.get("lane_id")
+        if not isinstance(resolved_lane, str):
+            resolved_lane = lane_id
+        preferred = selector.get("preferred_agents")
+        if not (
+            isinstance(preferred, list)
+            and all(isinstance(item, str) and item for item in preferred)
+        ):
+            preferred = None
+
+        if forced_agent_type:
+            adapter = self.get_adapter(forced_agent_type)
+            if not adapter or not adapter.is_available():
+                return None
+            if not adapter.supports_stage(resolved_stage):
+                return None
+            if resolved_lane and not adapter.supports_lane(resolved_lane):
+                return None
+            agent_type = forced_agent_type
+        else:
+            result = self.select_best_adapter(
+                resolved_stage,
+                resolved_lane,
+                preferred_agents=preferred,
+            )
+            if not result:
+                return None
+            agent_type, adapter = result
+
+        capabilities = adapter.get_capabilities()
+        max_parallel = capabilities.get("max_parallel_tasks")
+        if type(max_parallel) is not int or max_parallel <= 0:
+            return None
+        return {
+            "agent_type": agent_type,
+            "adapter": adapter,
+            "capabilities": capabilities,
+            "max_parallel_tasks": max_parallel,
+        }
 
     def list_agents(self) -> list[str]:
         """List all registered agent types.

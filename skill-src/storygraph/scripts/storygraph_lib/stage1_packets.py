@@ -369,6 +369,13 @@ def build_template_requirements_task_packets(
             "output_path": output_path,
             "write_scope": [output_path],
             "attempt": attempt,
+            "agent_selector": {
+                "stage": "stage1",
+                "lane_id": lane_id,
+                "required_schema": schema,
+                "preferred_agents": resolved_strategy.get("preferred_agents"),
+            },
+            "selected_agent_info": None,
         }
         packet["task_packet_path"] = _safe_task_packet_path(
             _template_requirements_packet_path(task_packet_dir, batch_id)
@@ -435,6 +442,13 @@ def build_template_requirements_refinement_task_packets(
             "output_path": output_path,
             "write_scope": [output_path],
             "attempt": attempt,
+            "agent_selector": {
+                "stage": "stage1",
+                "lane_id": "template_requirements_refinement",
+                "required_schema": resolved["summary_schema"],
+                "preferred_agents": resolved.get("preferred_agents"),
+            },
+            "selected_agent_info": None,
             "task_packet_path": _safe_task_packet_path(task_packet_path),
         }
         packets.append(packet)
@@ -455,6 +469,12 @@ def _template_requirements_strategy(strategy: dict | None) -> dict[str, Any]:
         or templates_per_packet > 5
     ):
         raise ValueError("invalid_template_requirements_templates_per_packet")
+    preferred_agents = configured.get("preferred_agents")
+    if not (
+        isinstance(preferred_agents, list)
+        and all(isinstance(item, str) and item for item in preferred_agents)
+    ):
+        preferred_agents = None
     return {
         "agent_role": _required_string_field(
             configured,
@@ -475,6 +495,7 @@ def _template_requirements_strategy(strategy: dict | None) -> dict[str, Any]:
             "invalid_template_requirements_schema",
         ),
         "templates_per_packet": templates_per_packet,
+        "preferred_agents": preferred_agents,
     }
 
 
@@ -497,6 +518,12 @@ def _template_requirements_refinement_strategy(strategy: dict | None) -> dict[st
     ]
     if len(roles) != 3:
         raise ValueError("invalid_template_requirements_refinement_agent_role")
+    preferred_agents = configured.get("preferred_agents")
+    if not (
+        isinstance(preferred_agents, list)
+        and all(isinstance(item, str) and item for item in preferred_agents)
+    ):
+        preferred_agents = None
     return {
         "enabled": configured.get("enabled") is True,
         "passes": passes,
@@ -506,6 +533,7 @@ def _template_requirements_refinement_strategy(strategy: dict | None) -> dict[st
             "summary_schema",
             "invalid_template_requirements_refinement_summary_schema",
         ),
+        "preferred_agents": preferred_agents,
     }
 
 

@@ -2423,7 +2423,6 @@ def test_cli_claim_agent_batches_returns_structured_error_for_unsafe_dispatch_st
         json.dumps(
             {
                 "stage": "stage1",
-                "max_parallel": 1,
                 "dispatch_state_path": "../escape.json",
                 "phases": [
                     {
