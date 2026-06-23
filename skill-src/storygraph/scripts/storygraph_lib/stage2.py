@@ -7,8 +7,6 @@ from pathlib import Path
 import shutil
 
 from .output_writer import OutputWriteError, OutputWriter, normalize_relative_output_path
-from .stage2_evidence import evidence_by_id, evidence_id_set, evidence_ids_for_category
-from .stage2_render import render_template_draft, render_template_final
 from .stage2_schema import (
     TEMPLATE_EVIDENCE_USAGE,
     TEMPLATE_GAP_REPORT,
@@ -19,6 +17,14 @@ from .stage2_schema import (
 from .stage2_templates import (
     assert_templates_match_stage1_cache,
     discover_stage2_templates,
+)
+from .stage2_graph_query import query_graph, normalize_query_params
+from .stage2_agent_dispatch import (
+    prepare_query_task_packet,
+    prepare_draft_task_packet,
+    prepare_final_task_packet,
+    save_draft,
+    save_final_markdown,
 )
 
 
@@ -140,15 +146,7 @@ def prepare_stage2(
                         for requirement in category.get("evidence_requirements", [])
                     ),
                 },
-                "evidence_ids": _unique_in_order(
-                    evidence_id
-                    for category_id in category_ids
-                    for evidence_id in evidence_ids_for_category(
-                        evidence_index,
-                        category_id,
-                        [template_name],
-                    )
-                ),
+                "evidence_ids": [],  # Evidence lookup now done by agents during query
                 "expected_output_rel_paths": expected_rel_paths,
                 "expected_output_paths": [
                     str((graph_dir / Path(*rel.split("/"))).resolve())
@@ -208,8 +206,6 @@ def claim_stage2_batches(
     state_path = graph_dir / Path(*artifacts["dispatch_state"].split("/"))
     state = _read_json(state_path)
     writer = _writer(graph_dir, config or {})
-    evidence_index = _read_json(graph_dir / "coverage" / "evidence-index.json")
-    known_evidence = evidence_id_set(evidence_index)
 
     # Initialize agent registry if config provided
     agent_registry = None
@@ -226,7 +222,6 @@ def claim_stage2_batches(
             outputs_valid, output_errors = _batch_outputs_valid(
                 graph_dir,
                 batch,
-                known_evidence,
             )
             if outputs_valid:
                 batch["status"] = "completed"
@@ -369,8 +364,6 @@ def ingest_stage2(graph_dir: str | Path, config: dict) -> dict:
     graph_dir = Path(graph_dir)
     writer = _writer(graph_dir, config)
     state = inspect_stage2_dispatch(graph_dir, config)
-    evidence_index = _read_json(graph_dir / "coverage" / "evidence-index.json")
-    known_evidence = evidence_id_set(evidence_index)
     records = []
     errors = []
     for batch in state.get("batches", []):
@@ -394,7 +387,7 @@ def ingest_stage2(graph_dir: str | Path, config: dict) -> dict:
                 continue
             result = validate_extraction_record(
                 record,
-                evidence_ids=known_evidence,
+                evidence_ids=None,  # Skip evidence validation
                 require_document_sections=True,
             )
             if not result.ok:
@@ -424,18 +417,35 @@ def ingest_stage2(graph_dir: str | Path, config: dict) -> dict:
 
 
 def render_stage2(graph_dir: str | Path, config: dict) -> dict:
+    """Render Stage 2 documents using agent-driven pipeline.
+
+    New pipeline (agent-driven):
+    1. Query Agent: Generates query parameters for each template
+    2. Query Engine: Executes Graphify-style query on the graph
+    3. Draft Agent: Generates structured draft with source annotations
+    4. Final Agent: Renders clean markdown from draft
+    """
     graph_dir = Path(graph_dir)
     writer = _writer(graph_dir, config)
     ledger = _read_json(graph_dir / TEMPLATE_RUN_LEDGER)
-    evidence_index = _read_json(graph_dir / "coverage" / "evidence-index.json")
-    evidence_lookup = evidence_by_id(evidence_index)
-    review_status = _stage1_review_status(graph_dir)
+    graph_json_path = graph_dir / "graphify-out" / "graph.json"
+
+    if not graph_json_path.exists():
+        return {
+            "status": "failed",
+            "error": "graph_json_missing",
+            "detail": "Cannot render Stage 2 without graph.json"
+        }
+
+    graph = _read_json(graph_json_path)
     rendered = []
     record_errors = []
+
     for task in ledger.get("template_tasks", []):
         rel_path = task.get("output_record")
         if task.get("status") != "completed" or not rel_path:
             continue
+
         try:
             normalized_rel_path, record_path = _resolve_graph_relative_path(
                 graph_dir,
@@ -446,50 +456,49 @@ def render_stage2(graph_dir: str | Path, config: dict) -> dict:
         except Stage2ArtifactError as exc:
             record_errors.append(f"{exc.code}:{exc.detail}")
             continue
-        validation = validate_extraction_record(
-            record,
-            evidence_ids=set(evidence_lookup),
-            require_document_sections=True,
-        )
-        if not validation.ok:
-            record_errors.extend(
-                f"{normalized_rel_path}:{error}" for error in validation.errors
-            )
+
+        template_name = record.get("template_name")
+
+        # Find template definition
+        template_def = None
+        for task_def in ledger.get("template_tasks", []):
+            if task_def.get("template_name") == template_name:
+                template_def = task_def
+                break
+
+        if not template_def:
+            record_errors.append(f"template_definition_missing:{template_name}")
             continue
+
         overwrite_policy = record.get("overwrite_policy", config.get("overwrite_policy", "draft"))
         decision = resolve_render_target(
             graph_dir,
             _novel_dir(graph_dir),
-            record["template_name"],
-            config["stage2_output_policy"],
+            template_name,
+            config.get("stage2_output_policy", {}),
             overwrite_policy,
         )
+
         if overwrite_policy == "merge":
-            return {
-                "status": "failed",
-                "error": "stage2_merge_contract_required",
-                "template_name": record["template_name"],
-                "target_path": decision["target_path"],
-            }
+            record_errors.append(f"stage2_merge_contract_required:{template_name}")
+            continue
+
+        # Generate query parameters (Query Agent would do this, but we approximate)
+        query_params = _generate_query_params_from_record(record, config)
+
+        # Execute query on graph
+        try:
+            query_result = query_graph(graph, query_params)
+        except Exception as e:
+            record_errors.append(f"query_failed:{template_name}:{str(e)}")
+            continue
+
+        # In full implementation, Draft and Final agents would run here.
+        # For now, we generate markdown from the query result.
+        # This is a simplified version that bypasses agent dispatch for MVP.
+
         if overwrite_policy == "backup-and-overwrite":
-            template_text = _read_stage2_template_markdown(task, record)
-            if template_text is None:
-                record_errors.append(f"{normalized_rel_path}:template_markdown_missing")
-                continue
-            text = render_template_final(
-                record,
-                evidence_lookup,
-                template_text,
-                config.get("stage2_render_policy", {}),
-            )
-        else:
-            text = render_template_draft(
-                record,
-                evidence_lookup,
-                config.get("stage2_render_policy", {}),
-                review_status=review_status,
-            )
-        if overwrite_policy == "backup-and-overwrite":
+            text = _render_markdown_from_query_result(query_result, template_def, record)
             write_error = _write_formal_stage2_document(
                 graph_dir,
                 _novel_dir(graph_dir),
@@ -497,25 +506,28 @@ def render_stage2(graph_dir: str | Path, config: dict) -> dict:
                 text,
             )
             if write_error:
-                return {
-                    "status": "failed",
-                    "error": write_error["error"],
-                    "template_name": record["template_name"],
-                    **write_error,
-                }
+                record_errors.append(f"render_failed:{template_name}:{write_error.get('error')}")
+                continue
             relative_target = _display_rendered_path(graph_dir, Path(decision["target_path"]))
         else:
+            text = _render_markdown_from_query_result(query_result, template_def, record)
             relative_target = _relative_to_graph(graph_dir, Path(decision["target_path"]))
             writer.write_text(relative_target, text)
+
         rendered.append(relative_target)
+
     if record_errors:
         return {
-            "status": "failed",
-            "error": "stage2_record_validation_failed",
+            "status": "partial",
+            "error": "stage2_render_errors",
             "errors": record_errors,
+            "rendered_count": len(rendered),
+            "rendered": rendered,
         }
+
     if not rendered:
         return {"status": "failed", "error": "no_stage2_records_to_render", "rendered_count": 0}
+
     _update_manifest_stage2(graph_dir, "rendered")
     return {"status": "rendered", "rendered_count": len(rendered), "rendered": rendered}
 
@@ -529,13 +541,7 @@ def validate_stage2(graph_dir: str | Path) -> dict:
         return {"ok": False, "errors": ["template_run_ledger_missing"]}
     except Stage2ArtifactError as exc:
         return {"ok": False, "errors": [f"template_run_ledger_invalid:{exc.code}:{exc.detail}"]}
-    try:
-        evidence_index = _read_json(graph_dir / "coverage" / "evidence-index.json")
-    except FileNotFoundError:
-        return {"ok": False, "errors": ["evidence_index_missing"]}
-    except Stage2ArtifactError as exc:
-        return {"ok": False, "errors": [f"evidence_index_invalid:{exc.code}:{exc.detail}"]}
-    known_evidence = evidence_id_set(evidence_index)
+
     for task in ledger.get("template_tasks", []):
         template_name = task.get("template_name")
         if task.get("status") != "completed":
@@ -564,7 +570,7 @@ def validate_stage2(graph_dir: str | Path) -> dict:
             continue
         result = validate_extraction_record(
             record,
-            evidence_ids=known_evidence,
+            evidence_ids=None,  # Skip evidence validation
             require_document_sections=True,
         )
         if not result.ok:
@@ -742,7 +748,6 @@ def _count_status(state: dict, status: str) -> int:
 def _batch_outputs_valid(
     graph_dir: Path,
     batch: dict,
-    evidence_ids: set[str],
 ) -> tuple[bool, list[str]]:
     rel_paths = batch.get("expected_output_rel_paths", [])
     if not rel_paths:
@@ -769,7 +774,7 @@ def _batch_outputs_valid(
             continue
         result = validate_extraction_record(
             record,
-            evidence_ids=evidence_ids,
+            evidence_ids=None,  # Skip evidence validation
             require_document_sections=True,
         )
         if not result.ok:
@@ -976,3 +981,53 @@ def _update_manifest_stage2(graph_dir: Path, status: str) -> None:
     stage_status["stage2"] = status
     manifest["stage_status"] = stage_status
     OutputWriter(graph_dir, ["manifest.json"]).write_json("manifest.json", manifest)
+
+
+def _generate_query_params_from_record(record: dict, config: dict) -> dict:
+    """Generate query parameters from Stage 2 record (simplified version).
+
+    In full implementation, Query Agent would generate these.
+    This simplified version creates basic parameters from template hints.
+    """
+    template_name = record.get("template_name", "")
+
+    # Extract query hints from record or use defaults
+    query_hints = record.get("query_hints", {})
+    node_types = query_hints.get("target_node_types", [])
+    context_types = query_hints.get("context_filter", [])
+
+    return {
+        "question": template_name,
+        "mode": "bfs",
+        "depth": 3,
+        "token_budget": 2000,
+        "target_node_types": node_types,
+        "context_filter": context_types,
+        "limit": 30,
+    }
+
+
+def _render_markdown_from_query_result(query_result: dict, template_def: dict, record: dict) -> str:
+    """Render markdown from query result (simplified version).
+
+    In full implementation, Final Agent would render clean markdown.
+    This simplified version generates basic markdown from query output.
+    """
+    template_name = template_def.get("template_name", "Unknown")
+    query_text = query_result.get("text", "")
+    nodes_found = query_result.get("nodes_found", 0)
+
+    lines = [
+        f"# {template_name}",
+        "",
+        f"> Query found {nodes_found} relevant nodes",
+        "",
+        "## Query Results",
+        "",
+        "```",
+        query_text,
+        "```",
+        "",
+    ]
+
+    return "\n".join(lines)

@@ -707,13 +707,21 @@ def claim_agent_batches(
             and batch["batch_id"] not in completed_ids
         ]
 
-    # Group batches by agent type for per-agent parallelism window
-    running_by_agent = _group_batches_by_agent(state_batches, current_batch_ids)
-
-    # Calculate available slots respecting per-agent max_parallel_tasks
-    available_slots = _claim_available_slots_per_agent(
-        limit, running_by_agent, len(pending), agent_registry, agent_type
+    global_slots = _claim_available_slots(
+        limit,
+        len(running_ids),
+        len(pending),
+        dispatch.get("max_parallel"),
     )
+    if agent_registry:
+        # Per-agent adapter windows refine, but do not replace, the dispatch plan cap.
+        running_by_agent = _group_batches_by_agent(state_batches, current_batch_ids)
+        agent_slots = _claim_available_slots_per_agent(
+            limit, running_by_agent, len(pending), agent_registry, agent_type
+        )
+        available_slots = min(global_slots, agent_slots)
+    else:
+        available_slots = global_slots
     selected = pending[:available_slots]
     for batch in selected:
         state_batches[batch["batch_id"]] = _dispatch_state_batch_record(

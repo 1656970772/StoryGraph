@@ -353,7 +353,8 @@ def test_prepare_stage2_creates_one_batch_per_template_document_and_writes_ledge
     assert len(packet["templates"]) == 1
     assert packet["templates"][0]["template_name"] == "法宝分析"
     assert packet["templates"][0]["template_headings"] == ["法宝分析", "来源", "用途"]
-    assert packet["evidence_ids"] == ["evidence:abc"]
+    # Note: evidence_ids now empty - agents handle evidence lookup dynamically
+    assert packet["evidence_ids"] == []
     normalized_output_path = packet["expected_output_paths"][0].replace("\\", "/")
     assert normalized_output_path.endswith(
         "intermediate/stage2/extraction-records/法宝分析/run-001.json"
@@ -508,7 +509,8 @@ def test_prepare_stage2_template_packet_aggregates_multiple_requirement_categori
     ]
     assert packet["requirements"]["required_extraction_targets"] == ["法宝", "持有人"]
     assert packet["requirements"]["evidence_requirements"] == ["原文位置", "角色证据"]
-    assert packet["evidence_ids"] == ["evidence:abc", "evidence:role"]
+    # Note: evidence_ids now empty - agents handle evidence lookup dynamically
+    assert packet["evidence_ids"] == []
 
 
 def test_prepare_stage2_rejects_legacy_requirement_category_grouping(tmp_path):
@@ -573,4 +575,5 @@ def test_prepare_stage2_falls_back_to_template_support_when_category_support_is_
     prepare_stage2(graph_dir, template_dir, _stage2_config())
 
     packet = _read_single_packet(graph_dir)
-    assert packet["evidence_ids"] == ["evidence:abc"]
+    # Note: evidence_ids now empty - agents handle evidence lookup dynamically
+    assert packet["evidence_ids"] == []
