@@ -14,6 +14,7 @@ class OpenCodeAdapter(AgentAdapter):
             "supported_lanes": [
                 "template_requirements",
                 "comprehensive_extraction",
+                "template_document",  # Stage 2
             ],
             "supported_schemas": [
                 "lane-output.schema.json",

@@ -189,6 +189,7 @@ def main(argv=None):
     claim_stage2_parser.add_argument("--local-override")
     claim_stage2_parser.add_argument("--graph-dir", required=True)
     claim_stage2_parser.add_argument("--limit", type=int, required=True)
+    claim_stage2_parser.add_argument("--agent-type", default=None)
     ingest_stage2_parser = sub.add_parser("ingest-stage2")
     ingest_stage2_parser.add_argument("--config")
     ingest_stage2_parser.add_argument("--local-override")
@@ -447,6 +448,7 @@ def main(argv=None):
             graph_dir=Path(args.graph_dir),
             limit=args.limit,
             config=config,
+            agent_type=getattr(args, "agent_type", None),
         )
         _print_json(result)
         return 0 if result.get("status") == "stage2_batches_claimed" else 2

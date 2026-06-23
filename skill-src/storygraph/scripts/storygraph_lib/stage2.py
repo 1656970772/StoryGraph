@@ -154,6 +154,14 @@ def prepare_stage2(
                     str((graph_dir / Path(*rel.split("/"))).resolve())
                     for rel in expected_rel_paths
                 ],
+                # New: agent selector for dynamic agent selection
+                "agent_selector": {
+                    "stage": "stage2",
+                    "lane_id": "template_document",
+                    "required_schema": "stage2-task-packet.v1",
+                    "preferred_agents": config.get("stage2_agent_orchestration", {}).get("preferred_agents"),
+                },
+                "selected_agent_info": None,  # Will be filled by claim_stage2_batches
             }
         )
 
@@ -189,7 +197,12 @@ def inspect_stage2_dispatch(graph_dir: str | Path, config: dict | None = None) -
     return _read_json(graph_dir / Path(*artifacts["dispatch_state"].split("/")))
 
 
-def claim_stage2_batches(graph_dir: str | Path, limit: int, config: dict | None = None) -> dict:
+def claim_stage2_batches(
+    graph_dir: str | Path,
+    limit: int,
+    config: dict | None = None,
+    agent_type: str | None = None,
+) -> dict:
     graph_dir = Path(graph_dir)
     artifacts = _stage2_artifacts(config or {})
     state_path = graph_dir / Path(*artifacts["dispatch_state"].split("/"))
@@ -197,6 +210,17 @@ def claim_stage2_batches(graph_dir: str | Path, limit: int, config: dict | None 
     writer = _writer(graph_dir, config or {})
     evidence_index = _read_json(graph_dir / "coverage" / "evidence-index.json")
     known_evidence = evidence_id_set(evidence_index)
+
+    # Initialize agent registry if config provided
+    agent_registry = None
+    if config:
+        try:
+            from .config import load_agent_adapters
+            agent_registry = load_agent_adapters(config)
+        except (ImportError, ValueError):
+            # Silently continue if agent registry loading fails
+            pass
+
     for batch in state.get("batches", []):
         if batch.get("status") == "running":
             outputs_valid, output_errors = _batch_outputs_valid(
@@ -216,6 +240,11 @@ def claim_stage2_batches(graph_dir: str | Path, limit: int, config: dict | None 
             break
         if batch.get("status") == "pending":
             batch["status"] = "running"
+
+            # Apply agent selection to batch
+            if agent_registry:
+                _apply_stage2_agent_selection(batch, agent_registry, agent_type)
+
             claimed.append(batch)
             available -= 1
     _refresh_state_counts(state)
@@ -227,6 +256,43 @@ def claim_stage2_batches(graph_dir: str | Path, limit: int, config: dict | None 
         "pending_count": state["pending_count"],
         "completed_count": state["completed_count"],
         "batches": claimed,
+    }
+
+
+def _apply_stage2_agent_selection(
+    batch: dict,
+    agent_registry,
+    forced_agent_type: str | None = None,
+) -> None:
+    """Apply agent selection to a Stage 2 batch.
+
+    Updates batch with selected_agent_info based on agent selector.
+    """
+    # Get agent selector from batch
+    selector = batch.get("agent_selector")
+    if not selector:
+        return
+
+    # Determine which agent to use
+    stage = selector.get("stage", "stage2")
+    lane_id = selector.get("lane_id", "template_document")
+    preferred = selector.get("preferred_agents")
+
+    # Use forced agent_type if provided, otherwise use registry selection
+    if forced_agent_type:
+        selected_type = forced_agent_type
+        adapter = agent_registry.get_adapter(forced_agent_type)
+    else:
+        result = agent_registry.select_best_adapter(stage, lane_id, preferred)
+        if not result:
+            return
+        selected_type, adapter = result
+
+    # Update batch with selected agent info
+    batch["selected_agent_info"] = {
+        "agent_type": selected_type,
+        "agent_role": batch.get("agent_role", ""),
+        "adapter_version": adapter.get_capabilities().get("version", "1.0.0"),
     }
 
 
