@@ -419,11 +419,10 @@ def ingest_stage2(graph_dir: str | Path, config: dict) -> dict:
 def render_stage2(graph_dir: str | Path, config: dict) -> dict:
     """Render Stage 2 documents using agent-driven pipeline.
 
-    New pipeline (agent-driven):
-    1. Query Agent: Generates query parameters for each template
-    2. Query Engine: Executes Graphify-style query on the graph
-    3. Draft Agent: Generates structured draft with source annotations
-    4. Final Agent: Renders clean markdown from draft
+    Pipeline:
+    1. Query: Generate parameters for each template + execute graph query
+    2. Draft: Generate structured draft with source annotations
+    3. Final: Render clean markdown from draft (bypassed in MVP, using fallback)
     """
     graph_dir = Path(graph_dir)
     writer = _writer(graph_dir, config)
@@ -483,38 +482,42 @@ def render_stage2(graph_dir: str | Path, config: dict) -> dict:
             record_errors.append(f"stage2_merge_contract_required:{template_name}")
             continue
 
-        # Generate query parameters (Query Agent would do this, but we approximate)
-        query_params = _generate_query_params_from_record(record, config)
-
-        # Execute query on graph
         try:
+            # Step 1: Generate query parameters + execute query
+            query_params = _generate_query_params_from_record(record, config)
             query_result = query_graph(graph, query_params)
-        except Exception as e:
-            record_errors.append(f"query_failed:{template_name}:{str(e)}")
-            continue
 
-        # In full implementation, Draft and Final agents would run here.
-        # For now, we generate markdown from the query result.
-        # This is a simplified version that bypasses agent dispatch for MVP.
-
-        if overwrite_policy == "backup-and-overwrite":
-            text = _render_markdown_from_query_result(query_result, template_def, record)
-            write_error = _write_formal_stage2_document(
-                graph_dir,
-                _novel_dir(graph_dir),
-                decision,
-                text,
+            # Step 2: Generate draft with source annotations
+            # (In full implementation, this would be dispatched to a Draft Agent)
+            draft_content = _generate_draft_from_query_result(
+                query_result, template_def, record, graph
             )
-            if write_error:
-                record_errors.append(f"render_failed:{template_name}:{write_error.get('error')}")
-                continue
-            relative_target = _display_rendered_path(graph_dir, Path(decision["target_path"]))
-        else:
-            text = _render_markdown_from_query_result(query_result, template_def, record)
-            relative_target = _relative_to_graph(graph_dir, Path(decision["target_path"]))
-            writer.write_text(relative_target, text)
 
-        rendered.append(relative_target)
+            # Step 3: Render final markdown
+            # (In full implementation, this would be dispatched to a Final Agent)
+            # For now, use simplified rendering that skips agent dispatch
+            text = _render_final_markdown_from_draft(draft_content, template_def, record)
+
+            if overwrite_policy == "backup-and-overwrite":
+                write_error = _write_formal_stage2_document(
+                    graph_dir,
+                    _novel_dir(graph_dir),
+                    decision,
+                    text,
+                )
+                if write_error:
+                    record_errors.append(f"render_failed:{template_name}:{write_error.get('error')}")
+                    continue
+                relative_target = _display_rendered_path(graph_dir, Path(decision["target_path"]))
+            else:
+                relative_target = _relative_to_graph(graph_dir, Path(decision["target_path"]))
+                writer.write_text(relative_target, text)
+
+            rendered.append(relative_target)
+
+        except Exception as e:
+            record_errors.append(f"render_failed:{template_name}:{str(e)}")
+            continue
 
     if record_errors:
         return {
@@ -1007,27 +1010,86 @@ def _generate_query_params_from_record(record: dict, config: dict) -> dict:
     }
 
 
-def _render_markdown_from_query_result(query_result: dict, template_def: dict, record: dict) -> str:
-    """Render markdown from query result (simplified version).
+def _generate_draft_from_query_result(
+    query_result: dict,
+    template_def: dict,
+    record: dict,
+    graph: dict,
+) -> list[dict]:
+    """Generate structured draft from query results with source annotations.
 
-    In full implementation, Final Agent would render clean markdown.
-    This simplified version generates basic markdown from query output.
+    In full implementation, this dispatches to a Draft Agent.
+    For MVP, creates draft structure from graph query results directly.
     """
-    template_name = template_def.get("template_name", "Unknown")
-    query_text = query_result.get("text", "")
-    nodes_found = query_result.get("nodes_found", 0)
+    from .stage2_agent_dispatch import prepare_draft_task_packet
 
-    lines = [
-        f"# {template_name}",
-        "",
-        f"> Query found {nodes_found} relevant nodes",
-        "",
-        "## Query Results",
-        "",
-        "```",
-        query_text,
-        "```",
-        "",
+    template_name = template_def.get("template_name", "")
+    graph_dir = Path(record.get("graph_dir", "."))
+
+    # Prepare draft task packet (what would be sent to Draft Agent)
+    task_packet = prepare_draft_task_packet(template_def, query_result, graph_dir)
+
+    # MVP implementation: Extract structure directly from query result
+    # In production, this would call the Draft Agent via agent_tool_fn
+    nodes_found = query_result.get("nodes_found", 0)
+    text_content = query_result.get("text", "")
+    visited_nodes = query_result.get("visited_nodes", [])
+
+    # Create draft case structure matching agent output format
+    draft_cases = [
+        {
+            "case_id": f"{template_name}_case_001",
+            "title": template_name,
+            "fields": {
+                "summary": f"Graph query extracted {nodes_found} nodes",
+                "content": text_content[:500] if text_content else "",  # Truncate for MVP
+            },
+            "source_nodes": visited_nodes,
+            "source_evidence": [],
+            "coverage": "partial" if nodes_found > 0 else "missing",
+            "notes": "Generated from Graphify-style query pipeline",
+        }
     ]
+
+    return draft_cases
+
+
+def _render_final_markdown_from_draft(draft_content: list[dict], template_def: dict, record: dict) -> str:
+    """Render final markdown from draft content.
+
+    In full implementation, this dispatches to a Final Agent.
+    For MVP, generates markdown from draft structure directly.
+    """
+    from .stage2_agent_dispatch import prepare_final_task_packet
+
+    template_name = template_def.get("template_name", "Unknown")
+    graph_dir = Path(record.get("graph_dir", "."))
+
+    # Prepare final task packet (what would be sent to Final Agent)
+    task_packet = prepare_final_task_packet(template_def, draft_content, graph_dir)
+
+    # MVP implementation: Render markdown directly from draft
+    # In production, this would call the Final Agent via agent_tool_fn
+    # and receive clean markdown with dedup/merge/sort applied
+
+    lines = [f"# {template_name}", ""]
+
+    for case in draft_content:
+        case_title = case.get("title", "Case")
+        lines.append(f"## {case_title}")
+        lines.append("")
+
+        fields = case.get("fields", {})
+        for field_name, field_value in fields.items():
+            if field_value:
+                # Clean field names for markdown
+                clean_name = field_name.replace("_", " ").title()
+                lines.append(f"**{clean_name}**: {field_value}")
+                lines.append("")
+
+        coverage = case.get("coverage", "partial")
+        if coverage != "complete":
+            lines.append(f"*Coverage: {coverage}*")
+            lines.append("")
 
     return "\n".join(lines)

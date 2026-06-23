@@ -19,6 +19,7 @@ from .stage2 import (
     render_stage2,
     validate_stage2,
 )
+from .stage_orchestrator import execute_complete_pipeline
 from .templates import (
     TemplateDiscoveryError,
     discover_templates,
@@ -200,6 +201,19 @@ def main(argv=None):
     render_stage2_parser.add_argument("--graph-dir", required=True)
     validate_stage2_parser = sub.add_parser("validate-stage2")
     validate_stage2_parser.add_argument("--graph-dir", required=True)
+    # New unified command: execute-complete (Stage 1 + Stage 2)
+    execute_complete_parser = sub.add_parser("execute-complete")
+    execute_complete_parser.add_argument("--config")
+    execute_complete_parser.add_argument("--local-override")
+    execute_complete_parser.add_argument("--source", required=True)
+    execute_complete_parser.add_argument("--template-dir", required=True)
+    execute_complete_parser.add_argument("--graph-dir")
+    execute_complete_parser.add_argument("--graphify-repo")
+    execute_complete_parser.add_argument("--overwrite-policy", default="draft")
+    execute_complete_parser.add_argument(
+        "--selection",
+        choices=["all", "changed-or-missing"],
+    )
     try:
         args = parser.parse_args(argv)
     except _CliArgumentError as error:
@@ -478,5 +492,41 @@ def main(argv=None):
         result = validate_stage2(graph_dir=Path(args.graph_dir))
         _print_json(result)
         return 0 if result.get("ok") else 2
+    if args.command == "execute-complete":
+        local = _local_override_arg(args)
+        if local and not local.exists():
+            _print_json(_missing_local_override_payload(local))
+            return 2
+        config, error_code = _load_config_for_cli(args, local)
+        if error_code is not None:
+            return error_code
+        source = Path(args.source)
+        if not source.is_dir():
+            _print_json({
+                "ok": False,
+                "error": "source_missing",
+                "path": str(source),
+            })
+            return 2
+        template_dir = Path(args.template_dir)
+        if not template_dir.is_dir():
+            _print_json({
+                "ok": False,
+                "error": "template_dir_missing",
+                "path": str(template_dir),
+            })
+            return 2
+        graph_dir = _graph_dir_for_source(args, config) if not getattr(args, "graph_dir", None) else Path(args.graph_dir)
+        result = execute_complete_pipeline(
+            source=source,
+            template_dir=template_dir,
+            graph_dir=graph_dir,
+            config=config,
+            graphify_repo=getattr(args, "graphify_repo", None),
+            overwrite_policy=args.overwrite_policy,
+            selection=args.selection,
+        )
+        _print_json(result)
+        return 0 if result.get("status") == "completed" else 2
     _print_json({"ok": False, "error": "cli_argument_error", "missing": ["command"]})
     return 2

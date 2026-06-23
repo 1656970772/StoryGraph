@@ -113,10 +113,12 @@ def _segment_chinese(text: str) -> list[str]:
 
 def _is_searchable(term: str) -> bool:
     """Check if term is searchable (not noise)."""
-    # Chinese or non-ASCII: always searchable
-    if all("a" <= ch <= "z" for ch in term):
+    # Check if term is pure ASCII lowercase letters (English word)
+    is_english = all("a" <= ch.lower() <= "z" for ch in term)
+    if is_english:
         # English: only if > 2 chars (filter "is", "in", etc.)
         return len(term) > 2
+    # Chinese or non-ASCII: always searchable
     return True
 
 
@@ -284,7 +286,7 @@ def pick_seed_nodes(scored: list[tuple[float, str]], max_k: int = 3, gap_ratio: 
     seeds = []
 
     for score, nid in scored[:max_k]:
-        if seeds and score < top_score * gap_ratio:
+        if score < top_score * gap_ratio:
             break
         seeds.append(nid)
 
@@ -384,7 +386,7 @@ def traverse_graph_dfs(
 
     while stack:
         node, d = stack.pop()
-        if node in visited or d > depth:
+        if node in visited or d >= depth:
             continue
         visited.add(node)
 
