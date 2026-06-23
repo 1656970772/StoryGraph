@@ -1,6 +1,9 @@
 import json
 from dataclasses import dataclass
+from importlib import import_module
 from pathlib import Path
+
+from .adapters import AgentAdapter, AgentRegistry
 
 
 LEGACY_SEMANTIC_CONFIG_KEYS = {
@@ -147,3 +150,45 @@ def _json_too_deep(value, max_depth: int) -> bool:
         elif isinstance(item, list):
             stack.extend((child, depth + 1) for child in item)
     return False
+
+
+def load_agent_adapters(config: dict) -> AgentRegistry:
+    """Load agent adapters from config.
+
+    Args:
+        config: Configuration dict with agent_platform section
+
+    Returns:
+        AgentRegistry with loaded adapters
+
+    Raises:
+        ValueError: If adapter loading fails
+    """
+    agent_config = config.get("agent_platform", {})
+    adapters: dict[str, AgentAdapter] = {}
+
+    if not agent_config.get("enabled", True):
+        # Return empty registry if agent_platform is disabled
+        return AgentRegistry()
+
+    adapter_configs = agent_config.get("agent_adapters", {})
+    for agent_type, adapter_spec in adapter_configs.items():
+        module_name = adapter_spec.get("module")
+        class_name = adapter_spec.get("class")
+        adapter_config = adapter_spec.get("config", {})
+
+        if not module_name or not class_name:
+            raise ValueError(
+                f"Agent adapter {agent_type} missing module or class name"
+            )
+
+        try:
+            module = import_module(module_name)
+            adapter_class = getattr(module, class_name)
+            adapters[agent_type] = adapter_class(adapter_config)
+        except (ImportError, AttributeError) as exc:
+            raise ValueError(
+                f"Failed to load agent adapter {agent_type} from {module_name}.{class_name}: {exc}"
+            ) from exc
+
+    return AgentRegistry(adapters)

@@ -72,12 +72,14 @@ def build_task_packets(
             evidence_policy = lane.get(
                 "required_evidence_policy", required_evidence_policy
             )
+            # Support both old agent_role (for backward compatibility) and new agent selector
+            agent_role = lane.get("agent_role")
             packet = {
                 "task_packet_id": _task_packet_id(chunk_id, lane_id, attempt),
                 "stage": "stage1",
                 "chunk_id": chunk_id,
                 "lane_id": lane_id,
-                "agent_role": _required_field(lane, "agent_role"),
+                "agent_role": agent_role,  # Backward compatible
                 "source_path": safe_source_path,
                 "source_range": source_range,
                 "chapter_hint": chunk.get("chapter_hint"),
@@ -89,12 +91,23 @@ def build_task_packets(
                 "allowed_output_schema": _required_field(lane, "schema"),
                 "required_evidence_policy": copy.deepcopy(evidence_policy),
                 "attempt": attempt,
+                # New: agent selector for dynamic agent selection
+                "agent_selector": {
+                    "stage": "stage1",
+                    "lane_id": lane_id,
+                    "required_schema": _required_field(lane, "schema"),
+                    "preferred_agents": lane.get("preferred_agents"),
+                },
+                "selected_agent_info": None,  # Will be filled by claim-agent-batches
             }
             if _is_comprehensive_lane(lane):
                 packet["stage1_output_contract"] = _comprehensive_output_contract()
             if extraction_quality_rules is not None:
+                # Lightweight mode: only include path, not content (reduces packet from 14KB to 1.7KB)
+                # Extraction agents must Read the rules file themselves
+                lightweight_rules = {"path": extraction_quality_rules["path"]}
                 packet["extraction_quality_rules"] = _extraction_quality_rules(
-                    extraction_quality_rules
+                    lightweight_rules
                 )
             packet_path = lane.get("task_packet_path")
             if packet_path is None:
@@ -209,15 +222,31 @@ def validate_task_packet_contract(
 
 
 def _extraction_quality_rules(value: dict) -> dict:
+    """
+    Validates and normalizes extraction_quality_rules for task packets.
+
+    Supports two modes:
+    - Legacy (content-embedded): {"path": str, "content": str}
+    - Lightweight (path-only): {"path": str}
+
+    The lightweight mode reduces task packet size from ~14KB to ~1.7KB.
+    Extraction agents must Read the rules file themselves using the path.
+    """
     if not isinstance(value, dict):
         raise ValueError("invalid_extraction_quality_rules")
     path = value.get("path")
-    content = value.get("content")
     if not isinstance(path, str) or not path:
         raise ValueError("invalid_extraction_quality_rules")
-    if not isinstance(content, str) or not content:
-        raise ValueError("invalid_extraction_quality_rules")
-    return {"path": path, "content": content}
+
+    # Content is optional (for lightweight mode)
+    content = value.get("content")
+    if content is not None:
+        if not isinstance(content, str) or not content:
+            raise ValueError("invalid_extraction_quality_rules")
+        return {"path": path, "content": content}
+
+    # Path-only mode (lightweight)
+    return {"path": path}
 
 
 def _is_comprehensive_lane(lane: dict) -> bool:

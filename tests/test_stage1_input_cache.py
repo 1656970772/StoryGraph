@@ -554,9 +554,9 @@ def test_prepare_stage1_rebuilds_source_flow_when_extraction_quality_rules_chang
 
     assert result["cache"]["source_flow"] == "refreshed"
     assert "sentinel" not in rebuilt_packet
+    # Lightweight mode: content not embedded in packet
     assert rebuilt_packet["extraction_quality_rules"] == {
         "path": str(rules_path),
-        "content": "# 抽取规则\n新规则",
     }
 
 

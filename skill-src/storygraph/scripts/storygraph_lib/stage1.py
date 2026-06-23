@@ -8,6 +8,7 @@ from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
+from .adapters import AgentRegistry
 from .agent_ledger import (
     make_agent_run_record,
     make_lane_agent_record,
@@ -34,6 +35,7 @@ from .template_requirements import (
     validate_template_requirements_summary_payload,
 )
 from .templates import discover_templates
+from .config import load_agent_adapters
 
 
 DEFAULT_STAGE1_ARTIFACTS = {
@@ -76,6 +78,8 @@ def prepare_stage1(
         lanes = _configured_lanes(active_config)
         lane_ids = _lane_ids(lanes)
         required_lane_ids = _required_lane_ids(lanes)
+        # Initialize agent registry
+        agent_registry = load_agent_adapters(active_config)
         config_hash = stable_stage_input_hash(ctx, active_config, discovery.templates)
         _remove_graphify_artifacts(ctx.graph_dir)
         manifest_path = write_manifest(
@@ -1859,6 +1863,10 @@ def _build_agent_dispatch_plan(
         "max_parallel": _agent_max_parallel(config),
         "review_policy_mode": _review_policy_mode(config),
         "dispatch_state_path": artifacts["dispatch_state"],
+        "agent_platform": {
+            "available_agents": config.get("agent_platform", {}).get("available_agents", []),
+            "default_agent_type": config.get("agent_platform", {}).get("default_agent_type", "codex"),
+        },
         "phases": phases,
     }
 

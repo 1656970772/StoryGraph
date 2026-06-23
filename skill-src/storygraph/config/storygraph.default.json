@@ -12,6 +12,30 @@
     "default": "full",
     "allowed": ["full", "stage2_incremental", "full_incremental"]
   },
+  "agent_platform": {
+    "enabled": true,
+    "default_agent_type": "codex",
+    "available_agents": ["codex", "claude", "opencode"],
+    "agent_adapters": {
+      "codex": {
+        "module": "storygraph_lib.adapters.codex_adapter",
+        "class": "CodexAdapter",
+        "config": {
+          "fallback_agent": "claude"
+        }
+      },
+      "claude": {
+        "module": "storygraph_lib.adapters.claude_adapter",
+        "class": "ClaudeAdapter",
+        "config": {}
+      },
+      "opencode": {
+        "module": "storygraph_lib.adapters.opencode_adapter",
+        "class": "OpenCodeAdapter",
+        "config": {}
+      }
+    }
+  },
   "template_discovery": {
     "glob": "*模板.md",
     "exclude_files": ["README.md"],

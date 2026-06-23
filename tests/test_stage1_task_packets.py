@@ -64,7 +64,7 @@ def test_prepare_task_packets_writes_one_packet_per_required_lane(tmp_path):
     )
     assert packets[0]["extraction_quality_rules"] == {
         "path": "references/stage1-extraction-agent-quality-rules.md",
-        "content": "# Stage 1 抽取 Agent 附加质量规则\n只抽当前 chunk。",
+        # Lightweight mode: content not included (packet size reduced from 14KB to 1.7KB)
     }
     assert packets[1]["extraction_quality_rules"] == packets[0]["extraction_quality_rules"]
 
@@ -101,9 +101,10 @@ def test_comprehensive_task_packet_declares_full_stage1_output_contract():
         },
     )
 
-    assert packets[0]["extraction_quality_rules"]["content"].startswith(
-        "# Stage 1 抽取 Agent 附加质量规则"
-    )
+    # Lightweight mode: content not embedded in packet
+    assert packets[0]["extraction_quality_rules"] == {
+        "path": "references/stage1-extraction-agent-quality-rules.md"
+    }
     assert packets[0]["stage1_output_contract"] == {
         "required_collections": [
             "extracted_nodes",
