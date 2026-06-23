@@ -158,9 +158,12 @@ def main(argv=None):
     next_batches.add_argument("--phase", required=True)
     next_batches.add_argument("--limit", type=int)
     claim_batches = sub.add_parser("claim-agent-batches")
+    claim_batches.add_argument("--config")
+    claim_batches.add_argument("--local-override")
     claim_batches.add_argument("--graph-dir", required=True)
     claim_batches.add_argument("--phase", required=True)
     claim_batches.add_argument("--limit", type=int, required=True)
+    claim_batches.add_argument("--agent-type", default=None)
     merge = sub.add_parser("merge-stage1")
     merge.add_argument("--config")
     merge.add_argument("--local-override")
@@ -363,10 +366,21 @@ def main(argv=None):
         _print_json(result)
         return 0 if result.get("status") == "pending_agent_batches" else 2
     if args.command == "claim-agent-batches":
+        local = _local_override_arg(args)
+        if local and not local.exists():
+            _print_json(_missing_local_override_payload(local))
+            return 2
+        config = None
+        if getattr(args, "config", None) or local:
+            config, error_code = _load_config_for_cli(args, local)
+            if error_code is not None:
+                return error_code
         result = claim_agent_batches(
             graph_dir=Path(args.graph_dir),
             phase=args.phase,
             limit=args.limit,
+            agent_type=getattr(args, "agent_type", None),
+            config=config,
         )
         _print_json(result)
         return 0 if result.get("status") == "agent_batches_claimed" else 2

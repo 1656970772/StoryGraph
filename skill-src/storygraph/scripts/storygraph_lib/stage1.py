@@ -574,12 +574,30 @@ def next_agent_batches(
 
 
 def claim_agent_batches(
-    *, graph_dir: str | Path, phase: str, limit: int | None = None
+    *,
+    graph_dir: str | Path,
+    phase: str,
+    limit: int | None = None,
+    agent_type: str | None = None,
+    config: dict | None = None,
 ) -> dict:
     graph_root = Path(graph_dir)
     dispatch, error = _read_dispatch_plan(graph_root)
     if error:
         return _failure_response(graph_root, error, _manifest_exists(graph_root))
+
+    # Initialize agent registry if config provided
+    agent_registry = None
+    if config:
+        try:
+            agent_registry = load_agent_adapters(config)
+        except ValueError as exc:
+            return _failure_response(
+                graph_root,
+                {"code": "agent_registry_load_failed", "error": str(exc)},
+                _manifest_exists(graph_root),
+            )
+
     phase_record = _dispatch_phase(dispatch, phase)
     if phase_record is None:
         return _failure_response(
@@ -699,6 +717,14 @@ def claim_agent_batches(
             now=now,
             previous=state_batches.get(batch["batch_id"]),
         )
+        # Apply agent selection to task packets in this batch
+        if agent_registry:
+            _apply_agent_selection_to_batch(
+                graph_root,
+                batch,
+                agent_registry,
+                agent_type,
+            )
     try:
         _write_dispatch_state(graph_root, dispatch, state)
     except OutputWriteError as exc:
@@ -720,6 +746,64 @@ def claim_agent_batches(
         "completed_count": len(completed_ids),
         "batches": selected,
     }
+
+
+def _apply_agent_selection_to_batch(
+    graph_root: Path,
+    batch: dict,
+    agent_registry: AgentRegistry,
+    forced_agent_type: str | None = None,
+) -> None:
+    """Apply agent selection to all task packets in a batch.
+
+    Updates each task packet with selected_agent_info based on agent selector.
+    """
+    task_packet_paths = batch.get("task_packet_paths", [])
+    if not task_packet_paths:
+        return
+
+    for packet_path in task_packet_paths:
+        try:
+            full_path = _artifact_path(graph_root, packet_path)
+            packet, read_error = _read_json_artifact(full_path, missing_code="packet_missing")
+            if read_error or not isinstance(packet, dict):
+                continue
+
+            # Get agent selector from packet
+            selector = packet.get("agent_selector")
+            if not selector:
+                continue
+
+            # Determine which agent to use
+            stage = selector.get("stage", "stage1")
+            lane_id = selector.get("lane_id")
+            preferred = selector.get("preferred_agents")
+
+            # Use forced agent_type if provided, otherwise use registry selection
+            if forced_agent_type:
+                selected_type = forced_agent_type
+                adapter = agent_registry.get_adapter(forced_agent_type)
+            else:
+                result = agent_registry.select_best_adapter(
+                    stage, lane_id, preferred
+                )
+                if not result:
+                    continue
+                selected_type, adapter = result
+
+            # Update packet with selected agent info
+            packet["selected_agent_info"] = {
+                "agent_type": selected_type,
+                "agent_role": batch.get("agent_role", ""),  # Use batch agent_role as fallback
+                "adapter_version": adapter.get_capabilities().get("version", "1.0.0"),
+            }
+
+            # Write updated packet back
+            import json
+            full_path.write_text(json.dumps(packet, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            # Silently continue if any packet update fails
+            continue
 
 
 def merge_stage1(*, graph_dir: str | Path, config: dict) -> dict:
